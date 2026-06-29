@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "request-processor"
+version = "0.2.0"
+description = "Автоматизация расчёта стоимости испытаний кабельной продукции и формирования документов"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "shocknik"}
+]
+dependencies = [
+    "pydantic>=2.7,<3.0",
+    "click>=8.1,<9.0",
+    "openpyxl>=3.1,<4.0",
+    # === Итерация 2 (раскомментируем по мере реализации) ===
+    "pdfplumber>=0.11,<1.0",     # извлечение текста и таблиц из PDF (письма, акты, направления)
+    "python-docx>=1.1,<2.0",     # генерация черновиков КП и других документов
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+request-processor = "request_processor.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"request_processor" = ["*.json", "*.sql", "*.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
