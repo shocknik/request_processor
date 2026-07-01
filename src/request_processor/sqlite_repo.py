@@ -30,7 +30,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from .models import Calculation, CalculationLine, TestItem, TestItemUpdate, TestItemCreate
+from .models import (
+    Calculation,
+    CalculationLine,
+    CableMarkRecord,
+    ClimaticTestSettings,
+    TestItem,
+    TestItemUpdate,
+    TestItemCreate,
+)
+from .cable_mark_parser import parse_cable_mark_record
 
 # Путь по умолчанию (относительно корня проекта)
 DB_PATH_DEFAULT = Path("data/app.db")
@@ -99,16 +108,207 @@ def init_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
         FOREIGN KEY (calculation_id) REFERENCES calculations(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS cable_marks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        full_mark TEXT NOT NULL UNIQUE,
+        brand TEXT NOT NULL,
+        fire_class TEXT,
+        cores_count INTEGER NOT NULL,
+        structural_element_type TEXT,
+        structural_elements_count INTEGER,
+        characteristic_size REAL NOT NULL,
+        size_unit TEXT NOT NULL DEFAULT 'mm2',
+        document TEXT,
+        source TEXT,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_test_items_code ON test_items(code);
     CREATE INDEX IF NOT EXISTS idx_calculations_created_at ON calculations(created_at);
+    CREATE INDEX IF NOT EXISTS idx_cable_marks_brand ON cable_marks(brand);
     """
 
     with get_connection(db_path) as conn:
         conn.executescript(schema)
 
-    # Добавляем демо-тесты, чтобы calculate работал сразу после init-db
+    migrate_db(db_path)
     _seed_demo_tests(db_path)
+    _seed_default_settings(db_path)
     print(f"База данных инициализирована: {db_path}")
+
+
+def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """Добавляет новые таблицы в существующие БД без пересоздания."""
+    with get_connection(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS cable_marks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_mark TEXT NOT NULL UNIQUE,
+                brand TEXT NOT NULL,
+                fire_class TEXT,
+                cores_count INTEGER NOT NULL,
+                structural_element_type TEXT,
+                structural_elements_count INTEGER,
+                characteristic_size REAL NOT NULL,
+                size_unit TEXT NOT NULL DEFAULT 'mm2',
+                document TEXT,
+                source TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cable_marks_brand ON cable_marks(brand);
+            """
+        )
+
+
+CLIMATIC_SETTINGS_KEY = "climatic_test_hours"
+
+
+def _seed_default_settings(db_path: str | Path) -> None:
+    if get_climatic_settings(db_path) is not None:
+        return
+    save_climatic_settings(ClimaticTestSettings(), db_path)
+
+
+def get_climatic_settings(db_path: str | Path = DB_PATH_DEFAULT) -> ClimaticTestSettings | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (CLIMATIC_SETTINGS_KEY,)
+        ).fetchone()
+        if not row:
+            return None
+        return ClimaticTestSettings(**json.loads(row["value"]))
+
+
+def save_climatic_settings(
+    settings: ClimaticTestSettings,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (CLIMATIC_SETTINGS_KEY, settings.model_dump_json()),
+        )
+
+
+def build_default_hours_map(db_path: str | Path = DB_PATH_DEFAULT) -> dict[str, float]:
+    """Собирает часы выдержки из настроек + default_hours из time_based испытаний."""
+    hours: dict[str, float] = {}
+    settings = get_climatic_settings(db_path)
+    if settings:
+        hours.update(
+            {
+                "temp_high": settings.temp_high,
+                "humidity": settings.humidity,
+                "solar_radiation": settings.solar_radiation,
+            }
+        )
+    for item in get_all_test_items(db_path):
+        if item.rule_type != "time_based":
+            continue
+        key = item.rule_params.get("hours_key", item.code)
+        if key not in hours and "default_hours" in item.rule_params:
+            hours[key] = float(item.rule_params["default_hours"])
+    return hours
+
+
+def upsert_cable_mark(
+    record: CableMarkRecord,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Добавляет марку без полных дублей (по full_mark)."""
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO cable_marks (
+                full_mark, brand, fire_class, cores_count,
+                structural_element_type, structural_elements_count,
+                characteristic_size, size_unit, document, source, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(full_mark) DO UPDATE SET
+                brand = excluded.brand,
+                fire_class = excluded.fire_class,
+                cores_count = excluded.cores_count,
+                structural_element_type = excluded.structural_element_type,
+                structural_elements_count = excluded.structural_elements_count,
+                characteristic_size = excluded.characteristic_size,
+                size_unit = excluded.size_unit,
+                document = COALESCE(excluded.document, cable_marks.document),
+                source = COALESCE(excluded.source, cable_marks.source)
+            """,
+            (
+                record.full_mark,
+                record.brand,
+                record.fire_class,
+                record.cores_count,
+                record.structural_element_type,
+                record.structural_elements_count,
+                record.characteristic_size,
+                record.size_unit,
+                record.document,
+                record.source,
+                (record.created_at or datetime.now()).isoformat(),
+            ),
+        )
+        if cursor.lastrowid:
+            return cursor.lastrowid
+        row = conn.execute(
+            "SELECT id FROM cable_marks WHERE full_mark = ?", (record.full_mark,)
+        ).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def save_cable_marks_from_matches(
+    matches: list,
+    *,
+    source: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, int]:
+    """Сохраняет найденные в PDF марки в накопительную таблицу."""
+    stats = {"saved": 0, "errors": 0}
+    for match in matches:
+        try:
+            record = parse_cable_mark_record(
+                match.mark,
+                document=getattr(match, "document", None),
+                context=getattr(match, "context", None),
+            )
+            record.source = source
+            upsert_cable_mark(record, db_path)
+            stats["saved"] += 1
+        except Exception:
+            stats["errors"] += 1
+    return stats
+
+
+def list_cable_marks(
+    search: str | None = None,
+    limit: int = 200,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    query = "SELECT * FROM cable_marks"
+    params: list[Any] = []
+    if search:
+        query += " WHERE full_mark LIKE ? OR brand LIKE ?"
+        params.extend([f"%{search}%", f"%{search}%"])
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 def _seed_demo_tests(db_path: str | Path) -> None:
@@ -180,6 +380,18 @@ def _seed_demo_tests(db_path: str | Path) -> None:
                 "hours_key": "temp_cycling",
                 "default_hours": 2,
                 "cost_per_hour": 0,
+            },
+        ),
+        TestItem(
+            code="solar_radiation",
+            name="Стойкость к воздействию солнечной радиации",
+            base_cost=400,
+            category="Внешние воздействующие факторы",
+            rule_type="time_based",
+            rule_params={
+                "hours_key": "solar_radiation",
+                "default_hours": 24,
+                "cost_per_hour": 400,
             },
         ),
     ]

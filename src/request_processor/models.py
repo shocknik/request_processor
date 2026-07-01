@@ -108,10 +108,64 @@ class TestItemCreate(BaseModel):
 
 
 class TestItemUpdate(BaseModel):
-    """Модель для частичного обновления испытания (обновляются только переданные поля)."""
+    """Модель для частичного обновления испытания 
+    (обновляются только переданные поля)."""
     name: Optional[str] = None
     base_cost: Optional[float] = Field(None, gt=0)
     category: Optional[str] = None
     method: Optional[str] = None
     rule_type: Optional[Literal["fixed", "per_core", "per_group", "time_based"]] = None
     rule_params: Optional[dict[str, Any]] = None
+
+
+"""---Модели извлечения из PDF---"""
+
+
+class CableMarkMatch(BaseModel):
+    """Найденная в документе марка кабеля."""
+
+    mark: str
+    context: str | None = None
+    document: str | None = None
+
+
+class CableMarkRecord(BaseModel):
+    """Запись в накопительной таблице марок кабелей."""
+
+    id: int | None = None
+    full_mark: str = Field(..., description="Полная марка с размерами и надписями")
+    brand: str = Field(..., description="Буквенная часть без пожарного обозначения")
+    fire_class: str | None = Field(None, description="Класс пожарной безопасности")
+    cores_count: int = Field(..., ge=1, description="Количество ТПЖ")
+    structural_element_type: str | None = Field(
+        None, description="Вид структурного элемента: жила, пара, тройка"
+    )
+    structural_elements_count: int | None = Field(
+        None, ge=1, description="Количество структурных элементов"
+    )
+    characteristic_size: float = Field(..., gt=0, description="Сечение или диаметр ТПЖ")
+    size_unit: Literal["mm2", "mm"] = Field("mm2", description="mm2 — сечение, mm — диаметр")
+    document: str | None = Field(None, description="Документ, по которому выпускается")
+    source: str | None = Field(None, description="Источник (путь PDF и т.д.)")
+    created_at: datetime | None = None
+
+
+class ClimaticTestSettings(BaseModel):
+    """Время выдержки по умолчанию для климатических испытаний (часы)."""
+
+    temp_high: float = Field(2.0, gt=0, description="Повышенная температура")
+    humidity: float = Field(48.0, gt=0, description="Повышенная влажность")
+    solar_radiation: float = Field(24.0, gt=0, description="Солнечная радиация")
+
+
+class PdfExtractionResult(BaseModel):
+    """Результат извлечения данных из PDF."""
+
+    source_path: str
+    page_count: int
+    text: str
+    tables: list[list[list[str]]] = Field(default_factory=list)
+    cable_marks: list[CableMarkMatch] = Field(default_factory=list)
+    is_scanned: bool = False
+    ocr_used: bool = False
+    extracted_at: datetime = Field(default_factory=datetime.now)

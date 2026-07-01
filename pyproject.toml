@@ -19,9 +19,15 @@ dependencies = [
     # === Итерация 2 (раскомментируем по мере реализации) ===
     "pdfplumber>=0.11,<1.0",     # извлечение текста и таблиц из PDF (письма, акты, направления)
     "python-docx>=1.1,<2.0",     # генерация черновиков КП и других документов
+    "pymupdf>=1.24,<2.0",        # рендер страниц PDF для OCR (без poppler)
+    "pytesseract>=0.3,<1.0",     # обёртка Tesseract OCR
+    "Pillow>=10.0",              # работа с изображениями страниц
 ]
 
 [project.optional-dependencies]
+ocr = [
+    "easyocr>=1.7,<2.0",         # запасной OCR без установки Tesseract
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
@@ -30,6 +36,7 @@ dev = [
 
 [project.scripts]
 request-processor = "request_processor.cli:cli"
+request-processor-gui = "request_processor.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

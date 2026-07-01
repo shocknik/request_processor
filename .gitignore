@@ -46,3 +46,10 @@ Thumbs.db
 # Логи и временные файлы
 *.log
 *.tmp
+
+# Служебные папки IDE/агента
+agent-tools/
+terminals/
+
+# Установщики (не хранить в git)
+tools/*.exe

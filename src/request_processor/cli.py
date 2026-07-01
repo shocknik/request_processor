@@ -16,21 +16,43 @@ cli.py — точка входа командной строки (Click).
 """
 
 from __future__ import annotations
-
+import re
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import click
+from openpyxl import load_workbook
+
+from request_processor.models import TestItemCreate
+
+from .models import ClimaticTestSettings
 
 from .sqlite_repo import (
     init_db,
     load_price_list_from_xlsx,
     save_calculation,
     get_recent_calculations,
+    list_test_items,
+    add_test_item,
+    bulk_upsert_test_items,
+    build_default_hours_map,
+    get_climatic_settings,
+    save_climatic_settings,
+    save_cable_marks_from_matches,
+    list_cable_marks,
+    migrate_db,
 )
 from .cost_calculator import calculate_cost, print_breakdown
+from .pdf_extractor import extract_from_pdf
 from request_processor import __version__
+
+def _slugify(text: str) -> str:
+    """Делает безопасный код из названия (простая версия)."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_-]+", "_", text)
+    return text[:60]
 
 @click.group()
 @click.version_option(version=__version__)
@@ -46,6 +68,14 @@ def init_db_cmd(db: str) -> None:
     """Инициализирует базу данных и добавляет демо-тесты."""
     init_db(db)
     click.echo(click.style("✓ База данных инициализирована.", fg="green"))
+
+
+@cli.command("migrate-db")
+@click.option("--db", default="data/app.db", show_default=True)
+def migrate_db_cmd(db: str) -> None:
+    """Обновляет схему существующей БД (таблицы марок и настроек)."""
+    migrate_db(db)
+    click.echo(click.style("✓ Миграция выполнена.", fg="green"))
 
 
 @cli.command("load-data")
@@ -86,7 +116,7 @@ def calculate_cmd(
 
     click.echo(f"Расчёт марки: {mark}")
 
-    hours_dict: dict[str, float] = {}
+    hours_dict: dict[str, float] = build_default_hours_map(db)
 
     # Новый удобный способ (--hour temp_low=48 --hour humidity=120)
     if hours_list:
@@ -98,9 +128,8 @@ def calculate_cmd(
                 except ValueError:
                     click.echo(click.style(f"⚠ Не удалось распарсить --hour {item}", fg="yellow"))
     else:
-        # Старый способ через JSON (для обратной совместимости)
         try:
-            hours_dict = json.loads(hours)
+            hours_dict.update(json.loads(hours))
         except json.JSONDecodeError:
             if hours != "{}":
                 click.echo(click.style("⚠ Не удалось распарсить --hours как JSON. Используйте --hour key=value", fg="yellow"))
@@ -123,15 +152,132 @@ def calculate_cmd(
         raise
 
 
+@cli.command("extract-pdf")
+@click.option("--pdf", required=True, type=click.Path(exists=True), help="Путь к PDF-файлу")
+@click.option(
+    "--output",
+    "output_path",
+    default=None,
+    type=click.Path(),
+    help="Путь для JSON-результата (по умолчанию data/extracted/<имя>.json)",
+)
+@click.option("--show-marks", is_flag=True, help="Показать найденные марки кабелей")
+@click.option("--full-text", is_flag=True, help="Вывести полный извлечённый текст")
+@click.option("--no-ocr", is_flag=True, help="Не запускать OCR для сканов")
+@click.option("--ocr-dpi", default=200, show_default=True, type=int, help="DPI для OCR сканов")
+@click.option("--no-save-marks", is_flag=True, help="Не сохранять марки в БД")
+@click.option("--db", default="data/app.db", show_default=True)
+def extract_pdf_cmd(
+    pdf: str,
+    output_path: Optional[str],
+    show_marks: bool,
+    full_text: bool,
+    no_ocr: bool,
+    ocr_dpi: int,
+    no_save_marks: bool,
+    db: str,
+) -> None:
+    """Извлекает текст, таблицы и марки кабелей из PDF."""
+    pdf_file = Path(pdf)
+
+    try:
+        result = extract_from_pdf(pdf_file, use_ocr=not no_ocr, ocr_dpi=ocr_dpi)
+    except Exception as e:
+        click.echo(click.style(f"Ошибка извлечения: {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+
+    click.echo(f"Файл: {pdf_file.name}")
+    click.echo(f"Страниц: {result.page_count}")
+    click.echo(f"Символов текста: {len(result.text)}")
+    click.echo(f"Таблиц: {len(result.tables)}")
+    click.echo(f"Найдено марок: {len(result.cable_marks)}")
+
+    if result.is_scanned:
+        if result.ocr_used:
+            click.echo(click.style("Скан распознан через OCR.", fg="cyan"))
+        elif no_ocr:
+            click.echo(
+                click.style(
+                    "⚠ PDF — скан без текстового слоя. Запусти без --no-ocr для распознавания.",
+                    fg="yellow",
+                )
+            )
+        else:
+            click.echo(
+                click.style(
+                    "⚠ PDF — скан, но OCR не дал текста. Проверь установку Tesseract/easyocr.",
+                    fg="yellow",
+                )
+            )
+
+    if show_marks or result.cable_marks:
+        if result.cable_marks:
+            click.echo(click.style("\nМарки кабелей:", bold=True))
+            for i, match in enumerate(result.cable_marks, 1):
+                click.echo(f"  {i}. {match.mark}")
+                if match.context and show_marks:
+                    click.echo(f"     …{match.context}…")
+        elif show_marks:
+            click.echo("Марки не найдены.")
+
+    if full_text:
+        click.echo(click.style("\n--- Текст ---\n", bold=True))
+        click.echo(result.text if result.text else "(пусто)")
+
+    out = Path(output_path) if output_path else Path("data/extracted") / f"{pdf_file.stem}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        result.model_dump_json(indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    click.echo(click.style(f"\n✓ Результат сохранён: {out}", fg="green"))
+
+    if not no_save_marks and result.cable_marks:
+        migrate_db(db)
+        stats = save_cable_marks_from_matches(
+            result.cable_marks,
+            source=str(pdf_file.resolve()),
+            db_path=db,
+        )
+        click.echo(
+            click.style(
+                f"✓ Марки в БД: сохранено {stats['saved']}, ошибок {stats['errors']}",
+                fg="green",
+            )
+        )
+
+
 @cli.command("process")
 @click.option("--input", required=True, type=click.Path(exists=True), help="Путь к PDF/документу")
-@click.option("--output", default="out", show_default=True)
-@click.option("--save-to-db", is_flag=True, default=True)
-@click.option("--db", default="data/app.db")
-def process_cmd(input: str, output: str, save_to_db: bool, db: str) -> None:
-    """Минимальная обработка заявки из PDF (в разработке)."""
-    click.echo(f"Обработка документа: {input}")
-    click.echo(click.style("⚠ Функционал process в разработке (Итерация 1).", fg="yellow"))
+@click.option("--output", default="data/extracted", show_default=True)
+@click.option("--show-marks", is_flag=True, default=True, help="Показать найденные марки")
+def process_cmd(input: str, output: str, show_marks: bool) -> None:
+    """Обработка заявки из PDF: извлечение марок и сохранение JSON."""
+    pdf_file = Path(input)
+    click.echo(f"Обработка документа: {pdf_file}")
+
+    try:
+        result = extract_from_pdf(pdf_file)
+    except Exception as e:
+        click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+
+    if result.is_scanned and result.ocr_used:
+        click.echo(click.style("Скан распознан через OCR.", fg="cyan"))
+
+    if show_marks and result.cable_marks:
+        click.echo(click.style("\nНайденные марки:", bold=True))
+        for i, match in enumerate(result.cable_marks, 1):
+            click.echo(f"  {i}. {match.mark}")
+
+    out_dir = Path(output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{pdf_file.stem}.json"
+    out_file.write_text(
+        result.model_dump_json(indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    click.echo(click.style(f"✓ Сохранено: {out_file}", fg="green"))
 
 
 @cli.command("history")
@@ -150,6 +296,192 @@ def history_cmd(limit: int, db: str) -> None:
             f"#{r['id']:>3} | {r['created_at'][:16]} | {r['mark'][:50]:<50} | "
             f"{r['total_cost_with_vat']:>10.2f} ₽ | {r['source']}"
         )
+        
+        
+'''---Управление справочником испытаний (Итерация 2)---'''
+
+@cli.command("list-tests")
+@click.option("--category", help="Фильтр по категории")
+@click.option("--search", help="Поиск по названию или коду")
+@click.option("--limit", default=100, show_default=True)
+def list_tests(category: Optional[str], search: Optional[str], limit: int):
+    """Выводит список испытаний из справочника."""
+    items = list_test_items(category=category, search=search, limit=limit)
+
+    if not items:
+        click.echo("Испытания не найдены.")
+        return
+
+    click.echo(f"{'Код':<28} {'Наименование':<55} {'Стоимость':>10}  Правило")
+    click.echo("-" * 110)
+
+    for item in items:
+        click.echo(
+            f"{item['code']:<28} {item['name'][:53]:<55} "
+            f"{item['base_cost']:>10.0f}  {item['rule_type']}"
+        )
+
+
+@cli.command("add-test-item")
+@click.option("--code", required=True, help="Уникальный код (slug)")
+@click.option("--name", required=True, help="Полное наименование")
+@click.option("--base-cost", "base_cost", required=True, type=float, help="Стоимость без НДС")
+@click.option("--category", required=True, help="Категория")
+@click.option("--method", default=None)
+@click.option(
+    "--rule-type",
+    "rule_type",
+    type=click.Choice(["fixed", "per_core", "per_group", "time_based"]),
+    default="fixed",
+    show_default=True,
+)
+@click.option("--hours-key", default=None, help="Ключ часов для time_based")
+@click.option("--default-hours", default=None, type=float, help="Часы выдержки по умолчанию")
+@click.option("--cost-per-hour", default=None, type=float, help="Стоимость за час выдержки")
+def add_test_item_cmd(
+    code, name, base_cost, category, method, rule_type,
+    hours_key, default_hours, cost_per_hour,
+):
+    """Добавляет одно испытание вручную."""
+    rule_params: dict[str, Any] = {}
+    if rule_type == "time_based":
+        rule_params = {
+            "hours_key": hours_key or code,
+            "default_hours": default_hours or 2.0,
+            "cost_per_hour": cost_per_hour or 0.0,
+        }
+    item = TestItemCreate(
+        code=code,
+        name=name,
+        base_cost=base_cost,
+        category=category,
+        method=method,
+        rule_type=rule_type,
+        rule_params=rule_params,
+    )
+    new_id = add_test_item(item)
+    click.echo(f"✓ Добавлено испытание (id={new_id}) | {code}")
+
+
+@cli.command("list-cable-marks")
+@click.option("--search", default=None, help="Поиск по марке")
+@click.option("--limit", default=50, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_cable_marks_cmd(search: Optional[str], limit: int, db: str) -> None:
+    """Список накопленных марок кабелей из БД."""
+    rows = list_cable_marks(search=search, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Марки не найдены.")
+        return
+    click.echo(
+        f"{'Полная марка':<45} {'Марка':<12} {'ТПЖ':>4} {'Размер':>10}  Документ"
+    )
+    click.echo("-" * 110)
+    for row in rows:
+        unit = "мм²" if row.get("size_unit") == "mm2" else "мм"
+        click.echo(
+            f"{row['full_mark'][:44]:<45} {row['brand'][:11]:<12} "
+            f"{row['cores_count']:>4} "
+            f"{row['characteristic_size']:>8}{unit:<2}  "
+            f"{(row.get('document') or '')[:30]}"
+        )
+
+
+@cli.command("set-climatic-hours")
+@click.option("--temp-high", default=None, type=float, help="Повышенная температура, ч")
+@click.option("--humidity", default=None, type=float, help="Повышенная влажность, ч")
+@click.option("--solar-radiation", default=None, type=float, help="Солнечная радиация, ч")
+@click.option("--db", default="data/app.db", show_default=True)
+def set_climatic_hours_cmd(
+    temp_high: Optional[float],
+    humidity: Optional[float],
+    solar_radiation: Optional[float],
+    db: str,
+) -> None:
+    """Настройка времени выдержки климатических испытаний."""
+    migrate_db(db)
+    current = get_climatic_settings(db) or ClimaticTestSettings()
+    settings = ClimaticTestSettings(
+        temp_high=temp_high if temp_high is not None else current.temp_high,
+        humidity=humidity if humidity is not None else current.humidity,
+        solar_radiation=solar_radiation if solar_radiation is not None else current.solar_radiation,
+    )
+    save_climatic_settings(settings, db)
+    click.echo(
+        f"✓ Выдержка: temp_high={settings.temp_high} ч, "
+        f"humidity={settings.humidity} ч, solar_radiation={settings.solar_radiation} ч"
+    )
+
+
+@cli.command("import-tests")
+@click.option("--file", "file_path", required=True, type=click.Path(exists=True), help="Путь к Excel-файлу")
+@click.option("--dry-run", is_flag=True, help="Только проверить файл, ничего не записывать")
+@click.option("--sheet", default=None, help="Название листа (по умолчанию первый)")
+def import_tests(file_path: str, dry_run: bool, sheet: Optional[str]):
+    """Пакетная загрузка / обновление испытаний из Excel."""
+    wb = load_workbook(file_path, data_only=True)
+    ws = wb[sheet] if sheet else wb.active
+
+    items_to_import: list[TestItemCreate] = []
+    errors: list[str] = []
+
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if not row or not row[1]:
+            continue
+
+        try:
+            name = str(row[1]).strip()
+            if not name:
+                continue
+
+            # === Генерация code, если он не указан ===
+            raw_code = str(row[0]).strip() if row[0] else ""
+            code = raw_code if raw_code else _slugify(name)
+
+            item = TestItemCreate(
+                code=code,
+                name=name,
+                base_cost=float(row[2]) if row[2] is not None else 0.0,
+                category=str(row[3]).strip() if row[3] else "Без категории",
+                method=str(row[4]).strip() if row[4] else None,
+                rule_type=str(row[5]).strip() if row[5] else "fixed",
+                rule_params=json.loads(str(row[6])) if row[6] else {},
+            )
+            items_to_import.append(item)
+
+        except Exception as e:
+            errors.append(f"Строка {row_idx}: {e}")
+
+    # === Вывод результатов ===
+    click.echo(f"Найдено записей для импорта: {len(items_to_import)}")
+    if errors:
+        click.echo(f"Ошибок при чтении: {len(errors)}")
+        for err in errors[:10]:  # показываем первые 10 ошибок
+            click.echo(f"  - {err}")
+        if len(errors) > 10:
+            click.echo(f"  ... и ещё {len(errors) - 10} ошибок")
+
+    if dry_run:
+        click.echo("\nРежим --dry-run: изменения в базу не записаны.")
+        return
+
+    if not items_to_import:
+        click.echo("Нет данных для загрузки.")
+        return
+
+    # Загружаем в БД
+    stats = bulk_upsert_test_items(items_to_import)
+    click.echo(f"\n✓ Успешно обработано: {stats['processed']}")
+    if stats.get("errors", 0) > 0:
+        click.echo(f"⚠ Ошибок при записи: {stats['errors']}")
+
+
+@cli.command("gui")
+def gui_cmd() -> None:
+    """Запускает графический интерфейс (tkinter)."""
+    from .gui import main
+
+    main()
 
 
 if __name__ == "__main__":

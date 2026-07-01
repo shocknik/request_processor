@@ -131,27 +131,40 @@ def calculate_cost(
     )
 
 
+def format_breakdown(calc: Calculation) -> str:
+    """Форматирует расчёт в текст (CLI, GUI)."""
+    lines_out = [
+        "РАСЧЁТ СТОИМОСТИ ИСПЫТАНИЙ",
+        f"Марка: {calc.mark}",
+        (
+            f"Жилы: {calc.parsed_mark.cores}, Групп: {calc.parsed_mark.groups}, "
+            f"Сечение: {calc.parsed_mark.size} мм²"
+        ),
+        "-" * 72,
+    ]
+
+    if not calc.lines:
+        lines_out.append("Нет строк расчёта.")
+    else:
+        for i, line in enumerate(calc.lines, 1):
+            note_str = f"  ({line.note})" if line.note else ""
+            lines_out.append(
+                f"{i:2}. {line.test_name[:52]:<52} {line.final_cost:>10.2f} ₽{note_str}"
+            )
+        lines_out.extend(
+            [
+                "-" * 72,
+                f"ИТОГО без НДС: {calc.total_cost_without_vat:>10.2f} ₽",
+                f"НДС {int(calc.vat_rate * 100)}%:      "
+                f"{(calc.total_cost_with_vat - calc.total_cost_without_vat):>10.2f} ₽",
+                f"ИТОГО с НДС:   {calc.total_cost_with_vat:>10.2f} ₽",
+            ]
+        )
+    return "\n".join(lines_out)
+
+
 def print_breakdown(calc: Calculation) -> None:
     """Красивый вывод расчёта в терминал."""
     print("\n" + "=" * 72)
-    print("РАСЧЁТ СТОИМОСТИ ИСПЫТАНИЙ")
-    print(f"Марка: {calc.mark}")
-    print(
-        f"Жилы: {calc.parsed_mark.cores}, Групп: {calc.parsed_mark.groups}, "
-        f"Сечение: {calc.parsed_mark.size} мм²"
-    )
-    print("-" * 72)
-
-    if not calc.lines:
-        print("Нет строк расчёта.")
-        return
-
-    for i, line in enumerate(calc.lines, 1):
-        note_str = f"  ({line.note})" if line.note else ""
-        print(f"{i:2}. {line.test_name[:52]:<52} {line.final_cost:>10.2f} ₽{note_str}")
-
-    print("-" * 72)
-    print(f"ИТОГО без НДС: {calc.total_cost_without_vat:>10.2f} ₽")
-    print(f"НДС {int(calc.vat_rate * 100)}%:      {(calc.total_cost_with_vat - calc.total_cost_without_vat):>10.2f} ₽")
-    print(f"ИТОГО с НДС:   {calc.total_cost_with_vat:>10.2f} ₽")
+    print(format_breakdown(calc))
     print("=" * 72 + "\n")
