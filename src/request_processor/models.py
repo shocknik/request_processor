@@ -150,10 +150,50 @@ class CableMarkRecord(BaseModel):
     created_at: datetime | None = None
 
 
+class KPMarkLine(BaseModel):
+    """Строка КП — одна марка с итогами расчёта."""
+
+    mark: str
+    total_without_vat: float = Field(..., ge=0)
+    vat_amount: float = Field(..., ge=0)
+    total_with_vat: float = Field(..., ge=0)
+    calculation_id: int | None = None
+
+
+class CommercialProposal(BaseModel):
+    """Коммерческое предложение по нескольким маркам."""
+
+    customer: str = Field("", description="Заказчик / изготовитель")
+    subject: str = Field(
+        "Проведение периодических испытаний",
+        description="Предмет КП",
+    )
+    note: str | None = Field(None, description="Дополнительный текст из письма")
+    marks: list[KPMarkLine] = Field(default_factory=list)
+    vat_rate: float = Field(0.22, ge=0, le=1)
+    validity_days: int = Field(30, ge=1)
+    created_at: datetime = Field(default_factory=datetime.now)
+    output_path: str | None = None
+
+    @property
+    def total_without_vat(self) -> float:
+        return round(sum(m.total_without_vat for m in self.marks), 2)
+
+    @property
+    def total_vat(self) -> float:
+        return round(sum(m.vat_amount for m in self.marks), 2)
+
+    @property
+    def total_with_vat(self) -> float:
+        return round(sum(m.total_with_vat for m in self.marks), 2)
+
+
 class ClimaticTestSettings(BaseModel):
     """Время выдержки по умолчанию для климатических испытаний (часы)."""
 
+    temp_low: float = Field(2.0, gt=0, description="Пониженная температура")
     temp_high: float = Field(2.0, gt=0, description="Повышенная температура")
+    temp_cycling: float = Field(2.0, gt=0, description="Изменение температур")
     humidity: float = Field(48.0, gt=0, description="Повышенная влажность")
     solar_radiation: float = Field(24.0, gt=0, description="Солнечная радиация")
 

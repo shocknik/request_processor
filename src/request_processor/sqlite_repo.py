@@ -40,9 +40,23 @@ from .models import (
     TestItemCreate,
 )
 from .cable_mark_parser import parse_cable_mark_record
+from .climatic_tests import CLIMATIC_TESTS, climatic_settings_fields
+from .test_rules import DEFAULT_PRICE_XLSX, infer_rule_type
 
-# Путь по умолчанию (относительно корня проекта)
-DB_PATH_DEFAULT = Path("data/app.db")
+# Корень проекта (не зависит от текущей рабочей директории при запуске GUI/CLI)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DB_PATH_DEFAULT = PROJECT_ROOT / "data" / "app.db"
+GENERATED_DIR_DEFAULT = PROJECT_ROOT / "data" / "generated"
+
+
+def resolve_db_path(db_path: str | Path = DB_PATH_DEFAULT) -> Path:
+    """Абсолютный путь к БД; относительные пути — от cwd, кроме стандартного data/app.db."""
+    p = Path(db_path)
+    if p.is_absolute():
+        return p
+    if p.as_posix() == "data/app.db":
+        return (PROJECT_ROOT / p).resolve()
+    return (Path.cwd() / p).resolve()
 
 
 @contextmanager
@@ -55,6 +69,8 @@ def get_connection(db_path: str | Path = DB_PATH_DEFAULT):
     - Включает foreign_keys (для целостности данных)
     - row_factory = sqlite3.Row → можно обращаться как к dict
     """
+    db_path = resolve_db_path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), detect_types=sqlite3.PARSE_DECLTYPES)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -168,6 +184,53 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
             CREATE INDEX IF NOT EXISTS idx_cable_marks_brand ON cable_marks(brand);
             """
         )
+    sync_climatic_tests(db_path)
+    sync_test_rule_types(db_path)
+
+
+def sync_test_rule_types(db_path: str | Path = DB_PATH_DEFAULT) -> int:
+    """Пересчитывает rule_type по названию/категории (per_core, per_group, time_based)."""
+    updated = 0
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, code, name, category FROM test_items"
+        ).fetchall()
+        for row in rows:
+            rule_type, rule_params = infer_rule_type(
+                row["name"], row["category"], row["code"]
+            )
+            conn.execute(
+                """
+                UPDATE test_items
+                SET rule_type = ?, rule_params = ?
+                WHERE id = ?
+                """,
+                (
+                    rule_type,
+                    json.dumps(rule_params, ensure_ascii=False),
+                    row["id"],
+                ),
+            )
+            updated += 1
+    return updated
+
+
+def sync_climatic_tests(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """Приводит климатические испытания к time_based с актуальными названиями."""
+    for spec in CLIMATIC_TESTS:
+        item = TestItem(
+            code=spec["code"],
+            name=spec["name"],
+            base_cost=spec["base_cost"],
+            category="Внешние воздействующие факторы",
+            rule_type="time_based",
+            rule_params={
+                "hours_key": spec["hours_key"],
+                "default_hours": spec["default_hours"],
+                "cost_per_hour": spec["cost_per_hour"],
+            },
+        )
+        insert_test_item(item, db_path)
 
 
 CLIMATIC_SETTINGS_KEY = "climatic_test_hours"
@@ -208,13 +271,8 @@ def build_default_hours_map(db_path: str | Path = DB_PATH_DEFAULT) -> dict[str, 
     hours: dict[str, float] = {}
     settings = get_climatic_settings(db_path)
     if settings:
-        hours.update(
-            {
-                "temp_high": settings.temp_high,
-                "humidity": settings.humidity,
-                "solar_radiation": settings.solar_radiation,
-            }
-        )
+        for key, _ in climatic_settings_fields():
+            hours[key] = float(getattr(settings, key))
     for item in get_all_test_items(db_path):
         if item.rule_type != "time_based":
             continue
@@ -326,6 +384,7 @@ def _seed_demo_tests(db_path: str | Path) -> None:
             name="Электрическое сопротивление изоляции ТПЖ",
             base_cost=600,
             category="Электрические параметры НЧ",
+            rule_type="per_core",
         ),
         TestItem(
             code="voltage_test",
@@ -333,73 +392,13 @@ def _seed_demo_tests(db_path: str | Path) -> None:
             base_cost=400,
             category="Электрические параметры НЧ",
         ),
-        # Климатические испытания (по твоей таблице)
-        TestItem(
-            code="temp_low",
-            name="Выдержка при пониженной температуре",
-            base_cost=350,
-            category="Внешние воздействующие факторы",
-            rule_type="time_based",
-            rule_params={
-                "hours_key": "temp_low",
-                "default_hours": 2,
-                "cost_per_hour": 350,        # пока 0, позже можно заполнить
-            },
-        ),
-        TestItem(
-            code="temp_high",
-            name="Выдержка при повышенной температуре",
-            base_cost=250,
-            category="Внешние воздействующие факторы",
-            rule_type="time_based",
-            rule_params={
-                "hours_key": "temp_high",
-                "default_hours": 2,
-                "cost_per_hour": 250,
-            },
-        ),
-        TestItem(
-            code="humidity",
-            name="Стойкость к повышенной влажности",
-            base_cost=300,
-            category="Внешние воздействующие факторы",
-            rule_type="time_based",
-            rule_params={
-                "hours_key": "humidity",
-                "default_hours": 48,
-                "cost_per_hour": 300,
-            },
-        ),
-        TestItem(
-            code="temp_cycling",
-            name="Смена температур",
-            base_cost=350,
-            category="Внешние воздействующие факторы",
-            rule_type="time_based",
-            rule_params={
-                "hours_key": "temp_cycling",
-                "default_hours": 2,
-                "cost_per_hour": 0,
-            },
-        ),
-        TestItem(
-            code="solar_radiation",
-            name="Стойкость к воздействию солнечной радиации",
-            base_cost=400,
-            category="Внешние воздействующие факторы",
-            rule_type="time_based",
-            rule_params={
-                "hours_key": "solar_radiation",
-                "default_hours": 24,
-                "cost_per_hour": 400,
-            },
-        ),
     ]
 
     existing = get_all_test_items(db_path)
     if len(existing) < 5:
         for item in demo:
             insert_test_item(item, db_path)
+    sync_climatic_tests(db_path)
 
 
 def insert_test_item(item: TestItem, db_path: str | Path = DB_PATH_DEFAULT) -> int:
@@ -509,6 +508,49 @@ def get_recent_calculations(limit: int = 10, db_path: str | Path = DB_PATH_DEFAU
         return [dict(row) for row in rows]
 
 
+def get_calculations_for_kp(
+    calculation_ids: list[int] | None = None,
+    limit: int = 100,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    """Возвращает расчёты для формирования КП (с итогами по марке)."""
+    with get_connection(db_path) as conn:
+        if calculation_ids:
+            placeholders = ",".join("?" * len(calculation_ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, mark, total_cost_without_vat, total_cost_with_vat,
+                       vat_rate, source, created_at, output_path
+                FROM calculations
+                WHERE id IN ({placeholders})
+                ORDER BY id
+                """,
+                calculation_ids,
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = conn.execute(
+            """
+            SELECT id, mark, total_cost_without_vat, total_cost_with_vat,
+                   vat_rate, source, created_at, output_path
+            FROM calculations ORDER BY created_at DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def update_calculation_output_path(
+    calculation_id: int,
+    output_path: str,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE calculations SET output_path = ? WHERE id = ?",
+            (output_path, calculation_id),
+        )
+
+
 
 '''---Загрузка прайс-листа из Excel (минимальная, версия)---'''
 
@@ -541,7 +583,7 @@ def load_price_list_from_xlsx(
     - F (Категория)
     - G (Метод)
     
-    Все тесты загружаются с rule_type='fixed' (позже доработаем сложные правила).
+    rule_type определяется автоматически (per_core, per_group, time_based, fixed).
     """
     if load_workbook is None:
         raise RuntimeError("openpyxl не установлен")
@@ -567,6 +609,7 @@ def load_price_list_from_xlsx(
             method = str(row[6]).strip() if row[6] else None
 
             code = _slugify(name) or f"test_{idx}"
+            rule_type, rule_params = infer_rule_type(name, category, code)
 
             item = TestItem(
                 code=code,
@@ -574,8 +617,8 @@ def load_price_list_from_xlsx(
                 base_cost=base_cost,
                 category=category,
                 method=method,
-                rule_type="fixed",
-                rule_params={},
+                rule_type=rule_type,  # type: ignore[arg-type]
+                rule_params=rule_params,
             )
             insert_test_item(item, db_path)
             count += 1

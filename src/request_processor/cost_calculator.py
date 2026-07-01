@@ -53,7 +53,7 @@ def _apply_rule(
 
     if rule == "per_group":
         mult = float(parsed_mark.groups)
-        return round(item.base_cost * mult, 2), mult, f"× {parsed_mark.groups} групп"
+        return round(item.base_cost * mult, 2), mult, f"× {parsed_mark.groups} пар"
 
     # По умолчанию — фиксированная стоимость
     return item.base_cost, 1.0, None

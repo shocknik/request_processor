@@ -44,6 +44,7 @@ from .sqlite_repo import (
     migrate_db,
 )
 from .cost_calculator import calculate_cost, print_breakdown
+from .kp_generator import generate_kp_from_db
 from .pdf_extractor import extract_from_pdf
 from request_processor import __version__
 
@@ -388,12 +389,16 @@ def list_cable_marks_cmd(search: Optional[str], limit: int, db: str) -> None:
 
 
 @cli.command("set-climatic-hours")
+@click.option("--temp-low", default=None, type=float, help="Пониженная температура, ч")
 @click.option("--temp-high", default=None, type=float, help="Повышенная температура, ч")
+@click.option("--temp-cycling", default=None, type=float, help="Изменение температур, ч")
 @click.option("--humidity", default=None, type=float, help="Повышенная влажность, ч")
 @click.option("--solar-radiation", default=None, type=float, help="Солнечная радиация, ч")
 @click.option("--db", default="data/app.db", show_default=True)
 def set_climatic_hours_cmd(
+    temp_low: Optional[float],
     temp_high: Optional[float],
+    temp_cycling: Optional[float],
     humidity: Optional[float],
     solar_radiation: Optional[float],
     db: str,
@@ -402,14 +407,17 @@ def set_climatic_hours_cmd(
     migrate_db(db)
     current = get_climatic_settings(db) or ClimaticTestSettings()
     settings = ClimaticTestSettings(
+        temp_low=temp_low if temp_low is not None else current.temp_low,
         temp_high=temp_high if temp_high is not None else current.temp_high,
+        temp_cycling=temp_cycling if temp_cycling is not None else current.temp_cycling,
         humidity=humidity if humidity is not None else current.humidity,
         solar_radiation=solar_radiation if solar_radiation is not None else current.solar_radiation,
     )
     save_climatic_settings(settings, db)
     click.echo(
-        f"✓ Выдержка: temp_high={settings.temp_high} ч, "
-        f"humidity={settings.humidity} ч, solar_radiation={settings.solar_radiation} ч"
+        f"✓ Выдержка: temp_low={settings.temp_low}, temp_high={settings.temp_high}, "
+        f"temp_cycling={settings.temp_cycling}, humidity={settings.humidity}, "
+        f"solar_radiation={settings.solar_radiation} ч"
     )
 
 
@@ -474,6 +482,60 @@ def import_tests(file_path: str, dry_run: bool, sheet: Optional[str]):
     click.echo(f"\n✓ Успешно обработано: {stats['processed']}")
     if stats.get("errors", 0) > 0:
         click.echo(f"⚠ Ошибок при записи: {stats['errors']}")
+
+
+@cli.command("generate-kp")
+@click.option("--customer", required=True, help="Заказчик / изготовитель")
+@click.option(
+    "--subject",
+    default="Проведение периодических испытаний",
+    show_default=True,
+    help="Предмет коммерческого предложения",
+)
+@click.option("--calc-ids", required=True, help="ID расчётов через запятую (например: 1,2,3,4)")
+@click.option("--note", default=None, help="Дополнительный текст")
+@click.option(
+    "--output",
+    "output_path",
+    default=None,
+    type=click.Path(),
+    help="Путь к .docx (по умолчанию data/generated/КП_...)",
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def generate_kp_cmd(
+    customer: str,
+    subject: str,
+    calc_ids: str,
+    note: Optional[str],
+    output_path: Optional[str],
+    db: str,
+) -> None:
+    """Формирует коммерческое предложение (Word) по выбранным расчётам."""
+    ids = [int(x.strip()) for x in calc_ids.split(",") if x.strip()]
+    if not ids:
+        raise click.ClickException("Укажите хотя бы один ID расчёта в --calc-ids")
+
+    if output_path:
+        out = Path(output_path)
+    else:
+        safe = re.sub(r'[<>:"/\\|?*]', "", customer)[:40] or "заказчик"
+        from .sqlite_repo import GENERATED_DIR_DEFAULT
+
+        out = GENERATED_DIR_DEFAULT / f"КП_{safe}.docx"
+
+    try:
+        path = generate_kp_from_db(
+            customer=customer,
+            subject=subject,
+            calculation_ids=ids,
+            output_path=out,
+            db_path=db,
+            note=note,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(click.style(f"✓ КП сохранено: {path}", fg="green"))
 
 
 @cli.command("gui")
