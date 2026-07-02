@@ -50,24 +50,30 @@ from .sqlite_repo import (
     create_order_from_kp,
     list_orders,
     get_order_details,
+    list_test_applications,
 )
 
 # Цветовая схема (современный flat UI)
 COLORS = {
-    "bg": "#f4f6fb",
+    "bg": "#eef1f8",
     "card": "#ffffff",
-    "accent": "#5b5fc7",
-    "accent_hover": "#4f46e5",
-    "text": "#1a1d26",
-    "muted": "#6b7280",
-    "border": "#e5e7eb",
-    "success": "#10b981",
-    "header_bg": "#1e2235",
-    "header_text": "#f9fafb",
-    "header_muted": "#a5b4c8",
+    "accent": "#4f46e5",
+    "accent_hover": "#4338ca",
+    "accent_light": "#e0e7ff",
+    "text": "#111827",
+    "muted": "#64748b",
+    "border": "#d8dee9",
+    "success": "#059669",
+    "header_bg": "#1a1f36",
+    "header_text": "#f8fafc",
+    "header_muted": "#94a3b8",
+    "header_accent": "#6366f1",
     "climatic_bg": "#eef2ff",
-    "row_alt": "#f9fafb",
-    "parse_bg": "#eef2ff",
+    "row_alt": "#f8fafc",
+    "parse_bg": "#f5f7ff",
+    "status_bg": "#e8ecf4",
+    "tab_inactive": "#dce3f0",
+    "shadow": "#c5cee0",
 }
 
 ORG_TYPE_LABELS: dict[str, str] = {
@@ -137,6 +143,27 @@ class RequestProcessorApp(tk.Tk):
             highlightthickness=0,
         )
 
+    def _secondary_button(self, parent: tk.Misc, text: str, command) -> tk.Button:
+        """Вторичная кнопка — контур, без заливки."""
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=COLORS["card"],
+            fg=COLORS["text"],
+            activebackground=COLORS["accent_light"],
+            activeforeground=COLORS["accent"],
+            font=("Segoe UI", 10),
+            relief="flat",
+            padx=14,
+            pady=8,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["accent"],
+        )
+
     def _ensure_db(self) -> None:
         if not self.db_path.exists():
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +191,19 @@ class RequestProcessorApp(tk.Tk):
         style.configure("Title.TLabel", font=("Segoe UI Semibold", 17, "bold"), foreground=COLORS["header_text"])
         style.configure("Subtitle.TLabel", font=("Segoe UI", 10), foreground=COLORS["header_muted"])
         style.configure("Header.TFrame", background=COLORS["header_bg"])
-        style.configure("TButton", font=("Segoe UI", 10), padding=(12, 6))
+        style.configure(
+            "TButton",
+            font=("Segoe UI", 10),
+            padding=(12, 7),
+            background=COLORS["card"],
+            borderwidth=1,
+            relief="flat",
+        )
+        style.map(
+            "TButton",
+            background=[("active", COLORS["accent_light"]), ("pressed", COLORS["border"])],
+            foreground=[("active", COLORS["accent"])],
+        )
         style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 8))
         style.configure("TLabelframe", background=COLORS["bg"])
         style.configure("TLabelframe.Label", background=COLORS["bg"], font=("Segoe UI", 10, "bold"))
@@ -173,52 +212,89 @@ class RequestProcessorApp(tk.Tk):
         style.configure("Treeview", font=("Segoe UI", 9), rowheight=30, background=COLORS["card"])
         style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background="#e2e8f0")
         style.map("Treeview", background=[("selected", COLORS["accent"])], foreground=[("selected", "white")])
-        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
-        style.configure("TNotebook.Tab", font=("Segoe UI", 10), padding=(16, 10))
+        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0, tabmargins=(4, 4, 4, 0))
+        style.configure(
+            "TNotebook.Tab",
+            font=("Segoe UI", 10),
+            padding=(14, 9),
+            background=COLORS["tab_inactive"],
+            borderwidth=0,
+        )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", COLORS["card"]), ("!selected", COLORS["bg"])],
+            background=[("selected", COLORS["card"]), ("!selected", COLORS["tab_inactive"])],
             foreground=[("selected", COLORS["accent"]), ("!selected", COLORS["muted"])],
+            font=[("selected", ("Segoe UI", 10, "bold")), ("!selected", ("Segoe UI", 10))],
+            expand=[("selected", [1, 1, 1, 0])],
         )
+        style.configure("Status.TLabel", background=COLORS["status_bg"], font=("Segoe UI", 9))
         style.configure("TEntry", font=("Segoe UI", 10))
         style.configure("TSpinbox", font=("Segoe UI", 10))
 
     def _build_ui(self) -> None:
-        header = tk.Frame(self, bg=COLORS["header_bg"], padx=20, pady=14)
+        header_wrap = tk.Frame(self, bg=COLORS["header_bg"])
+        header_wrap.pack(fill="x")
+
+        header = tk.Frame(header_wrap, bg=COLORS["header_bg"], padx=22, pady=16)
         header.pack(fill="x")
         tk.Label(
             header,
             text="Испытания кабельной продукции",
             bg=COLORS["header_bg"],
             fg=COLORS["header_text"],
-            font=("Segoe UI Semibold", 18, "bold"),
+            font=("Segoe UI Semibold", 19, "bold"),
         ).pack(side="left")
+        tk.Label(
+            header,
+            text="1 → 2 → 3 → 4",
+            bg=COLORS["header_accent"],
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            padx=10,
+            pady=3,
+        ).pack(side="left", padx=(14, 0))
         tk.Label(
             header,
             text="заявка  →  расчёт  →  КП  →  заказ",
             bg=COLORS["header_bg"],
             fg=COLORS["header_muted"],
             font=("Segoe UI", 10),
-        ).pack(side="left", padx=(16, 0))
+        ).pack(side="left", padx=(12, 0))
 
-        parse_bar = tk.Frame(self, bg=COLORS["parse_bg"], padx=20, pady=8)
+        tk.Frame(header_wrap, bg=COLORS["header_accent"], height=3).pack(fill="x")
+
+        parse_bar = tk.Frame(self, bg=COLORS["parse_bg"], padx=20, pady=10)
         parse_bar.pack(fill="x")
+        tk.Frame(parse_bar, bg=COLORS["accent"], width=4).pack(side="left", fill="y", padx=(0, 12))
+        parse_inner = tk.Frame(parse_bar, bg=COLORS["parse_bg"])
+        parse_inner.pack(side="left", fill="x", expand=True)
         self.parse_info_var = tk.StringVar(value="Документ не обработан — начните с вкладки «1. Заявка»")
         tk.Label(
-            parse_bar,
+            parse_inner,
             textvariable=self.parse_info_var,
             bg=COLORS["parse_bg"],
             fg=COLORS["text"],
             font=("Segoe UI", 9),
-            wraplength=1100,
+            wraplength=1080,
             justify="left",
         ).pack(anchor="w")
 
         self.status = tk.StringVar(value="Готово")
-        status_bar = ttk.Label(self, textvariable=self.status, anchor="w", padding=(16, 6))
-        status_bar.pack(side="bottom", fill="x")
+        status_wrap = tk.Frame(self, bg=COLORS["status_bg"], height=32)
+        status_wrap.pack(side="bottom", fill="x")
+        status_wrap.pack_propagate(False)
+        ttk.Label(
+            status_wrap,
+            textvariable=self.status,
+            anchor="w",
+            padding=(18, 6),
+            style="Status.TLabel",
+        ).pack(fill="both", expand=True)
 
-        self.notebook = ttk.Notebook(self, padding=(12, 8, 12, 8))
+        content_wrap = tk.Frame(self, bg=COLORS["bg"], padx=14, pady=10)
+        content_wrap.pack(fill="both", expand=True)
+
+        self.notebook = ttk.Notebook(content_wrap, padding=(6, 8, 6, 10))
         self.notebook.pack(fill="both", expand=True)
 
         self.tab_pdf = ttk.Frame(self.notebook, padding=10)
@@ -235,11 +311,11 @@ class RequestProcessorApp(tk.Tk):
         self.notebook.add(self.tab_calc, text="  2. Расчёт  ")
         self.notebook.add(self.tab_kp, text="  3. КП  ")
         self.notebook.add(self.tab_orders, text="  4. Заказы  ")
-        self.notebook.add(self.tab_marks, text="  Марки  ")
-        self.notebook.add(self.tab_orgs, text="  Организации  ")
-        self.notebook.add(self.tab_tests, text="  Справочник  ")
-        self.notebook.add(self.tab_history, text="  История  ")
-        self.notebook.add(self.tab_settings, text="  Настройки  ")
+        self.notebook.add(self.tab_marks, text="  5. Марки  ")
+        self.notebook.add(self.tab_orgs, text="  6. Организации  ")
+        self.notebook.add(self.tab_tests, text="  7. Справочник  ")
+        self.notebook.add(self.tab_history, text="  8. История  ")
+        self.notebook.add(self.tab_settings, text="  9. Настройки  ")
 
         self._build_pdf_tab()
         self._build_calc_tab()
@@ -318,7 +394,7 @@ class RequestProcessorApp(tk.Tk):
 
         self._calc_empty_label = ttk.Label(
             self.calc_tests_inner,
-            text="Дважды кликните испытание\nво вкладке «Справочник»",
+            text="Дважды кликните испытание\nво вкладке «7. Справочник»",
             style="CardMuted.TLabel",
             justify="center",
         )
@@ -528,22 +604,22 @@ class RequestProcessorApp(tk.Tk):
     def _build_orders_tab(self) -> None:
         toolbar = ttk.Frame(self.tab_orders)
         toolbar.pack(fill="x", pady=(0, 8))
-        ttk.Button(toolbar, text="Обновить", command=self._load_orders_table).pack(side="left")
         self._accent_button(toolbar, "Сформировать заявку", self._generate_order_application).pack(
+            side="left"
+        )
+        self._secondary_button(toolbar, "Открыть КП", self._open_selected_order_kp).pack(
             side="left", padx=(8, 0)
         )
-        ttk.Button(toolbar, text="Открыть КП", command=self._open_selected_order_kp).pack(
-            side="left", padx=(8, 0)
+        self._secondary_button(toolbar, "Открыть заявку", self._open_selected_order_application).pack(
+            side="left", padx=(6, 0)
         )
-        ttk.Button(toolbar, text="Открыть заявку", command=self._open_selected_order_application).pack(
-            side="left", padx=(4, 0)
+        self._secondary_button(toolbar, "Печать КП", self._print_selected_order_kp).pack(
+            side="left", padx=(6, 0)
         )
-        ttk.Button(toolbar, text="Печать КП", command=self._print_selected_order_kp).pack(
-            side="left", padx=(4, 0)
+        self._secondary_button(toolbar, "Печать заявку", self._print_selected_order_application).pack(
+            side="left", padx=(6, 0)
         )
-        ttk.Button(toolbar, text="Печать заявку", command=self._print_selected_order_application).pack(
-            side="left", padx=(4, 0)
-        )
+        self._secondary_button(toolbar, "Обновить", self._load_orders_table).pack(side="left", padx=(6, 0))
         ttk.Label(
             toolbar,
             text="Клик — детали; двойной клик — открыть КП",
@@ -988,7 +1064,7 @@ class RequestProcessorApp(tk.Tk):
     def _refresh_parse_info_panel(self) -> None:
         row = get_last_document_extraction(self.db_path)
         if not row:
-            self.parse_info_var.set("Заявка не обработана — вкладка «Заявка»")
+            self.parse_info_var.set("Заявка не обработана — вкладка «1. Заявка»")
             return
         file_name = Path(row["source_path"]).name
         self.parse_info_var.set(
@@ -1331,7 +1407,7 @@ class RequestProcessorApp(tk.Tk):
             messagebox.showwarning(
                 "КП",
                 "Выберите один или несколько расчётов в таблице ниже (Ctrl+клик).\n\n"
-                "Если список пуст — сначала выполните расчёт на вкладке «Расчёт».",
+                "Если список пуст — сначала выполните расчёт на вкладке «2. Расчёт».",
             )
             return
 
@@ -1465,6 +1541,16 @@ class RequestProcessorApp(tk.Tk):
             lines.append(f"КП: {details['kp_output_path']}")
         if details.get("application_path"):
             lines.append(f"Заявка на испытания: {details['application_path']}")
+        apps = list_test_applications(order_id=int(sel[0]), limit=5, db_path=self.db_path)
+        if apps:
+            lines.append("\nИСТОРИЯ ЗАЯВОК (БД):")
+            for app in apps:
+                created = (app.get("created_at") or "")[:16].replace("T", " ")
+                lines.append(
+                    f"  • №{app.get('id')} от {created} — {app.get('test_type') or '—'}, "
+                    f"марок: {app.get('marks_count') or 0}"
+                )
+                lines.append(f"    {app.get('output_path') or '—'}")
         if details.get("note"):
             lines.append(f"\nПримечание:\n{details['note']}")
         lines.append("\nМАРКИ:")

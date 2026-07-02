@@ -221,6 +221,23 @@ def init_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     CREATE INDEX IF NOT EXISTS idx_organizations_name ON organizations(name_normalized);
     CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
     CREATE INDEX IF NOT EXISTS idx_order_marks_order_id ON order_marks(order_id);
+
+    CREATE TABLE IF NOT EXISTS test_applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        output_path TEXT NOT NULL,
+        template_path TEXT,
+        application_number TEXT,
+        test_type TEXT,
+        customer_name TEXT,
+        manufacturer_name TEXT,
+        marks_count INTEGER NOT NULL DEFAULT 0,
+        marks_snapshot TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_test_applications_order_id ON test_applications(order_id);
+    CREATE INDEX IF NOT EXISTS idx_test_applications_created_at ON test_applications(created_at);
     """
 
     with get_connection(db_path) as conn:
@@ -324,6 +341,22 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
             CREATE INDEX IF NOT EXISTS idx_order_marks_order_id ON order_marks(order_id);
+            CREATE TABLE IF NOT EXISTS test_applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                output_path TEXT NOT NULL,
+                template_path TEXT,
+                application_number TEXT,
+                test_type TEXT,
+                customer_name TEXT,
+                manufacturer_name TEXT,
+                marks_count INTEGER NOT NULL DEFAULT 0,
+                marks_snapshot TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_test_applications_order_id ON test_applications(order_id);
+            CREATE INDEX IF NOT EXISTS idx_test_applications_created_at ON test_applications(created_at);
             """
         )
     _migrate_orders_columns(db_path)
@@ -377,6 +410,84 @@ def update_order_application_path(
             "UPDATE orders SET application_path = ?, updated_at = ? WHERE id = ?",
             (application_path, datetime.now().isoformat(), order_id),
         )
+
+
+def save_test_application(
+    order_id: int,
+    output_path: str,
+    *,
+    template_path: str | None = None,
+    test_type: str | None = None,
+    customer_name: str | None = None,
+    manufacturer_name: str | None = None,
+    marks_snapshot: list[dict[str, Any]] | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Сохраняет сформированную заявку на испытания в БД и обновляет orders.application_path."""
+    import json
+
+    now = datetime.now().isoformat()
+    snapshot = marks_snapshot or []
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO test_applications (
+                order_id, output_path, template_path, application_number,
+                test_type, customer_name, manufacturer_name,
+                marks_count, marks_snapshot, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                order_id,
+                output_path,
+                template_path,
+                str(order_id),
+                test_type,
+                customer_name,
+                manufacturer_name,
+                len(snapshot),
+                json.dumps(snapshot, ensure_ascii=False),
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE orders SET application_path = ?, updated_at = ? WHERE id = ?",
+            (output_path, now, order_id),
+        )
+        return int(cur.lastrowid)
+
+
+def list_test_applications(
+    order_id: int | None = None,
+    limit: int = 50,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    """История сформированных заявок на испытания."""
+    import json
+
+    query = "SELECT * FROM test_applications"
+    params: list[Any] = []
+    if order_id is not None:
+        query += " WHERE order_id = ?"
+        params.append(order_id)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw = item.get("marks_snapshot")
+            if raw:
+                try:
+                    item["marks_snapshot"] = json.loads(raw)
+                except json.JSONDecodeError:
+                    item["marks_snapshot"] = []
+            else:
+                item["marks_snapshot"] = []
+            result.append(item)
+        return result
 
 
 def sync_test_rule_types(db_path: str | Path = DB_PATH_DEFAULT) -> int:

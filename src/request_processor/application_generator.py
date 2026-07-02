@@ -115,7 +115,7 @@ def generate_application_from_order(
         get_calculation_lines,
         get_cable_mark_document,
         get_organization_by_id,
-        update_order_application_path,
+        save_test_application,
     )
 
     details = get_order_details(order_id, db_path=db_path)
@@ -195,8 +195,35 @@ def generate_application_from_order(
     def _doc_fn(mark: str) -> str | None:
         return get_cable_mark_document(mark, db_path=db_path)
 
+    marks_snapshot: list[dict] = []
+    for idx, mark_row in enumerate(marks, start=1):
+        calc_id = mark_row.get("calculation_id")
+        mark_name = mark_row.get("mark") or ""
+        document = _doc_fn(mark_name) or "—"
+        lines = _lines_fn(int(calc_id)) if calc_id else []
+        criteria = _format_criteria(lines)
+        marks_snapshot.append(
+            {
+                "index": idx,
+                "mark": mark_name,
+                "document": document,
+                "criteria": criteria,
+                "calculation_id": calc_id,
+            }
+        )
+
     _fill_appendix_table(appendix, marks, get_lines=_lines_fn, get_document=_doc_fn)
 
     doc.save(str(output_path))
-    update_order_application_path(order_id, str(output_path.resolve()), db_path=db_path)
+    resolved = str(output_path.resolve())
+    save_test_application(
+        order_id,
+        resolved,
+        template_path=str(template.resolve()),
+        test_type=test_type,
+        customer_name=customer_name if customer_name != "—" else None,
+        manufacturer_name=mfg_name if mfg_name != customer_name else mfg_name,
+        marks_snapshot=marks_snapshot,
+        db_path=db_path,
+    )
     return Path(output_path).resolve()

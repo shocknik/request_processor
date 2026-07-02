@@ -49,6 +49,7 @@ from .sqlite_repo import (
     list_orders,
     get_order_details,
     get_last_document_extraction,
+    list_test_applications,
 )
 from .cost_calculator import calculate_cost, print_breakdown
 from .kp_generator import generate_kp_from_db
@@ -647,6 +648,28 @@ def generate_application_cmd(order_id: int, output_path: Optional[str], db: str)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(click.style(f"✓ Заявка сохранена: {path}", fg="green"))
+
+
+@cli.command("list-applications")
+@click.option("--order-id", default=None, type=int, help="Фильтр по заказу")
+@click.option("--limit", default=20, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_applications_cmd(order_id: int | None, limit: int, db: str) -> None:
+    """История сформированных заявок на испытания из БД."""
+    migrate_db(db)
+    rows = list_test_applications(order_id=order_id, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Заявки на испытания не найдены.")
+        return
+    for row in rows:
+        click.echo(
+            f"{row['id']:>4}  заказ №{row['order_id']}  "
+            f"{(row.get('created_at') or '')[:16]}  "
+            f"{(row.get('test_type') or '—'):18}  "
+            f"марок: {row.get('marks_count') or 0}"
+        )
+        click.echo(f"       {(row.get('customer_name') or '—')[:50]}")
+        click.echo(f"       {row.get('output_path') or '—'}")
 
 
 @cli.command("list-orders")
