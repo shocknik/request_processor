@@ -22,8 +22,18 @@ from .test_rules import (
     category_sort_key,
     rule_type_label,
 )
+from .cable_mark_parser import parse_cable_mark_record
 from .cost_calculator import calculate_cost, format_breakdown
-from .models import ClimaticTestSettings, TestItemCreate
+from .extraction_validator import apply_operator_edits, validate_extraction
+from .models import (
+    CableMarkMatch,
+    ClimaticTestSettings,
+    FieldStatus,
+    MarkValidation,
+    PdfExtractionResult,
+    TestItemCreate,
+    ValidationReport,
+)
 from .pdf_extractor import DEFAULT_OCR_DPI, extract_from_document
 from .application_generator import generate_application_from_order
 from .kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
@@ -43,6 +53,7 @@ from .sqlite_repo import (
     list_test_items,
     save_calculation,
     save_cable_marks_from_matches,
+    save_cable_marks_from_validations,
     save_climatic_settings,
     save_document_extraction,
     save_organizations_from_extraction,
@@ -74,6 +85,10 @@ COLORS = {
     "status_bg": "#e8ecf4",
     "tab_inactive": "#dce3f0",
     "shadow": "#c5cee0",
+    "warn_bg": "#fffbeb",
+    "error_bg": "#fef2f2",
+    "draft_accent": "#f59e0b",
+    "confirmed_accent": "#059669",
 }
 
 ORG_TYPE_LABELS: dict[str, str] = {
@@ -96,14 +111,27 @@ class CalcTestEntry:
     row_frame: ttk.Frame | None = field(default=None, repr=False)
 
 
+@dataclass
+class ExtractionDraft:
+    """Черновик извлечения до подтверждения оператором."""
+
+    result: PdfExtractionResult
+    report: ValidationReport
+    source_path: Path
+    json_path: Path | None = None
+    marks: list[MarkValidation] = field(default_factory=list)
+    original_marks: list[MarkValidation] = field(default_factory=list)
+    original_customer: str = ""
+
+
 class RequestProcessorApp(tk.Tk):
     def __init__(self, db_path: Path = DB_PATH_DEFAULT) -> None:
         super().__init__()
         self.db_path = Path(db_path)
         self.generated_dir = GENERATED_DIR_DEFAULT
         self.title("Обработка заявок на испытания кабелей")
-        self.geometry("1200x820")
-        self.minsize(1020, 700)
+        self.geometry("1200x860")
+        self.minsize(1020, 740)
         self.configure(bg=COLORS["bg"])
 
         self._tests_by_code: dict[str, dict] = {}
@@ -111,6 +139,8 @@ class RequestProcessorApp(tk.Tk):
         self.notebook: ttk.Notebook | None = None
         self._last_document_extraction_id: int | None = None
         self._last_manufacturer_name: str = ""
+        self._extraction_draft: ExtractionDraft | None = None
+        self._extraction_confirmed: bool = False
 
         self._ensure_db()
         self._setup_theme()
@@ -340,6 +370,16 @@ class RequestProcessorApp(tk.Tk):
             self._load_orders_table()
 
     def _build_calc_tab(self) -> None:
+        btns = ttk.Frame(self.tab_calc)
+        btns.pack(side="bottom", fill="x", pady=(8, 0))
+        self._accent_button(btns, "Рассчитать", self._run_calculate).pack(side="left")
+        ttk.Button(btns, text="Очистить всё", command=self._clear_calc).pack(side="left", padx=10)
+        ttk.Label(
+            btns,
+            text="Климатические испытания — укажите часы выдержки в списке слева",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=12)
+
         top = ttk.LabelFrame(self.tab_calc, text="Марка кабеля", padding=12, style="Card.TLabelframe")
         top.pack(fill="x", pady=(0, 10))
         top.configure(style="Card.TLabelframe")
@@ -347,8 +387,11 @@ class RequestProcessorApp(tk.Tk):
         inner = ttk.Frame(top, style="Card.TFrame")
         inner.pack(fill="x")
         self.mark_var = tk.StringVar()
-        mark_entry = ttk.Entry(inner, textvariable=self.mark_var, font=("Segoe UI", 11))
-        mark_entry.pack(fill="x", ipady=4)
+        mark_row = ttk.Frame(inner, style="Card.TFrame")
+        mark_row.pack(fill="x")
+        mark_entry = ttk.Entry(mark_row, textvariable=self.mark_var, font=("Segoe UI", 11))
+        mark_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self._accent_button(mark_row, "Рассчитать", self._run_calculate).pack(side="left", padx=(8, 0))
         ttk.Label(
             inner,
             text="Пример: ВВГ-Пнг(А) 3х4ок(М,РЕ)-0,66",
@@ -356,7 +399,7 @@ class RequestProcessorApp(tk.Tk):
         ).pack(anchor="w", pady=(6, 0))
 
         mid = ttk.PanedWindow(self.tab_calc, orient="horizontal")
-        mid.pack(fill="both", expand=True, pady=(0, 10))
+        mid.pack(fill="both", expand=True)
 
         left = ttk.LabelFrame(mid, text="Выбранные испытания", padding=8, style="Card.TLabelframe")
         mid.add(left, weight=1)
@@ -414,7 +457,7 @@ class RequestProcessorApp(tk.Tk):
 
         self.calc_output = scrolledtext.ScrolledText(
             right,
-            height=20,
+            height=14,
             state="disabled",
             font=("Consolas", 10),
             bg="#f8fafc",
@@ -425,17 +468,33 @@ class RequestProcessorApp(tk.Tk):
         )
         self.calc_output.pack(fill="both", expand=True)
 
-        btns = ttk.Frame(self.tab_calc)
-        btns.pack(fill="x")
-        self._accent_button(btns, "Рассчитать", self._run_calculate).pack(side="left")
-        ttk.Button(btns, text="Очистить всё", command=self._clear_calc).pack(side="left", padx=10)
-        ttk.Label(
-            btns,
-            text="Климатические испытания — укажите часы выдержки в списке слева",
-            style="Muted.TLabel",
-        ).pack(side="left", padx=12)
-
     def _build_pdf_tab(self) -> None:
+        bottom = ttk.Frame(self.tab_pdf)
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
+
+        status_row = tk.Frame(bottom, bg=COLORS["parse_bg"], padx=12, pady=8)
+        status_row.pack(fill="x")
+        self.validation_status_bar = tk.Frame(status_row, bg=COLORS["parse_bg"], width=4)
+        self.validation_status_bar.pack(side="left", fill="y", padx=(0, 10))
+        self.validation_status_var = tk.StringVar(value="Документ не обработан")
+        tk.Label(
+            status_row,
+            textvariable=self.validation_status_var,
+            bg=COLORS["parse_bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        btn_row = ttk.Frame(bottom)
+        btn_row.pack(fill="x", pady=(6, 0))
+        self._secondary_button(btn_row, "Перепарсить", self._run_extract_pdf).pack(side="left")
+        self._secondary_button(btn_row, "Отменить", self._cancel_extraction_draft).pack(side="left", padx=8)
+        self.confirm_btn = self._accent_button(
+            btn_row, "Подтвердить заявку", self._confirm_extraction
+        )
+        self.confirm_btn.pack(side="right")
+
         top = ttk.Frame(self.tab_pdf)
         top.pack(fill="x")
 
@@ -443,45 +502,133 @@ class RequestProcessorApp(tk.Tk):
         ttk.Entry(top, textvariable=self.pdf_path_var).pack(side="left", fill="x", expand=True, ipady=3)
         ttk.Button(top, text="Обзор…", command=self._browse_pdf).pack(side="left", padx=6)
         self._accent_button(top, "Извлечь", self._run_extract_pdf).pack(side="left", padx=(0, 4))
+        self.confirm_btn_top = self._accent_button(
+            top, "Подтвердить заявку", self._confirm_extraction
+        )
+        self.confirm_btn_top.pack(side="left", padx=(4, 0))
 
-        opts = ttk.Frame(self.tab_pdf)
-        opts.pack(fill="x", pady=8)
+        self.pdf_opts_frame = ttk.Frame(self.tab_pdf)
+        self.pdf_opts_frame.pack(fill="x", pady=8)
+        opts = self.pdf_opts_frame
         self.ocr_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="OCR для сканов", variable=self.ocr_var).pack(side="left")
         ttk.Label(opts, text=f"DPI: {DEFAULT_OCR_DPI}", style="Muted.TLabel").pack(side="left", padx=12)
-        self.save_marks_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Сохранять марки в БД", variable=self.save_marks_var).pack(side="left")
-        self.save_orgs_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Сохранять организации в БД", variable=self.save_orgs_var).pack(
+        self.confirm_only_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opts,
+            text="Сохранять только после подтверждения",
+            variable=self.confirm_only_var,
+            command=self._on_confirm_only_toggle,
+        ).pack(side="left", padx=(8, 0))
+        self.save_marks_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Сохранять марки в БД", variable=self.save_marks_var).pack(
             side="left", padx=(12, 0)
         )
+        self.save_orgs_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Сохранять организации в БД", variable=self.save_orgs_var).pack(
+            side="left", padx=(8, 0)
+        )
+
+        self.validation_warn_frame = tk.Frame(self.tab_pdf, bg=COLORS["warn_bg"], padx=12, pady=8)
+        self.validation_warn_var = tk.StringVar(value="")
+        tk.Label(
+            self.validation_warn_frame,
+            textvariable=self.validation_warn_var,
+            bg=COLORS["warn_bg"],
+            fg="#92400e",
+            font=("Segoe UI", 9),
+            justify="left",
+            anchor="w",
+            wraplength=1100,
+        ).pack(fill="x")
 
         mid = ttk.PanedWindow(self.tab_pdf, orient="horizontal")
-        mid.pack(fill="both", expand=True)
+        mid.pack(fill="both", expand=True, pady=(4, 4))
 
-        left = ttk.LabelFrame(mid, text="Найденные марки", padding=8, style="Card.TLabelframe")
-        mid.add(left, weight=1)
-        self.marks_list = tk.Listbox(
-            left,
-            height=14,
-            font=("Segoe UI", 10),
-            bg=COLORS["card"],
-            fg=COLORS["text"],
-            selectbackground=COLORS["accent"],
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=COLORS["border"],
-        )
-        self.marks_list.pack(fill="both", expand=True)
-        self.marks_list.bind("<Double-Button-1>", lambda e: self._use_mark_in_calc())
+        left = ttk.LabelFrame(mid, text="Марки — проверьте и отметьте", padding=8, style="Card.TLabelframe")
+        mid.add(left, weight=3)
+        mark_toolbar = ttk.Frame(left, style="Card.TFrame")
+        mark_toolbar.pack(fill="x", pady=(0, 6))
+        ttk.Button(mark_toolbar, text="+ Добавить", command=self._add_draft_mark).pack(side="left")
+        ttk.Button(mark_toolbar, text="Удалить", command=self._remove_draft_mark).pack(side="left", padx=6)
+        ttk.Button(mark_toolbar, text="✓/—", command=self._toggle_draft_mark).pack(side="left")
+        ttk.Button(mark_toolbar, text="Изменить", command=self._edit_draft_mark).pack(side="left", padx=6)
+
+        cols = ("accepted", "mark", "brand", "cores", "size", "document", "status", "confidence")
+        self.marks_tree = ttk.Treeview(left, columns=cols, show="headings", height=7)
+        for col, title, width in (
+            ("accepted", "✓", 32),
+            ("mark", "Усл. обозначение", 200),
+            ("brand", "Марка", 64),
+            ("cores", "ТПЖ", 36),
+            ("size", "Размер", 52),
+            ("document", "ТУ/ГОСТ", 110),
+            ("status", "!", 28),
+            ("confidence", "%", 40),
+        ):
+            self.marks_tree.heading(col, text=title)
+            anchor = "center" if col in ("accepted", "status", "confidence") else "w"
+            self.marks_tree.column(col, width=width, anchor=anchor)
+        self.marks_tree.tag_configure("ok", background=COLORS["card"])
+        self.marks_tree.tag_configure("warning", background=COLORS["warn_bg"])
+        self.marks_tree.tag_configure("error", background=COLORS["error_bg"])
+        self.marks_tree.tag_configure("rejected", background="#f1f5f9", foreground=COLORS["muted"])
+        self.marks_tree.pack(fill="both", expand=True)
+        self.marks_tree.bind("<<TreeviewSelect>>", self._on_draft_mark_select)
+        self.marks_tree.bind("<Double-Button-1>", self._on_draft_mark_double_click)
         ttk.Button(left, text="→ В расчёт", command=self._use_mark_in_calc).pack(pady=(8, 0))
 
-        right = ttk.LabelFrame(mid, text="Сводка", padding=8, style="Card.TLabelframe")
-        mid.add(right, weight=1)
-        self.pdf_output = scrolledtext.ScrolledText(
-            right, height=14, state="disabled", font=("Segoe UI", 10), bg="#f8fafc", relief="flat"
+        right = ttk.LabelFrame(mid, text="Организации", padding=8, style="Card.TLabelframe")
+        mid.add(right, weight=2)
+        org_form = ttk.Frame(right, style="Card.TFrame")
+        org_form.pack(fill="x")
+        org_form.columnconfigure(1, weight=1)
+
+        self.draft_customer_var = tk.StringVar()
+        self.draft_customer_inn_var = tk.StringVar()
+        self.draft_customer_addr_var = tk.StringVar()
+        self.draft_manufacturer_var = tk.StringVar()
+        self.draft_recipient_var = tk.StringVar()
+
+        labels = (
+            ("Заказчик:", self.draft_customer_var),
+            ("ИНН:", self.draft_customer_inn_var),
+            ("Адрес:", self.draft_customer_addr_var),
+            ("Производитель:", self.draft_manufacturer_var),
         )
-        self.pdf_output.pack(fill="both", expand=True)
+        for row, (label, var) in enumerate(labels):
+            ttk.Label(org_form, text=label, style="Card.TLabel").grid(
+                row=row, column=0, sticky="w", pady=4, padx=(0, 8)
+            )
+            ttk.Entry(org_form, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
+
+        ttk.Label(org_form, text="Получатель (ИЛ):", style="CardMuted.TLabel").grid(
+            row=len(labels), column=0, sticky="w", pady=(10, 4), padx=(0, 8)
+        )
+        recipient_lbl = ttk.Label(
+            org_form,
+            textvariable=self.draft_recipient_var,
+            style="CardMuted.TLabel",
+            wraplength=340,
+        )
+        recipient_lbl.grid(row=len(labels), column=1, sticky="w", pady=(10, 4))
+
+        ttk.Label(right, text="Контекст выбранной марки:", style="CardMuted.TLabel").pack(
+            anchor="w", pady=(12, 4)
+        )
+        self.mark_context_text = scrolledtext.ScrolledText(
+            right,
+            height=4,
+            state="disabled",
+            font=("Segoe UI", 9),
+            bg="#f8fafc",
+            relief="flat",
+            wrap="word",
+        )
+        self.mark_context_text.pack(fill="both", expand=True)
+
+        self._on_confirm_only_toggle()
+        self._update_validation_status_bar(state="idle")
 
     def _build_marks_tab(self) -> None:
         toolbar = ttk.Frame(self.tab_marks)
@@ -494,7 +641,7 @@ class RequestProcessorApp(tk.Tk):
         cols = ("full_mark", "brand", "fire_class", "cores", "element", "size", "document")
         self.cable_marks_tree = ttk.Treeview(self.tab_marks, columns=cols, show="headings", height=20)
         for col, title, width in (
-            ("full_mark", "Полная марка", 260),
+            ("full_mark", "Усл. обозначение", 260),
             ("brand", "Марка", 80),
             ("fire_class", "Пожарный класс", 90),
             ("cores", "ТПЖ", 50),
@@ -1043,6 +1190,7 @@ class RequestProcessorApp(tk.Tk):
         ocr_used: bool = False,
         page_count: int = 0,
         extracted_at: str = "",
+        validation_state: str = "",
     ) -> str:
         parts = [
             f"📄 {file_name}",
@@ -1051,6 +1199,10 @@ class RequestProcessorApp(tk.Tk):
         if page_count:
             parts.append(f"{page_count} стр.")
         parts.append(f"{marks_count} марок")
+        if validation_state == "draft":
+            parts.append("⚠ черновик")
+        elif validation_state == "confirmed":
+            parts.append("✓ подтверждено")
         if customer_name:
             parts.append(f"заказчик: {customer_name}")
         if manufacturer_name and manufacturer_name != customer_name:
@@ -1212,6 +1364,694 @@ class RequestProcessorApp(tk.Tk):
         ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save).pack(side="left")
         ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
 
+    def _on_confirm_only_toggle(self) -> None:
+        if self.confirm_only_var.get():
+            self.save_marks_var.set(False)
+            self.save_orgs_var.set(False)
+
+    @staticmethod
+    def _status_icon(status: FieldStatus) -> str:
+        return {"ok": "✓", "warning": "⚠", "error": "✗"}[status.value]
+
+    def _mark_tree_tag(self, mark: MarkValidation) -> str:
+        if not mark.accepted:
+            return "rejected"
+        return mark.status.value
+
+    def _refresh_marks_tree(self) -> None:
+        if not hasattr(self, "marks_tree"):
+            return
+        for item in self.marks_tree.get_children():
+            self.marks_tree.delete(item)
+        if not self._extraction_draft:
+            return
+        for idx, mark in enumerate(self._extraction_draft.marks):
+            accepted = "✓" if mark.accepted else "—"
+            doc = mark.document or ""
+            size_text = ""
+            if mark.characteristic_size is not None:
+                unit = "мм²" if mark.size_unit == "mm2" else "мм"
+                size_text = f"{mark.characteristic_size:g}{unit}"
+            self.marks_tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                tags=(self._mark_tree_tag(mark),),
+                values=(
+                    accepted,
+                    mark.mark,
+                    mark.brand or "",
+                    str(mark.cores_count or ""),
+                    size_text,
+                    doc,
+                    self._status_icon(mark.status),
+                    f"{mark.confidence:.0%}",
+                ),
+            )
+
+    def _update_validation_warnings(self, report: ValidationReport) -> None:
+        lines: list[str] = []
+        if report.flags:
+            lines.append(f"Предупреждения ({len(report.flags)}):")
+            lines.extend(f"  • {flag}" for flag in report.flags)
+        for mark in report.marks:
+            for warning in mark.warnings:
+                short = f"Марка «{mark.mark[:40]}…»: {warning}" if len(mark.mark) > 40 else (
+                    f"Марка «{mark.mark}»: {warning}"
+                )
+                if short not in lines:
+                    lines.append(f"  • {short}")
+        if lines:
+            self.validation_warn_var.set("\n".join(lines))
+            self.validation_warn_frame.pack(fill="x", pady=(0, 4), after=self.pdf_opts_frame)
+        else:
+            self.validation_warn_var.set("")
+            self.validation_warn_frame.pack_forget()
+
+    def _set_confirm_buttons_state(self, state: str) -> None:
+        for btn in (getattr(self, "confirm_btn", None), getattr(self, "confirm_btn_top", None)):
+            if btn is not None:
+                btn.configure(state=state)
+
+    def _update_validation_status_bar(
+        self,
+        *,
+        state: str,
+        file_name: str = "",
+        result: PdfExtractionResult | None = None,
+        report: ValidationReport | None = None,
+    ) -> None:
+        colors = {
+            "idle": COLORS["muted"],
+            "draft": COLORS["draft_accent"],
+            "confirmed": COLORS["confirmed_accent"],
+            "error": "#dc2626",
+        }
+        self.validation_status_bar.configure(bg=colors.get(state, COLORS["muted"]))
+
+        if state == "idle":
+            self.validation_status_var.set("Документ не обработан — выберите файл и нажмите «Извлечь»")
+            self._set_confirm_buttons_state("disabled")
+            return
+
+        if state == "error":
+            self.validation_status_var.set("Ошибка извлечения — попробуйте «Перепарсить»")
+            self._set_confirm_buttons_state("disabled")
+            return
+
+        parts: list[str] = []
+        if state == "draft":
+            parts.append("ЧЕРНОВИК")
+        elif state == "confirmed":
+            parts.append("✓ ПОДТВЕРЖДЕНО")
+
+        if file_name:
+            parts.append(file_name)
+        if result:
+            parts.append(result.source_type.upper())
+            if result.page_count:
+                parts.append(f"{result.page_count} стр.")
+            if result.ocr_used:
+                parts.append("OCR")
+        if report:
+            accepted = sum(1 for m in self._extraction_draft.marks if m.accepted) if self._extraction_draft else 0
+            parts.append(f"{accepted} марок")
+            parts.append(f"уверенность {report.overall_confidence:.0%}")
+            if report.document_type != "unknown":
+                parts.append(report.document_type)
+
+        self.validation_status_var.set("  ·  ".join(parts))
+        if state == "draft" and report:
+            self._set_confirm_buttons_state("normal" if not report.block_confirm else "disabled")
+        elif state == "confirmed":
+            self._set_confirm_buttons_state("disabled")
+
+    def _fill_draft_org_fields(self, draft: ExtractionDraft) -> None:
+        report = draft.report
+        self.draft_customer_var.set(report.customer_name)
+        self.draft_manufacturer_var.set(report.manufacturer_name)
+        self.draft_recipient_var.set(report.recipient_name or "—")
+
+        customer_org = next((o for o in report.organizations if o.role == "customer"), None)
+        self.draft_customer_inn_var.set(customer_org.inn if customer_org and customer_org.inn else "")
+        self.draft_customer_addr_var.set(
+            customer_org.address if customer_org and customer_org.address else ""
+        )
+
+    def _show_extraction_draft(self, draft: ExtractionDraft) -> None:
+        self._extraction_draft = draft
+        self._extraction_confirmed = False
+        self._refresh_marks_tree()
+        self._fill_draft_org_fields(draft)
+        self._update_validation_warnings(draft.report)
+        self._set_text(self.mark_context_text, "")
+        self._update_validation_status_bar(
+            state="draft",
+            file_name=Path(draft.source_path).name,
+            result=draft.result,
+            report=draft.report,
+        )
+        self.parse_info_var.set(
+            self._format_parse_info(
+                file_name=Path(draft.source_path).name,
+                source_type=draft.result.source_type,
+                marks_count=sum(1 for m in draft.marks if m.accepted),
+                customer_name=draft.report.customer_name,
+                manufacturer_name=draft.report.manufacturer_name,
+                ocr_used=draft.result.ocr_used,
+                page_count=draft.result.page_count,
+                extracted_at=draft.result.extracted_at.isoformat(),
+                validation_state="draft",
+            )
+        )
+
+    def _on_draft_mark_select(self, _event=None) -> None:
+        if not self._extraction_draft:
+            return
+        sel = self.marks_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if 0 <= idx < len(self._extraction_draft.marks):
+            context = self._extraction_draft.marks[idx].context or "(контекст не сохранён)"
+            self._set_text(self.mark_context_text, context)
+
+    def _toggle_draft_mark(self) -> None:
+        if not self._extraction_draft:
+            return
+        sel = self.marks_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        mark = self._extraction_draft.marks[idx]
+        mark.accepted = not mark.accepted
+        self._revalidate_draft()
+
+    def _format_mark_size(self, mark: MarkValidation) -> str:
+        if mark.characteristic_size is None:
+            return ""
+        unit = "мм²" if mark.size_unit == "mm2" else "мм"
+        return f"{mark.characteristic_size:g} {unit}"
+
+    def _apply_parsed_fields_to_mark(self, target: MarkValidation, designation: str) -> None:
+        record = parse_cable_mark_record(
+            designation,
+            document=target.document,
+            context=target.context,
+        )
+        target.mark = record.full_mark
+        target.brand = record.brand
+        target.fire_class = record.fire_class
+        target.cores_count = record.cores_count
+        target.structural_element_type = record.structural_element_type
+        target.structural_elements_count = record.structural_elements_count
+        target.characteristic_size = record.characteristic_size
+        target.size_unit = record.size_unit
+        if not target.document:
+            target.document = record.document
+
+    def _open_mark_editor(
+        self,
+        existing: MarkValidation | None,
+        *,
+        title: str,
+        save_label: str,
+        on_save,
+    ) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.geometry("560x420")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.minsize(520, 400)
+
+        seed = existing or MarkValidation(
+            mark="",
+            confidence=0.75,
+            status=FieldStatus.ok,
+            accepted=True,
+        )
+        if existing is None and not seed.brand:
+            pass
+
+        fields: dict[str, tk.Variable] = {
+            "mark": tk.StringVar(value=seed.mark),
+            "brand": tk.StringVar(value=seed.brand or ""),
+            "fire_class": tk.StringVar(value=seed.fire_class or ""),
+            "cores_count": tk.StringVar(
+                value=str(seed.cores_count) if seed.cores_count else ""
+            ),
+            "structural_element_type": tk.StringVar(
+                value=seed.structural_element_type or "жила"
+            ),
+            "structural_elements_count": tk.StringVar(
+                value=str(seed.structural_elements_count)
+                if seed.structural_elements_count
+                else ""
+            ),
+            "characteristic_size": tk.StringVar(
+                value=str(seed.characteristic_size) if seed.characteristic_size else ""
+            ),
+            "size_unit": tk.StringVar(value=seed.size_unit),
+            "document": tk.StringVar(value=seed.document or ""),
+        }
+
+        form = ttk.Frame(dialog, padding=12)
+        form.pack(fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+
+        rows = (
+            ("Условное обозначение:", "mark"),
+            ("Марка (бренд):", "brand"),
+            ("Пожарный класс:", "fire_class"),
+            ("ТПЖ (жил):", "cores_count"),
+            ("Элемент:", "structural_element_type"),
+            ("Кол-во элементов:", "structural_elements_count"),
+            ("Размер:", "characteristic_size"),
+            ("Единица:", "size_unit"),
+            ("ТУ / ГОСТ:", "document"),
+        )
+        element_combo: ttk.Combobox | None = None
+        unit_combo: ttk.Combobox | None = None
+        for row, (label, key) in enumerate(rows):
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 8))
+            if key == "structural_element_type":
+                element_combo = ttk.Combobox(
+                    form,
+                    textvariable=fields[key],
+                    values=("жила", "пара", "тройка"),
+                    state="readonly",
+                    width=24,
+                )
+                element_combo.grid(row=row, column=1, sticky="ew", pady=4)
+            elif key == "size_unit":
+                unit_combo = ttk.Combobox(
+                    form,
+                    textvariable=fields[key],
+                    values=("mm2", "mm"),
+                    state="readonly",
+                    width=24,
+                )
+                unit_combo.grid(row=row, column=1, sticky="w", pady=4)
+            else:
+                ttk.Entry(form, textvariable=fields[key]).grid(
+                    row=row, column=1, sticky="ew", pady=4
+                )
+
+        def autofill() -> None:
+            designation = fields["mark"].get().strip()
+            if len(designation) < 3:
+                messagebox.showwarning("Марка", "Сначала укажите условное обозначение.")
+                return
+            tmp = MarkValidation(mark=designation, document=fields["document"].get().strip() or None)
+            self._apply_parsed_fields_to_mark(tmp, designation)
+            fields["mark"].set(tmp.mark)
+            fields["brand"].set(tmp.brand or "")
+            fields["fire_class"].set(tmp.fire_class or "")
+            fields["cores_count"].set(str(tmp.cores_count or ""))
+            fields["structural_element_type"].set(tmp.structural_element_type or "жила")
+            fields["structural_elements_count"].set(str(tmp.structural_elements_count or ""))
+            fields["characteristic_size"].set(
+                str(tmp.characteristic_size) if tmp.characteristic_size else ""
+            )
+            fields["size_unit"].set(tmp.size_unit)
+            if tmp.document:
+                fields["document"].set(tmp.document)
+
+        def build_mark() -> MarkValidation | None:
+            designation = fields["mark"].get().strip()
+            if len(designation) < 3:
+                messagebox.showwarning("Марка", "Укажите условное обозначение кабеля.")
+                return None
+            try:
+                cores = int(fields["cores_count"].get().strip() or "1")
+                elem_count = int(fields["structural_elements_count"].get().strip() or "1")
+                size = float(fields["characteristic_size"].get().strip().replace(",", "."))
+            except ValueError:
+                messagebox.showwarning("Марка", "ТПЖ, кол-во элементов и размер — числа.")
+                return None
+            if cores < 1 or elem_count < 1 or size <= 0:
+                messagebox.showwarning("Марка", "ТПЖ ≥ 1, размер > 0.")
+                return None
+            return MarkValidation(
+                mark=designation,
+                document=fields["document"].get().strip() or None,
+                context=seed.context,
+                brand=fields["brand"].get().strip() or None,
+                fire_class=fields["fire_class"].get().strip() or None,
+                cores_count=cores,
+                structural_element_type=fields["structural_element_type"].get().strip() or "жила",
+                structural_elements_count=elem_count,
+                characteristic_size=size,
+                size_unit=fields["size_unit"].get() or "mm2",
+                confidence=seed.confidence,
+                status=seed.status,
+                warnings=list(seed.warnings),
+                accepted=seed.accepted,
+            )
+
+        def save() -> None:
+            built = build_mark()
+            if built is None:
+                return
+            on_save(built)
+            dialog.destroy()
+            self._revalidate_draft()
+
+        tool_row = ttk.Frame(form)
+        tool_row.grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(tool_row, text="Заполнить из обозначения", command=autofill).pack(side="left")
+
+        btns = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        btns.pack(fill="x")
+        ttk.Button(btns, text=save_label, style="Accent.TButton", command=save).pack(side="left")
+        ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
+
+    def _add_draft_mark(self) -> None:
+        if not self._extraction_draft:
+            messagebox.showinfo("Заявка", "Сначала извлеките документ.")
+            return
+
+        def on_save(built: MarkValidation) -> None:
+            self._extraction_draft.marks.append(built)
+
+        self._open_mark_editor(None, title="Добавить марку", save_label="Добавить", on_save=on_save)
+
+    def _remove_draft_mark(self) -> None:
+        if not self._extraction_draft:
+            return
+        sel = self.marks_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        del self._extraction_draft.marks[idx]
+        self._revalidate_draft()
+
+    def _edit_draft_mark(self) -> None:
+        if not self._extraction_draft:
+            return
+        sel = self.marks_tree.selection()
+        if not sel:
+            messagebox.showinfo("Марка", "Выберите марку в таблице.")
+            return
+        idx = int(sel[0])
+        mark = self._extraction_draft.marks[idx]
+
+        def on_save(built: MarkValidation) -> None:
+            built.accepted = mark.accepted
+            built.confidence = mark.confidence
+            built.status = mark.status
+            built.warnings = list(mark.warnings)
+            built.context = mark.context
+            self._extraction_draft.marks[idx] = built
+
+        self._open_mark_editor(
+            mark.model_copy(deep=True),
+            title="Уточнить марку для БД",
+            save_label="Сохранить",
+            on_save=on_save,
+        )
+
+    def _on_draft_mark_double_click(self, event) -> None:
+        if self.marks_tree.identify_region(event.x, event.y) == "heading":
+            return
+        self._edit_draft_mark()
+
+    def _revalidate_draft(self) -> None:
+        if not self._extraction_draft:
+            return
+        accepted_matches = [
+            CableMarkMatch(mark=m.mark, context=m.context, document=m.document)
+            for m in self._extraction_draft.marks
+            if m.accepted
+        ]
+        interim = self._extraction_draft.result.model_copy(
+            update={
+                "cable_marks": accepted_matches,
+                "customer_name": self.draft_customer_var.get().strip(),
+                "manufacturer_name": self.draft_manufacturer_var.get().strip(),
+            }
+        )
+        fresh = validate_extraction(interim)
+        fresh_by_mark = {m.mark: m for m in fresh.marks}
+        updated_marks: list[MarkValidation] = []
+        for entry in self._extraction_draft.marks:
+            if entry.accepted and entry.mark in fresh_by_mark:
+                fv = fresh_by_mark[entry.mark]
+                updated_marks.append(
+                    entry.model_copy(
+                        update={
+                            "confidence": fv.confidence,
+                            "status": fv.status,
+                            "warnings": fv.warnings,
+                        }
+                    )
+                )
+            else:
+                updated_marks.append(entry)
+        self._extraction_draft.marks = updated_marks
+        report = apply_operator_edits(
+            fresh,
+            marks=updated_marks,
+            customer_name=self.draft_customer_var.get().strip(),
+            manufacturer_name=self.draft_manufacturer_var.get().strip(),
+            text=self._extraction_draft.result.text,
+            ocr_used=self._extraction_draft.result.ocr_used,
+        )
+        self._extraction_draft.report = report.model_copy(update={"marks": updated_marks})
+        self._update_validation_warnings(report)
+        self._refresh_marks_tree()
+        self._update_validation_status_bar(
+            state="draft" if not self._extraction_confirmed else "confirmed",
+            file_name=Path(self._extraction_draft.source_path).name,
+            result=self._extraction_draft.result,
+            report=report,
+        )
+
+    def _build_confirmed_result(self) -> PdfExtractionResult:
+        if not self._extraction_draft:
+            raise RuntimeError("Нет черновика заявки")
+        accepted = [
+            CableMarkMatch(mark=m.mark, context=m.context, document=m.document)
+            for m in self._extraction_draft.marks
+            if m.accepted
+        ]
+        customer_name = self.draft_customer_var.get().strip()
+        manufacturer_name = self.draft_manufacturer_var.get().strip()
+        customer_inn = self.draft_customer_inn_var.get().strip() or None
+        customer_addr = self.draft_customer_addr_var.get().strip() or None
+
+        organizations = []
+        for org in self._extraction_draft.result.organizations:
+            org_copy = org.model_copy(deep=True)
+            if org_copy.role == "customer":
+                if customer_name:
+                    org_copy.name = customer_name
+                if customer_inn:
+                    org_copy.inn = customer_inn
+                if customer_addr:
+                    org_copy.address = customer_addr
+            elif org_copy.role == "manufacturer" and manufacturer_name:
+                org_copy.name = manufacturer_name
+            organizations.append(org_copy)
+
+        return self._extraction_draft.result.model_copy(
+            update={
+                "cable_marks": accepted,
+                "customer_name": customer_name,
+                "manufacturer_name": manufacturer_name,
+                "organizations": organizations,
+            }
+        )
+
+    def _export_training_corrections(self, result: PdfExtractionResult) -> None:
+        if not self._extraction_draft:
+            return
+        lines: list[str] = []
+        orig_by_mark = {m.mark: m for m in self._extraction_draft.original_marks}
+        for final in self._extraction_draft.marks:
+            if not final.accepted:
+                continue
+            orig = orig_by_mark.get(final.mark)
+            if orig is None:
+                for o in self._extraction_draft.original_marks:
+                    if o.mark in final.mark or final.mark in o.mark:
+                        orig = o
+                        break
+            if orig is None:
+                lines.append(
+                    json.dumps(
+                        {
+                            "field": "mark",
+                            "change": "added",
+                            "corrected": final.model_dump(mode="json"),
+                            "doc": Path(result.source_path).name,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+            for field in (
+                "mark",
+                "brand",
+                "document",
+                "cores_count",
+                "characteristic_size",
+                "fire_class",
+            ):
+                old_val = getattr(orig, field, None)
+                new_val = getattr(final, field, None)
+                if old_val != new_val:
+                    lines.append(
+                        json.dumps(
+                            {
+                                "field": field,
+                                "original": old_val,
+                                "corrected": new_val,
+                                "mark": final.mark,
+                                "doc": Path(result.source_path).name,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+        customer = self.draft_customer_var.get().strip()
+        if customer and customer != self._extraction_draft.original_customer:
+            lines.append(
+                json.dumps(
+                    {
+                        "field": "customer",
+                        "original": self._extraction_draft.original_customer,
+                        "corrected": customer,
+                        "doc": Path(result.source_path).name,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        if not lines:
+            return
+        out_dir = Path("data/training/corrections")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{Path(result.source_path).stem}.jsonl"
+        out_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _persist_extraction(
+        self,
+        result: PdfExtractionResult,
+        *,
+        mark_validations: list[MarkValidation] | None = None,
+    ) -> int:
+        db_stats = {"saved": 0, "errors": 0}
+        if self.save_marks_var.get():
+            if mark_validations:
+                db_stats = save_cable_marks_from_validations(
+                    mark_validations,
+                    source=str(result.source_path),
+                    db_path=self.db_path,
+                )
+            elif result.cable_marks:
+                db_stats = save_cable_marks_from_matches(
+                    result.cable_marks,
+                    source=str(result.source_path),
+                    db_path=self.db_path,
+                )
+        org_ids: dict[str, int | None] = {}
+        if self.save_orgs_var.get() and result.organizations:
+            org_ids = save_organizations_from_extraction(
+                result.organizations,
+                source=str(result.source_path),
+                db_path=self.db_path,
+            )
+        extraction_id = save_document_extraction(
+            source_path=str(result.source_path),
+            source_type=result.source_type,
+            text=result.text,
+            marks_count=len(result.cable_marks),
+            customer_org_id=org_ids.get("customer_org_id"),
+            manufacturer_org_id=org_ids.get("manufacturer_org_id"),
+            db_path=self.db_path,
+        )
+        self._last_document_extraction_id = extraction_id
+        self._last_manufacturer_name = result.manufacturer_name or ""
+        return extraction_id
+
+    def _confirm_extraction(self) -> None:
+        if not self._extraction_draft:
+            messagebox.showinfo("Заявка", "Нет данных для подтверждения.")
+            return
+        self._revalidate_draft()
+        if self._extraction_draft.report.block_confirm:
+            messagebox.showerror(
+                "Подтверждение заблокировано",
+                "Исправьте критичные поля (красные/⛔) перед сохранением.\n\n"
+                + "\n".join(self._extraction_draft.report.flags[:6]),
+            )
+            return
+
+        accepted_count = sum(1 for m in self._extraction_draft.marks if m.accepted)
+        if accepted_count == 0:
+            messagebox.showwarning(
+                "Заявка",
+                "Нет принятых марок. Добавьте или включите хотя бы одну марку.",
+            )
+            return
+
+        result = self._build_confirmed_result()
+        self.save_marks_var.set(True)
+        self.save_orgs_var.set(True)
+        self._export_training_corrections(result)
+        self._persist_extraction(
+            result,
+            mark_validations=self._extraction_draft.marks,
+        )
+
+        customer_name = result.customer_name
+        self._extraction_confirmed = True
+        self._extraction_draft.result = result
+        self._load_cable_marks()
+        if customer_name:
+            self.kp_customer_var.set(customer_name)
+        self._load_organizations()
+
+        self._update_validation_status_bar(
+            state="confirmed",
+            file_name=Path(result.source_path).name,
+            result=result,
+            report=self._extraction_draft.report,
+        )
+        self.parse_info_var.set(
+            self._format_parse_info(
+                file_name=Path(result.source_path).name,
+                source_type=result.source_type,
+                marks_count=accepted_count,
+                customer_name=customer_name,
+                manufacturer_name=result.manufacturer_name,
+                ocr_used=result.ocr_used,
+                page_count=result.page_count,
+                extracted_at=result.extracted_at.isoformat(),
+                validation_state="confirmed",
+            )
+        )
+        self.status.set("Заявка подтверждена и сохранена")
+        messagebox.showinfo(
+            "Подтверждено",
+            f"Сохранено марок: {accepted_count}\nМожно переходить к расчёту и КП.",
+        )
+
+    def _cancel_extraction_draft(self) -> None:
+        self._extraction_draft = None
+        self._extraction_confirmed = False
+        self._refresh_marks_tree()
+        self.validation_warn_frame.pack_forget()
+        self.draft_customer_var.set("")
+        self.draft_customer_inn_var.set("")
+        self.draft_customer_addr_var.set("")
+        self.draft_manufacturer_var.set("")
+        self.draft_recipient_var.set("")
+        self._set_text(self.mark_context_text, "")
+        self._update_validation_status_bar(state="idle")
+        self.parse_info_var.set("Заявка не обработана — вкладка «1. Заявка»")
+        self.status.set("Черновик отменён")
+
     def _browse_pdf(self) -> None:
         path = filedialog.askopenfilename(
             title="Выберите заявку",
@@ -1232,13 +2072,18 @@ class RequestProcessorApp(tk.Tk):
             return
 
         self.status.set("Извлечение заявки…")
+        confirm_only = self.confirm_only_var.get()
 
         def work() -> None:
             try:
+                resolved = Path(doc_path).resolve()
                 result = extract_from_document(
                     Path(doc_path),
                     use_ocr=self.ocr_var.get(),
                 )
+                result = result.model_copy(update={"source_path": str(resolved)})
+                report = validate_extraction(result)
+
                 out_dir = Path("data/extracted")
                 out_dir.mkdir(parents=True, exist_ok=True)
                 out_file = out_dir / f"{Path(doc_path).stem}.json"
@@ -1247,96 +2092,84 @@ class RequestProcessorApp(tk.Tk):
                     encoding="utf-8",
                 )
 
-                db_stats = {"saved": 0, "errors": 0}
-                if self.save_marks_var.get() and result.cable_marks:
-                    db_stats = save_cable_marks_from_matches(
-                        result.cable_marks,
-                        source=str(Path(doc_path).resolve()),
-                        db_path=self.db_path,
-                    )
-
-                org_ids: dict[str, int | None] = {}
-                if self.save_orgs_var.get() and result.organizations:
-                    org_ids = save_organizations_from_extraction(
-                        result.organizations,
-                        source=str(Path(doc_path).resolve()),
-                        db_path=self.db_path,
-                    )
-                extraction_id = save_document_extraction(
-                    source_path=str(Path(doc_path).resolve()),
-                    source_type=result.source_type,
-                    text=result.text,
-                    marks_count=len(result.cable_marks),
-                    customer_org_id=org_ids.get("customer_org_id"),
-                    manufacturer_org_id=org_ids.get("manufacturer_org_id"),
-                    db_path=self.db_path,
+                initial_marks = [m.model_copy(deep=True) for m in report.marks]
+                draft = ExtractionDraft(
+                    result=result,
+                    report=report,
+                    source_path=resolved,
+                    json_path=out_file,
+                    marks=initial_marks,
+                    original_marks=[m.model_copy(deep=True) for m in initial_marks],
+                    original_customer=result.customer_name,
                 )
-                self._last_document_extraction_id = extraction_id
-                self._last_manufacturer_name = result.manufacturer_name or ""
-
-                summary = [
-                    f"Файл: {Path(doc_path).name}",
-                    f"Тип: {result.source_type}",
-                    f"Страниц: {result.page_count}",
-                    f"Марок: {len(result.cable_marks)}",
-                    f"OCR: {'да' if result.ocr_used else 'нет'}",
-                    f"Марок в БД: {db_stats['saved']}",
-                ]
-                if result.customer_name:
-                    summary.append(f"Заказчик: {result.customer_name}")
-                if result.manufacturer_name and result.manufacturer_name != result.customer_name:
-                    summary.append(f"Производитель: {result.manufacturer_name}")
-                for org in result.organizations:
-                    extras = []
-                    if org.inn:
-                        extras.append(f"ИНН {org.inn}")
-                    if org.postal_code:
-                        extras.append(org.postal_code)
-                    if org.is_accredited:
-                        extras.append("аккредитован")
-                    if org.fsa_registry_number:
-                        extras.append(org.fsa_registry_number)
-                    suffix = f" ({', '.join(extras)})" if extras else ""
-                    summary.append(f"  • [{org.role}] {org.name}{suffix}")
-                summary.append(f"JSON: {out_file}")
-
-                customer_name = result.customer_name
 
                 def update_ui() -> None:
-                    self.marks_list.delete(0, "end")
-                    for m in result.cable_marks:
-                        self.marks_list.insert("end", m.mark)
-                    self._set_text(self.pdf_output, "\n".join(summary))
-                    self._load_cable_marks()
-                    if customer_name:
-                        self.kp_customer_var.set(customer_name)
-                    self._load_organizations()
-                    self.parse_info_var.set(
-                        self._format_parse_info(
-                            file_name=Path(doc_path).name,
-                            source_type=result.source_type,
-                            marks_count=len(result.cable_marks),
-                            customer_name=result.customer_name,
-                            manufacturer_name=result.manufacturer_name,
-                            ocr_used=result.ocr_used,
-                            page_count=result.page_count,
-                            extracted_at=result.extracted_at.isoformat(),
+                    self._show_extraction_draft(draft)
+                    if not confirm_only:
+                        self.save_marks_var.set(True)
+                        self.save_orgs_var.set(True)
+                        confirmed = self._build_confirmed_result()
+                        self._persist_extraction(confirmed)
+                        self._extraction_confirmed = True
+                        self._extraction_draft.result = confirmed
+                        if confirmed.customer_name:
+                            self.kp_customer_var.set(confirmed.customer_name)
+                        self._load_cable_marks()
+                        self._load_organizations()
+                        self._update_validation_status_bar(
+                            state="confirmed",
+                            file_name=resolved.name,
+                            result=confirmed,
+                            report=report,
                         )
-                    )
-                    self.status.set("Заявка обработана")
+                        self.parse_info_var.set(
+                            self._format_parse_info(
+                                file_name=resolved.name,
+                                source_type=result.source_type,
+                                marks_count=len(confirmed.cable_marks),
+                                customer_name=confirmed.customer_name,
+                                manufacturer_name=confirmed.manufacturer_name,
+                                ocr_used=result.ocr_used,
+                                page_count=result.page_count,
+                                extracted_at=result.extracted_at.isoformat(),
+                                validation_state="confirmed",
+                            )
+                        )
+                        self.status.set("Заявка обработана (legacy: сразу в БД)")
+                    else:
+                        self.status.set("Черновик — проверьте и нажмите «Принять и сохранить»")
 
                 self.after(0, update_ui)
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("Ошибка извлечения", str(exc)))
-                self.after(0, lambda: self.status.set("Ошибка"))
+                def on_error() -> None:
+                    messagebox.showerror("Ошибка извлечения", str(exc))
+                    self.status.set("Ошибка")
+                    self._update_validation_status_bar(state="error")
+
+                self.after(0, on_error)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _use_mark_in_calc(self) -> None:
-        sel = self.marks_list.curselection()
-        if not sel:
+        mark_text = ""
+        if hasattr(self, "marks_tree"):
+            sel = self.marks_tree.selection()
+            if sel and self._extraction_draft:
+                idx = int(sel[0])
+                if 0 <= idx < len(self._extraction_draft.marks):
+                    entry = self._extraction_draft.marks[idx]
+                    if entry.accepted:
+                        mark_text = entry.mark
+        if not mark_text:
+            messagebox.showinfo("Расчёт", "Выберите принятую марку (✓) в таблице.")
             return
-        self.mark_var.set(self.marks_list.get(sel[0]))
+        if self._extraction_draft and not self._extraction_confirmed and self.confirm_only_var.get():
+            if not messagebox.askyesno(
+                "Черновик",
+                "Заявка ещё не подтверждена. Подставить марку из черновика?",
+            ):
+                return
+        self.mark_var.set(mark_text)
         if self.notebook:
             self.notebook.select(self.tab_calc)
         self.status.set("Марка подставлена в расчёт")
@@ -1408,6 +2241,18 @@ class RequestProcessorApp(tk.Tk):
                 "КП",
                 "Выберите один или несколько расчётов в таблице ниже (Ctrl+клик).\n\n"
                 "Если список пуст — сначала выполните расчёт на вкладке «2. Расчёт».",
+            )
+            return
+
+        if (
+            self.confirm_only_var.get()
+            and self._extraction_draft
+            and not self._extraction_confirmed
+        ):
+            messagebox.showwarning(
+                "КП",
+                "Сначала подтвердите заявку на вкладке «1. Заявка» "
+                "(кнопка «Принять и сохранить»).",
             )
             return
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 import json
 from datetime import datetime
+from enum import Enum
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -133,7 +134,7 @@ class CableMarkRecord(BaseModel):
     """Запись в накопительной таблице марок кабелей."""
 
     id: int | None = None
-    full_mark: str = Field(..., description="Полная марка с размерами и надписями")
+    full_mark: str = Field(..., description="Условное обозначение с размерами и надписями")
     brand: str = Field(..., description="Буквенная часть без пожарного обозначения")
     fire_class: str | None = Field(None, description="Класс пожарной безопасности")
     cores_count: int = Field(..., ge=1, description="Количество ТПЖ")
@@ -294,3 +295,94 @@ class PdfExtractionResult(BaseModel):
     is_scanned: bool = False
     ocr_used: bool = False
     extracted_at: datetime = Field(default_factory=datetime.now)
+
+
+"""---Валидация извлечения (human-in-the-loop)---"""
+
+DocumentType = Literal["letter", "direction", "act", "unknown"]
+
+
+class FieldStatus(str, Enum):
+    """Уровень уверенности поля после проверки правилами."""
+
+    ok = "ok"
+    warning = "warning"
+    error = "error"
+
+
+class MarkValidation(BaseModel):
+    """Проверенная марка кабеля для панели подтверждения (поля → cable_marks)."""
+
+    mark: str = Field(..., description="Условное обозначение (full_mark в БД)")
+    document: str | None = None
+    context: str | None = None
+    brand: str | None = Field(None, description="Буквенная часть без пожарного класса")
+    fire_class: str | None = None
+    cores_count: int | None = Field(None, ge=1, description="Количество ТПЖ")
+    structural_element_type: str | None = Field(None, description="жила / пара / тройка")
+    structural_elements_count: int | None = Field(None, ge=1)
+    characteristic_size: float | None = Field(None, gt=0, description="Сечение или диаметр")
+    size_unit: Literal["mm2", "mm"] = "mm2"
+    confidence: float = Field(0.75, ge=0, le=1)
+    status: FieldStatus = FieldStatus.ok
+    warnings: list[str] = Field(default_factory=list)
+    accepted: bool = True
+
+    def to_cable_mark_record(self, source: str | None = None) -> "CableMarkRecord":
+        """Собирает запись для таблицы cable_marks с учётом правок оператора."""
+        from .cable_mark_parser import parse_cable_mark_record
+
+        record = parse_cable_mark_record(
+            self.mark,
+            document=self.document,
+            context=self.context,
+        )
+        overrides: dict[str, Any] = {}
+        if self.brand is not None:
+            overrides["brand"] = self.brand
+        if self.fire_class is not None:
+            overrides["fire_class"] = self.fire_class or None
+        if self.cores_count is not None:
+            overrides["cores_count"] = self.cores_count
+        if self.structural_element_type is not None:
+            overrides["structural_element_type"] = self.structural_element_type
+        if self.structural_elements_count is not None:
+            overrides["structural_elements_count"] = self.structural_elements_count
+        if self.characteristic_size is not None:
+            overrides["characteristic_size"] = self.characteristic_size
+        if self.size_unit:
+            overrides["size_unit"] = self.size_unit
+        if self.document is not None:
+            overrides["document"] = self.document or None
+        if overrides:
+            record = record.model_copy(update=overrides)
+        record.source = source
+        return record
+
+
+class OrgValidation(BaseModel):
+    """Проверенная организация для панели подтверждения."""
+
+    role: OrganizationRole
+    name: str
+    inn: str | None = None
+    address: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    status: FieldStatus = FieldStatus.ok
+    warnings: list[str] = Field(default_factory=list)
+    read_only: bool = False
+
+
+class ValidationReport(BaseModel):
+    """Отчёт валидатора: уверенность, флаги, блокировка подтверждения."""
+
+    document_type: DocumentType = "unknown"
+    overall_confidence: float = Field(0.0, ge=0, le=1)
+    overall_status: FieldStatus = FieldStatus.ok
+    marks: list[MarkValidation] = Field(default_factory=list)
+    organizations: list[OrgValidation] = Field(default_factory=list)
+    customer_name: str = ""
+    manufacturer_name: str = ""
+    recipient_name: str | None = None
+    flags: list[str] = Field(default_factory=list)
+    block_confirm: bool = False

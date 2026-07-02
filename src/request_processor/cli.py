@@ -55,6 +55,7 @@ from .cost_calculator import calculate_cost, print_breakdown
 from .kp_generator import generate_kp_from_db
 from .application_generator import generate_application_from_order
 from .pdf_extractor import extract_from_document
+from .extraction_validator import format_validation_report, validate_extraction
 from request_processor import __version__
 
 def _slugify(text: str) -> str:
@@ -177,6 +178,16 @@ def calculate_cmd(
 @click.option("--ocr-dpi", default=200, show_default=True, type=int, help="DPI для OCR сканов")
 @click.option("--no-save-marks", is_flag=True, help="Не сохранять марки в БД")
 @click.option("--no-save-orgs", is_flag=True, help="Не сохранять организации в БД")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Сохранить только JSON, без записи в БД (марки, организации, document_extractions)",
+)
+@click.option(
+    "--validate",
+    is_flag=True,
+    help="Вывести отчёт валидатора парсинга; код выхода 1 при блокировке подтверждения",
+)
 @click.option("--db", default="data/app.db", show_default=True)
 def extract_pdf_cmd(
     pdf: str,
@@ -187,6 +198,8 @@ def extract_pdf_cmd(
     ocr_dpi: int,
     no_save_marks: bool,
     no_save_orgs: bool,
+    dry_run: bool,
+    validate: bool,
     db: str,
 ) -> None:
     """Извлекает текст, таблицы, марки и организации из PDF или Word."""
@@ -248,6 +261,9 @@ def extract_pdf_cmd(
         click.echo(click.style("\n--- Текст ---\n", bold=True))
         click.echo(result.text if result.text else "(пусто)")
 
+    validation_report = validate_extraction(result) if validate else None
+    skip_db = dry_run or no_save_marks
+
     out = Path(output_path) if output_path else Path("data/extracted") / f"{pdf_file.stem}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
@@ -256,7 +272,14 @@ def extract_pdf_cmd(
     )
     click.echo(click.style(f"\n✓ Результат сохранён: {out}", fg="green"))
 
-    if not no_save_marks and result.cable_marks:
+    if validation_report is not None:
+        click.echo(click.style("\n--- Валидация ---\n", bold=True))
+        click.echo(format_validation_report(validation_report, source_name=pdf_file.name))
+
+    if dry_run:
+        click.echo(click.style("Режим --dry-run: запись в БД пропущена.", fg="cyan"))
+
+    if not skip_db and result.cable_marks:
         migrate_db(db)
         stats = save_cable_marks_from_matches(
             result.cable_marks,
@@ -270,7 +293,7 @@ def extract_pdf_cmd(
             )
         )
 
-    if not no_save_orgs and result.organizations:
+    if not dry_run and not no_save_orgs and result.organizations:
         migrate_db(db)
         org_ids = save_organizations_from_extraction(
             result.organizations,
@@ -293,6 +316,9 @@ def extract_pdf_cmd(
                 fg="green",
             )
         )
+
+    if validation_report is not None and validation_report.block_confirm:
+        raise SystemExit(1)
 
 
 @cli.command("list-organizations")
@@ -450,7 +476,7 @@ def list_cable_marks_cmd(search: Optional[str], limit: int, db: str) -> None:
         click.echo("Марки не найдены.")
         return
     click.echo(
-        f"{'Полная марка':<45} {'Марка':<12} {'ТПЖ':>4} {'Размер':>10}  Документ"
+        f"{'Усл. обозначение':<45} {'Марка':<12} {'ТПЖ':>4} {'Размер':>10}  Документ"
     )
     click.echo("-" * 110)
     for row in rows:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from .models import CableMark, CableMarkRecord
+from .models import CableMark, CableMarkMatch, CableMarkRecord, FieldStatus, MarkValidation
 
 _FIRE_PATTERNS = [
     r"нг\(А\)-LSLTx",
@@ -196,6 +196,38 @@ def parse_cable_mark(mark: str) -> CableMark:
         has_armor=has_armor,
         is_lan=nums.get("is_lan", False),
         extras={"raw": original},
+    )
+
+
+def mark_validation_from_match(
+    match: CableMarkMatch,
+    *,
+    confidence: float = 0.9,
+    status: FieldStatus = FieldStatus.ok,
+    warnings: list[str] | None = None,
+    accepted: bool = True,
+) -> MarkValidation:
+    """Строит MarkValidation со всеми полями для cable_marks из найденной марки."""
+    record = parse_cable_mark_record(
+        match.mark,
+        document=match.document,
+        context=match.context,
+    )
+    return MarkValidation(
+        mark=record.full_mark,
+        document=record.document,
+        context=match.context,
+        brand=record.brand,
+        fire_class=record.fire_class,
+        cores_count=record.cores_count,
+        structural_element_type=record.structural_element_type,
+        structural_elements_count=record.structural_elements_count,
+        characteristic_size=record.characteristic_size,
+        size_unit=record.size_unit,
+        confidence=confidence,
+        status=status,
+        warnings=warnings or [],
+        accepted=accepted,
     )
 
 

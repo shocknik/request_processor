@@ -695,6 +695,37 @@ def save_cable_marks_from_matches(
     return stats
 
 
+def save_cable_marks_from_validations(
+    validations: list,
+    *,
+    source: str | None = None,
+    only_accepted: bool = True,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, int]:
+    """Сохраняет подтверждённые марки с полями, заданными оператором."""
+    from .models import MarkValidation
+
+    stats = {"saved": 0, "errors": 0}
+    for item in validations:
+        if only_accepted and isinstance(item, MarkValidation) and not item.accepted:
+            continue
+        try:
+            if isinstance(item, MarkValidation):
+                record = item.to_cable_mark_record(source=source)
+            else:
+                record = parse_cable_mark_record(
+                    item.mark,
+                    document=getattr(item, "document", None),
+                    context=getattr(item, "context", None),
+                )
+                record.source = source
+            upsert_cable_mark(record, db_path)
+            stats["saved"] += 1
+        except Exception:
+            stats["errors"] += 1
+    return stats
+
+
 def upsert_organization(
     extract: OrganizationExtract,
     *,

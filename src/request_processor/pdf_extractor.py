@@ -148,7 +148,7 @@ def _fix_ocr_confusables(text: str) -> str:
     return text
 
 
-def _is_plausible_mark(mark: str) -> bool:
+def is_plausible_mark(mark: str) -> bool:
     """Отсекает явные ложные срабатывания из «рваного» текста PDF/OCR."""
     if re.search(r"\d{2}\.\d{4}", mark):
         return False
@@ -210,7 +210,7 @@ def _add_match(
 ) -> None:
     mark = _clean_mark(mark)
     key = mark.lower()
-    if len(mark) < 5 or key in seen or not _is_plausible_mark(mark):
+    if len(mark) < 5 or key in seen or not is_plausible_mark(mark):
         return
     seen.add(key)
     context = _context_snippet(text, start, end, radius=180)
