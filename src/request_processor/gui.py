@@ -25,6 +25,7 @@ from .test_rules import (
 from .cable_mark_parser import parse_cable_mark_record
 from .cost_calculator import calculate_cost, format_breakdown
 from .extraction_validator import apply_operator_edits, validate_extraction
+from .requirement_mapper import map_requirements_to_tests
 from .models import (
     CableMarkMatch,
     ClimaticTestSettings,
@@ -62,6 +63,7 @@ from .sqlite_repo import (
     list_orders,
     get_order_details,
     list_test_applications,
+    record_mapping_usage,
 )
 
 # Цветовая схема (современный flat UI)
@@ -391,12 +393,25 @@ class RequestProcessorApp(tk.Tk):
         mark_row.pack(fill="x")
         mark_entry = ttk.Entry(mark_row, textvariable=self.mark_var, font=("Segoe UI", 11))
         mark_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self._secondary_button(
+            mark_row,
+            "Испытания из заявки",
+            self._apply_suggested_tests_from_application,
+        ).pack(side="left", padx=(8, 0))
         self._accent_button(mark_row, "Рассчитать", self._run_calculate).pack(side="left", padx=(8, 0))
+        self.calc_suggestions_var = tk.StringVar(value="")
+        ttk.Label(
+            inner,
+            textvariable=self.calc_suggestions_var,
+            style="CardMuted.TLabel",
+            wraplength=720,
+        ).pack(anchor="w", pady=(4, 0))
         ttk.Label(
             inner,
             text="Пример: ВВГ-Пнг(А) 3х4ок(М,РЕ)-0,66",
             style="CardMuted.TLabel",
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(anchor="w", pady=(2, 0))
+        self.mark_var.trace_add("write", lambda *_: self._update_calc_suggestions_hint())
 
         mid = ttk.PanedWindow(self.tab_calc, orient="horizontal")
         mid.pack(fill="both", expand=True)
@@ -1145,6 +1160,105 @@ class RequestProcessorApp(tk.Tk):
         widget.delete("1.0", "end")
         widget.insert("1.0", content)
         widget.configure(state="disabled")
+
+    def _normalize_mark_lookup(self, mark: str) -> str:
+        text = mark.replace("×", "x").replace("Х", "x").replace("х", "x")
+        return re.sub(r"\s+", " ", text.strip().lower())
+
+    def _find_mark_validation(self, mark: str) -> MarkValidation | None:
+        if not self._extraction_draft or not mark.strip():
+            return None
+        key = self._normalize_mark_lookup(mark)
+        for entry in self._extraction_draft.marks:
+            if not entry.accepted:
+                continue
+            if self._normalize_mark_lookup(entry.mark) == key:
+                return entry
+            if key in self._normalize_mark_lookup(entry.mark):
+                return entry
+        return None
+
+    def _suggested_test_codes_for_mark(self, mark: str) -> list[str]:
+        entry = self._find_mark_validation(mark)
+        if entry and entry.suggested_tests:
+            return list(entry.suggested_tests)
+        if entry and entry.requirements_raw:
+            suggestions = map_requirements_to_tests(
+                entry.requirements_raw,
+                db_path=self.db_path,
+            )
+            return [s.code for s in suggestions]
+        return []
+
+    def _update_calc_suggestions_hint(self) -> None:
+        mark = self.mark_var.get().strip()
+        codes = self._suggested_test_codes_for_mark(mark)
+        if codes:
+            self.calc_suggestions_var.set(
+                f"Из заявки для этой марки: {', '.join(codes)} — кнопка «Испытания из заявки»"
+            )
+        else:
+            self.calc_suggestions_var.set("")
+
+    def _apply_suggested_tests_from_application(self) -> None:
+        mark = self.mark_var.get().strip()
+        if not mark:
+            messagebox.showwarning(
+                "Расчёт",
+                "Укажите марку кабеля или подставьте её с вкладки «1. Заявка» (→ В расчёт).",
+            )
+            return
+
+        entry = self._find_mark_validation(mark)
+        if entry and entry.requirements_raw:
+            suggestions = map_requirements_to_tests(
+                entry.requirements_raw,
+                db_path=self.db_path,
+            )
+            codes = [s.code for s in suggestions]
+            for s in suggestions:
+                if s.source == "database" and s.mapping_id:
+                    record_mapping_usage(s.mapping_id, self.db_path)
+        else:
+            codes = self._suggested_test_codes_for_mark(mark)
+            suggestions = []
+
+        if not codes:
+            messagebox.showinfo(
+                "Испытания из заявки",
+                "Для этой марки нет текста требований.\n\n"
+                "Извлеките направление в ИЛ (table-first) и подтвердите заявку, "
+                "либо выберите марку из таблицы на вкладке «1. Заявка».",
+            )
+            return
+
+        existing = {e.code for e in self._calc_entries}
+        added = 0
+        for code in codes:
+            if code not in existing:
+                self._add_test_to_calc(code)
+                existing.add(code)
+                added += 1
+
+        names = [
+            self._tests_by_code.get(c, {}).get("name", c)[:40]
+            for c in codes
+            if c in self._tests_by_code
+        ]
+        if added:
+            self.status.set(f"Добавлено испытаний из заявки: {added}")
+            messagebox.showinfo(
+                "Испытания из заявки",
+                f"Добавлено: {added}\n"
+                + "\n".join(f"  • {n}" for n in names[:8])
+                + (f"\n  … и ещё {len(names) - 8}" if len(names) > 8 else ""),
+            )
+        else:
+            messagebox.showinfo(
+                "Испытания из заявки",
+                "Все предложенные испытания уже в списке расчёта.",
+            )
+        self._update_calc_suggestions_hint()
 
     def _run_calculate(self) -> None:
         mark = self.mark_var.get().strip()
@@ -2172,7 +2286,14 @@ class RequestProcessorApp(tk.Tk):
         self.mark_var.set(mark_text)
         if self.notebook:
             self.notebook.select(self.tab_calc)
-        self.status.set("Марка подставлена в расчёт")
+        self._update_calc_suggestions_hint()
+        codes = self._suggested_test_codes_for_mark(mark_text)
+        if codes:
+            self.status.set(
+                f"Марка подставлена · из заявки: {', '.join(codes)} — «Испытания из заявки»"
+            )
+        else:
+            self.status.set("Марка подставлена в расчёт")
 
     def _use_db_mark_in_calc(self) -> None:
         sel = self.cable_marks_tree.selection()

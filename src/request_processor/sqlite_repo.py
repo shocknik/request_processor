@@ -370,6 +370,20 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_test_mappings_code ON test_mappings(test_code);
+            CREATE TABLE IF NOT EXISTS generated_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER,
+                calculation_id INTEGER,
+                doc_type TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL,
+                FOREIGN KEY (calculation_id) REFERENCES calculations(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_generated_documents_order_id
+                ON generated_documents(order_id);
+            CREATE INDEX IF NOT EXISTS idx_generated_documents_type
+                ON generated_documents(doc_type);
             """
         )
     _migrate_orders_columns(db_path)
@@ -506,7 +520,14 @@ def save_test_application(
             "UPDATE orders SET application_path = ?, updated_at = ? WHERE id = ?",
             (output_path, now, order_id),
         )
-        return int(cur.lastrowid)
+        app_id = int(cur.lastrowid)
+    save_generated_document(
+        doc_type="application",
+        file_path=output_path,
+        order_id=order_id,
+        db_path=db_path,
+    )
+    return app_id
 
 
 def list_test_applications(
@@ -658,6 +679,56 @@ def add_test_mapping(
             (pattern,),
         ).fetchone()
         return int(row["id"]) if row else 0
+
+
+def save_generated_document(
+    *,
+    doc_type: str,
+    file_path: str,
+    order_id: int | None = None,
+    calculation_id: int | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Журнал сгенерированных файлов (КП, заявка на испытания)."""
+    if doc_type not in ("kp", "application"):
+        raise ValueError(f"Неизвестный тип документа: {doc_type}")
+    now = datetime.now().isoformat()
+    resolved = str(Path(file_path).resolve())
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO generated_documents (
+                order_id, calculation_id, doc_type, file_path, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (order_id, calculation_id, doc_type, resolved, now),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def list_generated_documents(
+    *,
+    order_id: int | None = None,
+    doc_type: str | None = None,
+    limit: int = 50,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    query = "SELECT * FROM generated_documents"
+    params: list[Any] = []
+    conditions: list[str] = []
+    if order_id is not None:
+        conditions.append("order_id = ?")
+        params.append(order_id)
+    if doc_type:
+        conditions.append("doc_type = ?")
+        params.append(doc_type)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
 
 def record_mapping_usage(
@@ -1207,7 +1278,14 @@ def create_order_from_kp(
                     float(row["total_cost_with_vat"]),
                 ),
             )
-        return order_id
+
+    save_generated_document(
+        doc_type="kp",
+        file_path=kp_output_path,
+        order_id=order_id,
+        db_path=db_path,
+    )
+    return order_id
 
 
 def list_orders(

@@ -3,7 +3,7 @@
 > GitHub: https://github.com/shocknik/request_processor  
 > Obsidian: `Python/Проект request-processor/`
 
-## Статус v0.7.0 (2026-07-02)
+## Статус v0.7.1 (2026-07-02)
 
 ### Итерация 4 — фаза 1 ✅ (доверие к парсингу)
 
@@ -20,12 +20,12 @@
 - **Заказы:** `orders`, кнопки в GUI, `generate-application` в CLI
 - **Цикл:** Заявка → Расчёт → КП → Заказ → Заявка на испытания
 
-### Фаза 2 — в работе
+### Фаза 2 — завершена ✅ (v0.7.1)
 
-- ✅ Table-first extractor для направлений (v0.6.2)
-- ✅ `test_mappings` + `requirement_mapper` (v0.7.0)
-- `generated_documents` — история файлов по заказу
-- GUI: автозаполнение испытаний на вкладке «Расчёт» (PR-4)
+- Table-first extractor (v0.6.2)
+- `test_mappings` + `requirement_mapper` (v0.7.0)
+- `generated_documents` + `list-generated-documents` (v0.7.1)
+- GUI: «Испытания из заявки» на вкладке «Расчёт»
 
 См. [[27 — Фаза 2: требования и таблицы (2026-07-02)]] в Obsidian.
 

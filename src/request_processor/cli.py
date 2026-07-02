@@ -52,6 +52,7 @@ from .sqlite_repo import (
     list_test_applications,
     list_test_mappings,
     add_test_mapping,
+    list_generated_documents,
 )
 from .cost_calculator import calculate_cost, print_breakdown
 from .kp_generator import generate_kp_from_db
@@ -762,6 +763,31 @@ def generate_application_cmd(order_id: int, output_path: Optional[str], db: str)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(click.style(f"✓ Заявка сохранена: {path}", fg="green"))
+
+
+@cli.command("list-generated-documents")
+@click.option("--order-id", default=None, type=int, help="Фильтр по заказу")
+@click.option("--type", "doc_type", type=click.Choice(["kp", "application"]), default=None)
+@click.option("--limit", default=20, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_generated_documents_cmd(
+    order_id: int | None,
+    doc_type: str | None,
+    limit: int,
+    db: str,
+) -> None:
+    """История сгенерированных файлов (КП, заявки на испытания)."""
+    migrate_db(db)
+    rows = list_generated_documents(order_id=order_id, doc_type=doc_type, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Сгенерированные документы не найдены.")
+        return
+    for row in rows:
+        click.echo(
+            f"{row['id']:>4}  заказ №{row.get('order_id') or '—':>4}  "
+            f"{row['doc_type']:<12}  {(row.get('created_at') or '')[:16]}  "
+            f"{row['file_path']}"
+        )
 
 
 @cli.command("list-applications")
