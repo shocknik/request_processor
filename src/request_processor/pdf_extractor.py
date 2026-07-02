@@ -35,9 +35,9 @@ except ImportError:  # pragma: no cover
 # --- Паттерны марки (структурные, без whitelist брендов) ---
 
 _SIZE_PART = (
-    r"\d+\s*[зЗпП]?\s*х\s*"
+    r"\d+\s*[зЗпП]?\s*[хx]\s*"
     r"(?:[\d.,\(\)]+|[а-яёa-zA-Z]{1,6})"
-    r"(?:\s*х\s*[\d.,\(\)]+)*"
+    r"(?:\s*[хx]\s*[\d.,\(\)]+)*"
     r"(?:[а-яёa-zA-Z\-\(\),\d/]*)"
     r"(?:\s*\([^)]+\))?"
     r"(?:-\d+[.,]?\d*)?"
@@ -45,8 +45,33 @@ _SIZE_PART = (
 
 _NAME_PART = (
     r"(?:ККЗ\s+МК\s+)?"
-    r"[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z0-9\-\(\)]+"
-    r"(?:[\-–][А-ЯЁа-яёA-Za-z0-9\(\)]+)*"
+    r"[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z0-9\-\(\)/]+"
+    r"(?:[\-–/][А-ЯЁа-яёA-Za-z0-9\(\)/]+)*"
+)
+
+# Размер: 2х2, 2x2x0,52, 4x2x0.52 (LAN-кабель)
+_SIZE_PART_LATIN = (
+    r"\d+\s*x\s*\d+"
+    r"(?:\s*x\s*[\d.,]+)?"
+)
+
+# СПЕЦЛАН F/UTP … 2x2x0,52
+_SPECLAN_MARK_PATTERN = re.compile(
+    r"(?:\d+\.\s*)?"
+    r"(СПЕЦЛАН\s+(?:SF?/)?UTP\s+Cat\s+5\w\s+ZH\s+нг\(А\)-HF\s+\d+\s*x\s*\d+(?:\s*x\s*[\d.,]+)?)",
+    re.IGNORECASE,
+)
+
+# Нумерованный список марок в письме
+_LETTER_MARKS_BLOCK = re.compile(
+    r"марк[аи]\s+кабел[ья][:\s]+(.+?)(?=Последующ|С\s+уважением|Суважением|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_LETTER_MARK_ITEM = re.compile(
+    r"\d+\.\s*"
+    r"(СПЕЦЛАН\s+.+?)"
+    r"(?=\s+ТУ\s*[\d.]|ТУ\s+\d|\s+В\s+количестве|;|\d+\.\s+СПЕЦ|\d+\.\s+[А-ЯЁA-Z]|$)",
+    re.IGNORECASE,
 )
 
 _MARK_PATTERN = re.compile(
@@ -85,11 +110,22 @@ def _require_pdfplumber() -> None:
 def _normalize_text(text: str) -> str:
     """Приводит текст PDF/OCR к удобному для поиска виду."""
     text = text.replace("\xa0", " ")
-    text = text.replace("×", "х").replace("x", "х").replace("X", "х")
     text = text.replace("—", "-").replace("–", "-")
     text = re.sub(r"-\s*\n\s*", "-", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _normalize_text_for_marks(text: str) -> str:
+    """
+    Нормализация для поиска марок.
+
+    Сохраняет латинское «x» в размерах (2x2x0,52, Cat 5e) и в F/UTP.
+    Кириллическое «х» унифицирует в «x» для единого паттерна.
+    """
+    text = _normalize_text(text)
+    text = text.replace("×", "x").replace("Х", "x").replace("х", "x")
+    return text
 
 
 def _fix_ocr_confusables(text: str) -> str:
@@ -112,12 +148,20 @@ def _is_plausible_mark(mark: str) -> bool:
         return False
     if _REJECT_PREFIXES.search(mark):
         return False
-    if not re.search(r"\d+\s*[зЗпП]?\s*х\s*(?:[\d.,]|[а-яёa-zA-Z])", mark, re.IGNORECASE):
+    if re.match(r"^нг\(", mark, re.IGNORECASE):
+        return False
+    if not re.match(r"^(?:ККЗ\s+МК\s+|СПЕЦЛАН\s+)?[А-ЯЁA-Z]", mark, re.IGNORECASE):
+        return False
+    has_cyr_size = re.search(
+        r"\d+\s*[зЗпП]?\s*[хx]\s*(?:[\d.,]|[а-яёa-zA-Z])", mark, re.IGNORECASE
+    )
+    has_lan_size = re.search(_SIZE_PART_LATIN, mark, re.IGNORECASE)
+    if not has_cyr_size and not has_lan_size:
         return False
     name = re.split(r"\s+\d", mark, maxsplit=1)[0]
-    if len(name) > 80 or len(name) < 2:
+    if len(name) > 100 or len(name) < 2:
         return False
-    return bool(re.match(r"^(?:ККЗ\s+МК\s+)?[А-ЯЁA-Z]", mark))
+    return True
 
 
 def _clean_mark(raw: str) -> str:
@@ -136,6 +180,8 @@ def _clean_mark(raw: str) -> str:
         mark,
         flags=re.IGNORECASE,
     )
+    if mark.upper().startswith("СПЕЦЛАН"):
+        mark = re.sub(r"\s+В\s+количестве.*$", "", mark, flags=re.IGNORECASE)
     return mark.strip()
 
 
@@ -169,20 +215,43 @@ def _add_match(
     )
 
 
+def _find_letter_list_marks(text: str) -> list[tuple[str, int, int]]:
+    """Марки из нумерованного списка в гарантийном/сопроводительном письме."""
+    found: list[tuple[str, int, int]] = []
+    block = _LETTER_MARKS_BLOCK.search(text)
+    search_in = block.group(1) if block else text
+    base_offset = block.start(1) if block else 0
+
+    for m in _LETTER_MARK_ITEM.finditer(search_in):
+        mark = m.group(1).strip()
+        if mark.upper().startswith("СПЕЦЛАН"):
+            found.append((mark, base_offset + m.start(1), base_offset + m.end(1)))
+
+    if not found:
+        for m in _SPECLAN_MARK_PATTERN.finditer(text):
+            found.append((m.group(1), m.start(1), m.end(1)))
+
+    return found
+
+
 def find_cable_marks(text: str) -> list[CableMarkMatch]:
     """
     Ищет марки кабелей по структурному паттерну «название + NхM».
 
     Не использует список брендов — любая строка нужной формы.
+    Поддерживает LAN (СПЕЦЛАН F/UTP 2x2x0,52) и нумерованные списки в письмах.
     """
-    normalized = _fix_ocr_confusables(_normalize_text(text))
+    normalized = _fix_ocr_confusables(_normalize_text_for_marks(text))
     if not normalized:
         return []
 
     seen: set[str] = set()
     matches: list[CableMarkMatch] = []
 
-    for pattern in (_AFTER_MARKI_PATTERN, _PRODUCT_MARK_PATTERN, _MARK_PATTERN):
+    for mark, start, end in _find_letter_list_marks(normalized):
+        _add_match(matches, seen, mark, normalized, start, end)
+
+    for pattern in (_SPECLAN_MARK_PATTERN, _AFTER_MARKI_PATTERN, _PRODUCT_MARK_PATTERN, _MARK_PATTERN):
         for m in pattern.finditer(normalized):
             raw = m.group(1) if m.lastindex else m.group(0)
             _add_match(matches, seen, raw, normalized, m.start(), m.end())

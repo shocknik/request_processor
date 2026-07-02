@@ -396,6 +396,14 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
     if not text or not text.strip():
         return []
 
+    from .letter_extractor import is_business_letter, organizations_from_letter
+    from .nlp_extractor import enhance_organizations
+
+    if is_business_letter(text):
+        letter_orgs = organizations_from_letter(text)
+        if letter_orgs:
+            return enhance_organizations(text, letter_orgs)
+
     found: list[OrganizationExtract] = []
     seen: set[str] = set()
 
@@ -462,7 +470,7 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
             seen.add(normalize_org_name(manufacturer.name))
             found.append(manufacturer)
 
-    return found
+    return enhance_organizations(text, found)
 
 
 def pick_customer_name(organizations: list[OrganizationExtract]) -> str:
