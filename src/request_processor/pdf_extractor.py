@@ -419,6 +419,28 @@ def _tables_to_text(tables: list[list[list[str]]]) -> str:
     return "\n".join(" ".join(cell for cell in row if cell) for table in tables for row in table)
 
 
+def _resolve_cable_marks(
+    text: str,
+    tables: list[list[list[str]]],
+) -> list[CableMarkMatch]:
+    """
+    Марки кабелей: table-first для направлений, иначе regex по тексту.
+
+    Таблица направления приоритетнее плоского текста PDF.
+    """
+    if tables:
+        from .direction_table_extractor import extract_marks_from_tables
+
+        table_marks = extract_marks_from_tables(tables)
+        if table_marks:
+            return table_marks
+
+    search_text = text
+    if tables:
+        search_text = f"{text}\n{_tables_to_text(tables)}".strip()
+    return find_cable_marks(search_text)
+
+
 def _detect_scanned(pdf_path: Path) -> tuple[bool, int]:
     """True, если PDF похож на скан (есть изображения, но нет текста)."""
     _require_pdfplumber()
@@ -456,11 +478,7 @@ def extract_from_pdf(
         text = extract_text(path)
         tables = extract_tables(path)
 
-    search_text = text
-    if tables:
-        search_text = f"{text}\n{_tables_to_text(tables)}".strip()
-
-    cable_marks = find_cable_marks(search_text)
+    cable_marks = _resolve_cable_marks(text, tables)
     organizations = extract_organizations(search_text)
 
     logger.info(
@@ -530,7 +548,7 @@ def _build_extraction_result(
         page_count=page_count,
         text=text,
         tables=tables or [],
-        cable_marks=find_cable_marks(search_text),
+        cable_marks=_resolve_cable_marks(text, tables or []),
         organizations=organizations,
         customer_name=pick_customer_name(organizations),
         manufacturer_name=pick_manufacturer_name(organizations),

@@ -128,6 +128,10 @@ class CableMarkMatch(BaseModel):
     mark: str
     context: str | None = None
     document: str | None = None
+    requirements_raw: str | None = Field(
+        None,
+        description="Сырой текст контролируемых показателей / требований из таблицы направления",
+    )
 
 
 class CableMarkRecord(BaseModel):
