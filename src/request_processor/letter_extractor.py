@@ -162,9 +162,15 @@ def _extract_sender_address(header: str, *, exclude: str | None = None) -> str |
                     addr = f"{postal.group(1)}, {addr}"
                 return normalize_address_text(addr)
 
-    postal = re.search(r"\b(\d{6})\b[^.\n]{10,120}", header)
+    postal = re.search(r"\b(\d{6})\b", header)
     if postal:
-        return sanitize_address(postal.group(0))
+        idx = postal.group(1)
+        chunk = header[postal.start() : postal.start() + 140]
+        addr = sanitize_address(chunk)
+        if addr:
+            if not addr.startswith(idx):
+                addr = f"{idx}, {addr}"
+            return normalize_address_text(addr)
     return None
 
 

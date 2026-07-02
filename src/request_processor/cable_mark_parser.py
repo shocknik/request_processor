@@ -1,5 +1,8 @@
 """
-Парсер марок кабелей.
+Парсер марок кабелей и извлечение ТУ/ГОСТ из контекста.
+
+ТУ с кириллической буквой в номере (16.К99-058-2014) — отдельный шаблон _TU_PATTERN.
+OCR-правки: fix_ocr_document_text() (Ty→ТУ, K→К).
 """
 
 from __future__ import annotations
@@ -20,8 +23,17 @@ _FIRE_PATTERNS = [
     r"-LS\b",
 ]
 
+# ТУ 16.К99-058-2014 — после точки идёт кириллическая «К»
+_TU_PATTERN = re.compile(
+    r"(?:ТУ|TU|Ty)\s*\d+\.[КкKk]\d{2,3}-\d{3}-\d{4}",
+    re.IGNORECASE,
+)
+_GOST_STO_PATTERN = re.compile(
+    r"(?:ГОСТ|СТО|Р\s*МЭК)\s*[\d\.\-/]+(?:\s*[\d\-/]+)*",
+    re.IGNORECASE,
+)
 _DOC_PATTERN = re.compile(
-    r"(?:ТУ|ГОСТ|СТО|Р\s*МЭК)\s*[\d\.\-/]+(?:\s*[\d\-/]+)*",
+    r"(?:ТУ|TU|Ty|ГОСТ|СТО|Р\s*МЭК)\s*[\d\.\-/A-Za-zА-Яа-яЁё]+(?:-[\dA-Za-zА-Яа-яЁё]+)*",
     re.IGNORECASE,
 )
 
@@ -116,14 +128,36 @@ def _extract_numbers(mark: str) -> dict[str, Any]:
     return result
 
 
+def fix_ocr_document_text(text: str) -> str:
+    """Правит типичные OCR-ошибки в обозначениях ТУ/ГОСТ."""
+    text = re.sub(r"\bTy\s+", "ТУ ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bTU\s+", "ТУ ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(ТУ\s*\d+\.)K(\d)", r"\1К\2", text, flags=re.IGNORECASE)
+    return text
+
+
+def extract_document_from_text(text: str | None) -> str | None:
+    """Извлекает ТУ/ГОСТ из фрагмента текста (марка + хвост строки)."""
+    if not text:
+        return None
+    blob = fix_ocr_document_text(text)
+
+    tu = _TU_PATTERN.search(blob)
+    if tu:
+        return re.sub(r"\s+", " ", tu.group(0)).strip()
+
+    for pattern in (_GOST_STO_PATTERN, _DOC_PATTERN):
+        m = pattern.search(blob)
+        if m:
+            doc = re.sub(r"\s+", " ", m.group(0)).strip()
+            if len(doc) > 6 and not re.fullmatch(r"ТУ\s*\d+\.?", doc, re.I):
+                return doc
+    return None
+
+
 def extract_document_from_context(context: str | None) -> str | None:
-    """Извлекает ТУ/ГОСТ из контекста вокруг марки в PDF."""
-    if not context:
-        return None
-    matches = _DOC_PATTERN.findall(context)
-    if not matches:
-        return None
-    return re.sub(r"\s+", " ", matches[0]).strip()
+    """Извлекает ТУ/ГОСТ из контекста вокруг марки в PDF/письме."""
+    return extract_document_from_text(context)
 
 
 def parse_cable_mark(mark: str) -> CableMark:

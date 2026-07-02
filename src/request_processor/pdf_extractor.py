@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from .cable_mark_parser import extract_document_from_context
+from .cable_mark_parser import extract_document_from_text, fix_ocr_document_text
 from .models import CableMarkMatch, PdfExtractionResult
 from .organization_extractor import (
     extract_organizations,
@@ -70,7 +70,12 @@ _LETTER_MARKS_BLOCK = re.compile(
 _LETTER_MARK_ITEM = re.compile(
     r"\d+\.\s*"
     r"(СПЕЦЛАН\s+.+?)"
-    r"(?=\s+ТУ\s*[\d.]|ТУ\s+\d|\s+В\s+количестве|;|\d+\.\s+СПЕЦ|\d+\.\s+[А-ЯЁA-Z]|$)",
+    r"(?:\s+(ТУ\s*\d+\.[КкKk]\d{2,3}-\d{3}-\d{4}))?"
+    r"(?=\s+В\s+количестве|;|\d+\.\s+СПЕЦ|\d+\.\s+[А-ЯЁA-Z]|$)",
+    re.IGNORECASE,
+)
+_TU_TAIL_PATTERN = re.compile(
+    r"ТУ\s*\d+\.[КкKk]\d{2,3}-\d{3}-\d{4}",
     re.IGNORECASE,
 )
 
@@ -129,7 +134,8 @@ def _normalize_text_for_marks(text: str) -> str:
 
 
 def _fix_ocr_confusables(text: str) -> str:
-    """Исправляет типичные ошибки OCR перед поиском марок."""
+    """Исправляет типичные OCR-ошибки перед поиском марок и ТУ."""
+    text = fix_ocr_document_text(text)
     text = re.sub(r"(?<=[А-ЯЁA-Zа-яё])l(?=[хx×]|\d)", "1", text)
     text = re.sub(r"(?<=[А-ЯЁA-Zа-яё])I(?=[хx×]|\d)", "1", text)
     text = re.sub(r"\bl(?=[хx×]\s*[\d.,])", "1", text, flags=re.IGNORECASE)
@@ -199,37 +205,51 @@ def _add_match(
     text: str,
     start: int,
     end: int,
+    *,
+    document: str | None = None,
 ) -> None:
     mark = _clean_mark(mark)
     key = mark.lower()
     if len(mark) < 5 or key in seen or not _is_plausible_mark(mark):
         return
     seen.add(key)
-    context = _context_snippet(text, start, end)
+    context = _context_snippet(text, start, end, radius=180)
+    doc = document or extract_document_from_text(context)
     matches.append(
         CableMarkMatch(
             mark=mark,
             context=context,
-            document=extract_document_from_context(context),
+            document=doc,
         )
     )
 
 
-def _find_letter_list_marks(text: str) -> list[tuple[str, int, int]]:
+def _find_letter_list_marks(text: str) -> list[tuple[str, int, int, str | None]]:
     """Марки из нумерованного списка в гарантийном/сопроводительном письме."""
-    found: list[tuple[str, int, int]] = []
+    found: list[tuple[str, int, int, str | None]] = []
     block = _LETTER_MARKS_BLOCK.search(text)
     search_in = block.group(1) if block else text
     base_offset = block.start(1) if block else 0
 
     for m in _LETTER_MARK_ITEM.finditer(search_in):
         mark = m.group(1).strip()
-        if mark.upper().startswith("СПЕЦЛАН"):
-            found.append((mark, base_offset + m.start(1), base_offset + m.end(1)))
+        if not mark.upper().startswith("СПЕЦЛАН"):
+            continue
+        doc = m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None
+        if not doc:
+            tail = search_in[m.end() : m.end() + 80]
+            tu_m = _TU_TAIL_PATTERN.search(tail)
+            doc = tu_m.group(0) if tu_m else None
+        if doc:
+            doc = extract_document_from_text(doc) or doc
+        found.append((mark, base_offset + m.start(1), base_offset + m.end(1), doc))
 
     if not found:
         for m in _SPECLAN_MARK_PATTERN.finditer(text):
-            found.append((m.group(1), m.start(1), m.end(1)))
+            tail = text[m.end() : m.end() + 80]
+            tu_m = _TU_TAIL_PATTERN.search(tail)
+            doc = extract_document_from_text(tu_m.group(0)) if tu_m else None
+            found.append((m.group(1), m.start(1), m.end(1), doc))
 
     return found
 
@@ -248,8 +268,8 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
     seen: set[str] = set()
     matches: list[CableMarkMatch] = []
 
-    for mark, start, end in _find_letter_list_marks(normalized):
-        _add_match(matches, seen, mark, normalized, start, end)
+    for mark, start, end, doc in _find_letter_list_marks(normalized):
+        _add_match(matches, seen, mark, normalized, start, end, document=doc)
 
     for pattern in (_SPECLAN_MARK_PATTERN, _AFTER_MARKI_PATTERN, _PRODUCT_MARK_PATTERN, _MARK_PATTERN):
         for m in pattern.finditer(normalized):
