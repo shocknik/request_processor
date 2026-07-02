@@ -25,6 +25,7 @@ from .test_rules import (
 from .cost_calculator import calculate_cost, format_breakdown
 from .models import ClimaticTestSettings, TestItemCreate
 from .pdf_extractor import DEFAULT_OCR_DPI, extract_from_document
+from .application_generator import generate_application_from_order
 from .kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
 from .sqlite_repo import (
     DB_PATH_DEFAULT,
@@ -51,18 +52,22 @@ from .sqlite_repo import (
     get_order_details,
 )
 
-# Цветовая схема
+# Цветовая схема (современный flat UI)
 COLORS = {
-    "bg": "#eef2f7",
+    "bg": "#f4f6fb",
     "card": "#ffffff",
-    "accent": "#2563eb",
-    "accent_hover": "#1d4ed8",
-    "text": "#1e293b",
-    "muted": "#64748b",
-    "border": "#cbd5e1",
-    "success": "#059669",
-    "climatic_bg": "#eff6ff",
-    "row_alt": "#f8fafc",
+    "accent": "#5b5fc7",
+    "accent_hover": "#4f46e5",
+    "text": "#1a1d26",
+    "muted": "#6b7280",
+    "border": "#e5e7eb",
+    "success": "#10b981",
+    "header_bg": "#1e2235",
+    "header_text": "#f9fafb",
+    "header_muted": "#a5b4c8",
+    "climatic_bg": "#eef2ff",
+    "row_alt": "#f9fafb",
+    "parse_bg": "#eef2ff",
 }
 
 ORG_TYPE_LABELS: dict[str, str] = {
@@ -90,9 +95,9 @@ class RequestProcessorApp(tk.Tk):
         super().__init__()
         self.db_path = Path(db_path)
         self.generated_dir = GENERATED_DIR_DEFAULT
-        self.title("Request Processor v0.4 — испытания кабелей")
-        self.geometry("1180x800")
-        self.minsize(1000, 680)
+        self.title("Обработка заявок на испытания кабелей")
+        self.geometry("1200x820")
+        self.minsize(1020, 700)
         self.configure(bg=COLORS["bg"])
 
         self._tests_by_code: dict[str, dict] = {}
@@ -156,8 +161,9 @@ class RequestProcessorApp(tk.Tk):
         style.configure("Card.TLabel", background=COLORS["card"], font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=COLORS["bg"], foreground=COLORS["muted"], font=("Segoe UI", 9))
         style.configure("CardMuted.TLabel", background=COLORS["card"], foreground=COLORS["muted"], font=("Segoe UI", 9))
-        style.configure("Title.TLabel", font=("Segoe UI", 16, "bold"), foreground=COLORS["accent"])
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 11), foreground=COLORS["muted"])
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 17, "bold"), foreground=COLORS["header_text"])
+        style.configure("Subtitle.TLabel", font=("Segoe UI", 10), foreground=COLORS["header_muted"])
+        style.configure("Header.TFrame", background=COLORS["header_bg"])
         style.configure("TButton", font=("Segoe UI", 10), padding=(12, 6))
         style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 8))
         style.configure("TLabelframe", background=COLORS["bg"])
@@ -167,29 +173,44 @@ class RequestProcessorApp(tk.Tk):
         style.configure("Treeview", font=("Segoe UI", 9), rowheight=30, background=COLORS["card"])
         style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background="#e2e8f0")
         style.map("Treeview", background=[("selected", COLORS["accent"])], foreground=[("selected", "white")])
-        style.configure("TNotebook", background=COLORS["bg"])
-        style.configure("TNotebook.Tab", font=("Segoe UI", 10), padding=(14, 8))
+        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
+        style.configure("TNotebook.Tab", font=("Segoe UI", 10), padding=(16, 10))
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", COLORS["card"]), ("!selected", COLORS["bg"])],
+            foreground=[("selected", COLORS["accent"]), ("!selected", COLORS["muted"])],
+        )
         style.configure("TEntry", font=("Segoe UI", 10))
         style.configure("TSpinbox", font=("Segoe UI", 10))
 
     def _build_ui(self) -> None:
-        header = ttk.Frame(self, padding=(16, 12, 16, 4))
+        header = tk.Frame(self, bg=COLORS["header_bg"], padx=20, pady=14)
         header.pack(fill="x")
-        ttk.Label(header, text="Request Processor", style="Title.TLabel").pack(side="left")
-        ttk.Label(
+        tk.Label(
             header,
-            text="  ·  расчёт испытаний кабельной продукции",
-            style="Subtitle.TLabel",
-        ).pack(side="left", padx=(4, 0))
+            text="Испытания кабельной продукции",
+            bg=COLORS["header_bg"],
+            fg=COLORS["header_text"],
+            font=("Segoe UI Semibold", 18, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="заявка  →  расчёт  →  КП  →  заказ",
+            bg=COLORS["header_bg"],
+            fg=COLORS["header_muted"],
+            font=("Segoe UI", 10),
+        ).pack(side="left", padx=(16, 0))
 
-        parse_bar = ttk.Frame(self, padding=(16, 0, 16, 6))
+        parse_bar = tk.Frame(self, bg=COLORS["parse_bg"], padx=20, pady=8)
         parse_bar.pack(fill="x")
-        self.parse_info_var = tk.StringVar(value="Заявка не обработана — вкладка «Заявка»")
-        ttk.Label(
+        self.parse_info_var = tk.StringVar(value="Документ не обработан — начните с вкладки «1. Заявка»")
+        tk.Label(
             parse_bar,
             textvariable=self.parse_info_var,
-            style="Muted.TLabel",
-            wraplength=1050,
+            bg=COLORS["parse_bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 9),
+            wraplength=1100,
             justify="left",
         ).pack(anchor="w")
 
@@ -508,15 +529,24 @@ class RequestProcessorApp(tk.Tk):
         toolbar = ttk.Frame(self.tab_orders)
         toolbar.pack(fill="x", pady=(0, 8))
         ttk.Button(toolbar, text="Обновить", command=self._load_orders_table).pack(side="left")
-        self._accent_button(toolbar, "Открыть КП", self._open_selected_order_kp).pack(
+        self._accent_button(toolbar, "Сформировать заявку", self._generate_order_application).pack(
             side="left", padx=(8, 0)
         )
-        ttk.Button(toolbar, text="Печать КП", command=self._print_selected_order_kp).pack(
+        ttk.Button(toolbar, text="Открыть КП", command=self._open_selected_order_kp).pack(
             side="left", padx=(8, 0)
+        )
+        ttk.Button(toolbar, text="Открыть заявку", command=self._open_selected_order_application).pack(
+            side="left", padx=(4, 0)
+        )
+        ttk.Button(toolbar, text="Печать КП", command=self._print_selected_order_kp).pack(
+            side="left", padx=(4, 0)
+        )
+        ttk.Button(toolbar, text="Печать заявку", command=self._print_selected_order_application).pack(
+            side="left", padx=(4, 0)
         )
         ttk.Label(
             toolbar,
-            text="Клик по заказу — детали; двойной клик — открыть КП",
+            text="Клик — детали; двойной клик — открыть КП",
             style="Muted.TLabel",
         ).pack(side="right")
 
@@ -1381,6 +1411,9 @@ class RequestProcessorApp(tk.Tk):
             "completed": "Завершён",
         }
         for row in list_orders(limit=200, db_path=self.db_path):
+            status = status_labels.get(row.get("status") or "", row.get("status") or "")
+            if row.get("application_path"):
+                status = f"{status} · заявка" if status else "Заявка готова"
             self.orders_tree.insert(
                 "",
                 "end",
@@ -1391,7 +1424,7 @@ class RequestProcessorApp(tk.Tk):
                     (row.get("customer_name") or "—")[:40],
                     row.get("marks_count") or 0,
                     f"{float(row.get('total_with_vat') or 0):,.2f}".replace(",", " "),
-                    status_labels.get(row.get("status") or "", row.get("status") or ""),
+                    status,
                 ),
             )
 
@@ -1430,6 +1463,8 @@ class RequestProcessorApp(tk.Tk):
             lines.append(f"\nЗаявка: {Path(details['source_document']).name}")
         if details.get("kp_output_path"):
             lines.append(f"КП: {details['kp_output_path']}")
+        if details.get("application_path"):
+            lines.append(f"Заявка на испытания: {details['application_path']}")
         if details.get("note"):
             lines.append(f"\nПримечание:\n{details['note']}")
         lines.append("\nМАРКИ:")
@@ -1479,6 +1514,100 @@ class RequestProcessorApp(tk.Tk):
 
             os.startfile(str(path), "print")
             self.status.set(f"Печать: {path.name}")
+        except OSError as exc:
+            messagebox.showerror("Печать", f"Не удалось отправить на печать:\n{exc}")
+
+    def _get_selected_order_id(self) -> int | None:
+        if not hasattr(self, "orders_tree"):
+            return None
+        sel = self.orders_tree.selection()
+        if not sel:
+            messagebox.showinfo("Заказы", "Выберите заказ в списке.")
+            return None
+        return int(sel[0])
+
+    def _get_selected_order_application_path(self) -> Path | None:
+        order_id = self._get_selected_order_id()
+        if order_id is None:
+            return None
+        details = get_order_details(order_id, self.db_path)
+        if not details or not details.get("application_path"):
+            messagebox.showwarning(
+                "Заказы",
+                "Заявка на испытания для этого заказа ещё не сформирована.\n"
+                "Нажмите «Сформировать заявку».",
+            )
+            return None
+        path = Path(details["application_path"])
+        if not path.exists():
+            messagebox.showwarning("Заказы", f"Файл не существует:\n{path}")
+            return None
+        return path
+
+    def _generate_order_application(self) -> None:
+        order_id = self._get_selected_order_id()
+        if order_id is None:
+            return
+
+        self.status.set("Формирование заявки на испытания…")
+        self.update_idletasks()
+
+        def work() -> None:
+            saved_path: Path | None = None
+            error: str | None = None
+            try:
+                saved_path = generate_application_from_order(
+                    order_id,
+                    db_path=self.db_path,
+                )
+            except Exception as exc:
+                error = str(exc)
+
+            def done() -> None:
+                if error:
+                    self.status.set("Ошибка формирования заявки")
+                    messagebox.showerror("Заявка на испытания", error)
+                    return
+                assert saved_path is not None
+                self.status.set(f"Заказ №{order_id} · заявка: {saved_path.name}")
+                self._load_orders_table()
+                self._show_order_details()
+                try:
+                    import os
+
+                    os.startfile(str(saved_path))
+                except OSError:
+                    pass
+                messagebox.showinfo(
+                    "Заявка сформирована",
+                    f"Заявка на испытания сохранена:\n{saved_path}",
+                )
+
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _open_selected_order_application(self) -> None:
+        path = self._get_selected_order_application_path()
+        if not path:
+            return
+        try:
+            import os
+
+            os.startfile(str(path))
+            self.status.set(f"Открыта заявка: {path.name}")
+        except OSError as exc:
+            messagebox.showerror("Заказы", str(exc))
+
+    def _print_selected_order_application(self) -> None:
+        path = self._get_selected_order_application_path()
+        if not path:
+            return
+        try:
+            import os
+
+            os.startfile(str(path), "print")
+            self.status.set(f"Печать заявки: {path.name}")
         except OSError as exc:
             messagebox.showerror("Печать", f"Не удалось отправить на печать:\n{exc}")
 

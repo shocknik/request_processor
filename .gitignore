@@ -28,6 +28,8 @@ env/
 
 # Данные и артефакты проекта
 data/
+!data/templates/
+!data/templates/**
 output/
 *.db
 *.sqlite

@@ -190,6 +190,7 @@ def init_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
         vat_rate REAL NOT NULL DEFAULT 0.22,
         document_extraction_id INTEGER,
         kp_output_path TEXT,
+        application_path TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (customer_org_id) REFERENCES organizations(id),
@@ -300,6 +301,7 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 vat_rate REAL NOT NULL DEFAULT 0.22,
                 document_extraction_id INTEGER,
                 kp_output_path TEXT,
+                application_path TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (customer_org_id) REFERENCES organizations(id),
@@ -324,8 +326,57 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
             CREATE INDEX IF NOT EXISTS idx_order_marks_order_id ON order_marks(order_id);
             """
         )
+    _migrate_orders_columns(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
+
+
+def _migrate_orders_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    with get_connection(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
+        if "application_path" not in cols:
+            conn.execute("ALTER TABLE orders ADD COLUMN application_path TEXT")
+
+
+def get_calculation_lines(
+    calculation_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT test_name, base_cost, multiplier, hours, final_cost, note
+            FROM calculation_lines
+            WHERE calculation_id = ?
+            ORDER BY id
+            """,
+            (calculation_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_cable_mark_document(
+    full_mark: str,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> str | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT document FROM cable_marks WHERE full_mark = ? LIMIT 1",
+            (full_mark,),
+        ).fetchone()
+        return row["document"] if row and row["document"] else None
+
+
+def update_order_application_path(
+    order_id: int,
+    application_path: str,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE orders SET application_path = ?, updated_at = ? WHERE id = ?",
+            (application_path, datetime.now().isoformat(), order_id),
+        )
 
 
 def sync_test_rule_types(db_path: str | Path = DB_PATH_DEFAULT) -> int:

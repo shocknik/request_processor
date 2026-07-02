@@ -52,6 +52,7 @@ from .sqlite_repo import (
 )
 from .cost_calculator import calculate_cost, print_breakdown
 from .kp_generator import generate_kp_from_db
+from .application_generator import generate_application_from_order
 from .pdf_extractor import extract_from_document
 from request_processor import __version__
 
@@ -622,6 +623,30 @@ def generate_kp_cmd(
     )
     click.echo(click.style(f"✓ КП сохранено: {path}", fg="green"))
     click.echo(click.style(f"✓ Заказ №{order_id} создан", fg="green"))
+
+
+@cli.command("generate-application")
+@click.option("--order-id", required=True, type=int, help="ID заказа в БД")
+@click.option(
+    "--output",
+    "output_path",
+    default=None,
+    type=click.Path(),
+    help="Путь к .docx (по умолчанию data/generated/Заявка_...)",
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def generate_application_cmd(order_id: int, output_path: Optional[str], db: str) -> None:
+    """Формирует заявку на испытания (Word) по сохранённому заказу."""
+    migrate_db(db)
+    try:
+        path = generate_application_from_order(
+            order_id,
+            output_path=Path(output_path) if output_path else None,
+            db_path=db,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(click.style(f"✓ Заявка сохранена: {path}", fg="green"))
 
 
 @cli.command("list-orders")
