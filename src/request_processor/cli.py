@@ -41,11 +41,18 @@ from .sqlite_repo import (
     save_climatic_settings,
     save_cable_marks_from_matches,
     list_cable_marks,
+    list_organizations,
     migrate_db,
+    save_document_extraction,
+    save_organizations_from_extraction,
+    create_order_from_kp,
+    list_orders,
+    get_order_details,
+    get_last_document_extraction,
 )
 from .cost_calculator import calculate_cost, print_breakdown
 from .kp_generator import generate_kp_from_db
-from .pdf_extractor import extract_from_pdf
+from .pdf_extractor import extract_from_document
 from request_processor import __version__
 
 def _slugify(text: str) -> str:
@@ -154,7 +161,7 @@ def calculate_cmd(
 
 
 @cli.command("extract-pdf")
-@click.option("--pdf", required=True, type=click.Path(exists=True), help="Путь к PDF-файлу")
+@click.option("--pdf", required=True, type=click.Path(exists=True), help="Путь к PDF или Word (.docx)")
 @click.option(
     "--output",
     "output_path",
@@ -167,6 +174,7 @@ def calculate_cmd(
 @click.option("--no-ocr", is_flag=True, help="Не запускать OCR для сканов")
 @click.option("--ocr-dpi", default=200, show_default=True, type=int, help="DPI для OCR сканов")
 @click.option("--no-save-marks", is_flag=True, help="Не сохранять марки в БД")
+@click.option("--no-save-orgs", is_flag=True, help="Не сохранять организации в БД")
 @click.option("--db", default="data/app.db", show_default=True)
 def extract_pdf_cmd(
     pdf: str,
@@ -176,13 +184,14 @@ def extract_pdf_cmd(
     no_ocr: bool,
     ocr_dpi: int,
     no_save_marks: bool,
+    no_save_orgs: bool,
     db: str,
 ) -> None:
-    """Извлекает текст, таблицы и марки кабелей из PDF."""
+    """Извлекает текст, таблицы, марки и организации из PDF или Word."""
     pdf_file = Path(pdf)
 
     try:
-        result = extract_from_pdf(pdf_file, use_ocr=not no_ocr, ocr_dpi=ocr_dpi)
+        result = extract_from_document(pdf_file, use_ocr=not no_ocr, ocr_dpi=ocr_dpi)
     except Exception as e:
         click.echo(click.style(f"Ошибка извлечения: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
@@ -192,6 +201,18 @@ def extract_pdf_cmd(
     click.echo(f"Символов текста: {len(result.text)}")
     click.echo(f"Таблиц: {len(result.tables)}")
     click.echo(f"Найдено марок: {len(result.cable_marks)}")
+    if result.customer_name:
+        click.echo(f"Заказчик: {result.customer_name}")
+    if result.manufacturer_name and result.manufacturer_name != result.customer_name:
+        click.echo(f"Производитель: {result.manufacturer_name}")
+    if result.organizations:
+        click.echo(click.style("\nОрганизации:", bold=True))
+        for org in result.organizations:
+            click.echo(f"  [{org.role}] {org.name}")
+            if org.inn:
+                click.echo(f"     ИНН/КПП: {org.inn}/{org.kpp or '—'}")
+            if org.address:
+                click.echo(f"     Адрес: {org.postal_code or ''} {org.address}".strip())
 
     if result.is_scanned:
         if result.ocr_used:
@@ -247,6 +268,55 @@ def extract_pdf_cmd(
             )
         )
 
+    if not no_save_orgs and result.organizations:
+        migrate_db(db)
+        org_ids = save_organizations_from_extraction(
+            result.organizations,
+            source=str(pdf_file.resolve()),
+            db_path=db,
+        )
+        save_document_extraction(
+            source_path=str(pdf_file.resolve()),
+            source_type=result.source_type,
+            text=result.text,
+            marks_count=len(result.cable_marks),
+            customer_org_id=org_ids.get("customer_org_id"),
+            manufacturer_org_id=org_ids.get("manufacturer_org_id"),
+            db_path=db,
+        )
+        click.echo(
+            click.style(
+                f"✓ Организации в БД: заказчик id={org_ids.get('customer_org_id')}, "
+                f"производитель id={org_ids.get('manufacturer_org_id')}",
+                fg="green",
+            )
+        )
+
+
+@cli.command("list-organizations")
+@click.option("--search", default=None, help="Поиск по названию, ИНН, адресу")
+@click.option("--type", "org_type", default=None, help="Тип: manufacturer, testing_center, …")
+@click.option("--limit", default=50, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_organizations_cmd(search: str | None, org_type: str | None, limit: int, db: str) -> None:
+    """Список организаций из справочника БД."""
+    migrate_db(db)
+    rows = list_organizations(search=search, org_type=org_type, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Организации не найдены.")
+        return
+    for row in rows:
+        acc = "аккред." if row.get("is_accredited") else "не аккред."
+        click.echo(
+            f"{row['id']:>4}  {row['name']}  [{row.get('org_type', 'unknown')}, {acc}]"
+        )
+        if row.get("inn"):
+            click.echo(f"       ИНН {row['inn']}" + (f"/{row['kpp']}" if row.get("kpp") else ""))
+        if row.get("address"):
+            click.echo(f"       {row.get('postal_code', '')} {row['address']}".strip())
+        if row.get("fsa_registry_number"):
+            click.echo(f"       ФСА: {row['fsa_registry_number']}")
+
 
 @cli.command("process")
 @click.option("--input", required=True, type=click.Path(exists=True), help="Путь к PDF/документу")
@@ -258,10 +328,13 @@ def process_cmd(input: str, output: str, show_marks: bool) -> None:
     click.echo(f"Обработка документа: {pdf_file}")
 
     try:
-        result = extract_from_pdf(pdf_file)
+        result = extract_from_document(pdf_file)
     except Exception as e:
         click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
+
+    if result.customer_name:
+        click.echo(f"Заказчик: {result.customer_name}")
 
     if result.is_scanned and result.ocr_used:
         click.echo(click.style("Скан распознан через OCR.", fg="cyan"))
@@ -535,7 +608,39 @@ def generate_kp_cmd(
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
+    migrate_db(db)
+    last_doc = get_last_document_extraction(db)
+    order_id = create_order_from_kp(
+        customer_name=customer,
+        manufacturer_name=last_doc.get("manufacturer_name") if last_doc else None,
+        subject=subject,
+        note=note,
+        calculation_ids=ids,
+        kp_output_path=str(path),
+        document_extraction_id=int(last_doc["id"]) if last_doc else None,
+        db_path=db,
+    )
     click.echo(click.style(f"✓ КП сохранено: {path}", fg="green"))
+    click.echo(click.style(f"✓ Заказ №{order_id} создан", fg="green"))
+
+
+@cli.command("list-orders")
+@click.option("--limit", default=20, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_orders_cmd(limit: int, db: str) -> None:
+    """Список сохранённых заказов (КП)."""
+    migrate_db(db)
+    rows = list_orders(limit=limit, db_path=db)
+    if not rows:
+        click.echo("Заказы не найдены.")
+        return
+    for row in rows:
+        click.echo(
+            f"{row['id']:>4}  {(row.get('created_at') or '')[:16]}  "
+            f"{(row.get('customer_name') or '—')[:35]:35}  "
+            f"марок: {row.get('marks_count') or 0}  "
+            f"{float(row.get('total_with_vat') or 0):,.2f} ₽".replace(",", " ")
+        )
 
 
 @cli.command("gui")

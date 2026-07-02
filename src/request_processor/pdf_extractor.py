@@ -1,9 +1,10 @@
 """
-pdf_extractor.py — извлечение текста, таблиц и марок кабелей из PDF.
+pdf_extractor.py — извлечение данных из входящих заявок (PDF, Word .docx).
 
 Текстовые PDF: pdfplumber.
 Сканы (картинки без текстового слоя): OCR через pytesseract или easyocr.
 Поиск марок — по структуре строки (бренд + «NхM»), без списка брендов.
+Организации — через organization_extractor (заказчик, производитель).
 """
 
 from __future__ import annotations
@@ -11,12 +12,18 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+from typing import Literal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 from .cable_mark_parser import extract_document_from_context
 from .models import CableMarkMatch, PdfExtractionResult
+from .organization_extractor import (
+    extract_organizations,
+    pick_customer_name,
+    pick_manufacturer_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -365,25 +372,108 @@ def extract_from_pdf(
         search_text = f"{text}\n{_tables_to_text(tables)}".strip()
 
     cable_marks = find_cable_marks(search_text)
+    organizations = extract_organizations(search_text)
 
     logger.info(
-        "PDF %s: pages=%d, text=%d chars, tables=%d, marks=%d, scanned=%s, ocr=%s",
+        "PDF %s: pages=%d, text=%d chars, tables=%d, marks=%d, orgs=%d, scanned=%s, ocr=%s",
         path.name,
         page_count,
         len(text),
         len(tables),
         len(cable_marks),
+        len(organizations),
         is_scanned,
         ocr_used,
     )
 
     return PdfExtractionResult(
         source_path=str(path.resolve()),
+        source_type="pdf",
         page_count=page_count,
         text=text,
         tables=tables,
         cable_marks=cable_marks,
+        organizations=organizations,
+        customer_name=pick_customer_name(organizations),
+        manufacturer_name=pick_manufacturer_name(organizations),
         is_scanned=is_scanned,
         ocr_used=ocr_used,
         extracted_at=datetime.now(),
     )
+
+
+def extract_text_from_docx(docx_path: Path | str) -> str:
+    """Извлекает текст из Word-документа (.docx)."""
+    from docx import Document
+
+    path = Path(docx_path)
+    doc = Document(str(path))
+    parts: list[str] = []
+    for paragraph in doc.paragraphs:
+        if paragraph.text.strip():
+            parts.append(paragraph.text.strip())
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if cells:
+                parts.append(" ".join(cells))
+    return "\n".join(parts)
+
+
+def _build_extraction_result(
+    *,
+    source_path: Path,
+    source_type: Literal["pdf", "docx"],
+    text: str,
+    page_count: int = 0,
+    tables: list[list[list[str]]] | None = None,
+    is_scanned: bool = False,
+    ocr_used: bool = False,
+) -> PdfExtractionResult:
+    """Собирает результат: марки + организации из текста заявки."""
+    search_text = text
+    if tables:
+        search_text = f"{text}\n{_tables_to_text(tables)}".strip()
+    organizations = extract_organizations(search_text)
+    return PdfExtractionResult(
+        source_path=str(source_path.resolve()),
+        source_type=source_type,
+        page_count=page_count,
+        text=text,
+        tables=tables or [],
+        cable_marks=find_cable_marks(search_text),
+        organizations=organizations,
+        customer_name=pick_customer_name(organizations),
+        manufacturer_name=pick_manufacturer_name(organizations),
+        is_scanned=is_scanned,
+        ocr_used=ocr_used,
+        extracted_at=datetime.now(),
+    )
+
+
+def extract_from_document(
+    path: Path | str,
+    *,
+    use_ocr: bool = True,
+    ocr_dpi: int = DEFAULT_OCR_DPI,
+) -> PdfExtractionResult:
+    """
+    Единая точка входа для заявок: PDF или Word (.docx).
+
+    PDF делегирует в extract_from_pdf; Word — текст + марки + организации.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Файл не найден: {file_path}")
+
+    suffix = file_path.suffix.lower()
+    if suffix == ".pdf":
+        return extract_from_pdf(file_path, use_ocr=use_ocr, ocr_dpi=ocr_dpi)
+    if suffix == ".docx":
+        text = extract_text_from_docx(file_path)
+        return _build_extraction_result(
+            source_path=file_path,
+            source_type="docx",
+            text=text,
+        )
+    raise ValueError(f"Неподдерживаемый формат: {suffix}. Используйте PDF или .docx")

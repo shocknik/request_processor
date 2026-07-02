@@ -35,10 +35,12 @@ from .models import (
     CalculationLine,
     CableMarkRecord,
     ClimaticTestSettings,
+    OrganizationExtract,
     TestItem,
     TestItemUpdate,
     TestItemCreate,
 )
+from .organization_extractor import normalize_org_name
 from .cable_mark_parser import parse_cable_mark_record
 from .climatic_tests import CLIMATIC_TESTS, climatic_settings_fields
 from .test_rules import DEFAULT_PRICE_XLSX, infer_rule_type
@@ -144,9 +146,80 @@ def init_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
         value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS organizations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        name_normalized TEXT NOT NULL,
+        address TEXT,
+        postal_code TEXT,
+        phone TEXT,
+        email TEXT,
+        inn TEXT,
+        kpp TEXT,
+        is_accredited INTEGER NOT NULL DEFAULT 0,
+        fsa_registry_number TEXT,
+        org_type TEXT NOT NULL DEFAULT 'unknown',
+        source TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS document_extractions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_path TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        customer_org_id INTEGER,
+        manufacturer_org_id INTEGER,
+        subject TEXT,
+        raw_text_length INTEGER,
+        marks_count INTEGER NOT NULL DEFAULT 0,
+        extracted_at TEXT NOT NULL,
+        FOREIGN KEY (customer_org_id) REFERENCES organizations(id),
+        FOREIGN KEY (manufacturer_org_id) REFERENCES organizations(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_org_id INTEGER,
+        manufacturer_org_id INTEGER,
+        subject TEXT,
+        note TEXT,
+        status TEXT NOT NULL DEFAULT 'kp_generated',
+        total_without_vat REAL NOT NULL DEFAULT 0,
+        total_with_vat REAL NOT NULL DEFAULT 0,
+        vat_rate REAL NOT NULL DEFAULT 0.22,
+        document_extraction_id INTEGER,
+        kp_output_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (customer_org_id) REFERENCES organizations(id),
+        FOREIGN KEY (manufacturer_org_id) REFERENCES organizations(id),
+        FOREIGN KEY (document_extraction_id) REFERENCES document_extractions(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS order_marks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        calculation_id INTEGER NOT NULL,
+        cable_mark_id INTEGER,
+        manufacturer_org_id INTEGER,
+        mark TEXT NOT NULL,
+        total_without_vat REAL NOT NULL,
+        total_with_vat REAL NOT NULL,
+        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+        FOREIGN KEY (calculation_id) REFERENCES calculations(id),
+        FOREIGN KEY (cable_mark_id) REFERENCES cable_marks(id),
+        FOREIGN KEY (manufacturer_org_id) REFERENCES organizations(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_test_items_code ON test_items(code);
     CREATE INDEX IF NOT EXISTS idx_calculations_created_at ON calculations(created_at);
     CREATE INDEX IF NOT EXISTS idx_cable_marks_brand ON cable_marks(brand);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_dedup
+        ON organizations(COALESCE(inn, ''), name_normalized);
+    CREATE INDEX IF NOT EXISTS idx_organizations_name ON organizations(name_normalized);
+    CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+    CREATE INDEX IF NOT EXISTS idx_order_marks_order_id ON order_marks(order_id);
     """
 
     with get_connection(db_path) as conn:
@@ -181,7 +254,74 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS organizations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                name_normalized TEXT NOT NULL,
+                address TEXT,
+                postal_code TEXT,
+                phone TEXT,
+                email TEXT,
+                inn TEXT,
+                kpp TEXT,
+                is_accredited INTEGER NOT NULL DEFAULT 0,
+                fsa_registry_number TEXT,
+                org_type TEXT NOT NULL DEFAULT 'unknown',
+                source TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS document_extractions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_path TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                customer_org_id INTEGER,
+                manufacturer_org_id INTEGER,
+                subject TEXT,
+                raw_text_length INTEGER,
+                marks_count INTEGER NOT NULL DEFAULT 0,
+                extracted_at TEXT NOT NULL,
+                FOREIGN KEY (customer_org_id) REFERENCES organizations(id),
+                FOREIGN KEY (manufacturer_org_id) REFERENCES organizations(id)
+            );
             CREATE INDEX IF NOT EXISTS idx_cable_marks_brand ON cable_marks(brand);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_organizations_dedup
+                ON organizations(COALESCE(inn, ''), name_normalized);
+            CREATE INDEX IF NOT EXISTS idx_organizations_name ON organizations(name_normalized);
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_org_id INTEGER,
+                manufacturer_org_id INTEGER,
+                subject TEXT,
+                note TEXT,
+                status TEXT NOT NULL DEFAULT 'kp_generated',
+                total_without_vat REAL NOT NULL DEFAULT 0,
+                total_with_vat REAL NOT NULL DEFAULT 0,
+                vat_rate REAL NOT NULL DEFAULT 0.22,
+                document_extraction_id INTEGER,
+                kp_output_path TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (customer_org_id) REFERENCES organizations(id),
+                FOREIGN KEY (manufacturer_org_id) REFERENCES organizations(id),
+                FOREIGN KEY (document_extraction_id) REFERENCES document_extractions(id)
+            );
+            CREATE TABLE IF NOT EXISTS order_marks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                calculation_id INTEGER NOT NULL,
+                cable_mark_id INTEGER,
+                manufacturer_org_id INTEGER,
+                mark TEXT NOT NULL,
+                total_without_vat REAL NOT NULL,
+                total_with_vat REAL NOT NULL,
+                FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+                FOREIGN KEY (calculation_id) REFERENCES calculations(id),
+                FOREIGN KEY (cable_mark_id) REFERENCES cable_marks(id),
+                FOREIGN KEY (manufacturer_org_id) REFERENCES organizations(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+            CREATE INDEX IF NOT EXISTS idx_order_marks_order_id ON order_marks(order_id);
             """
         )
     sync_climatic_tests(db_path)
@@ -349,6 +489,451 @@ def save_cable_marks_from_matches(
         except Exception:
             stats["errors"] += 1
     return stats
+
+
+def upsert_organization(
+    extract: OrganizationExtract,
+    *,
+    source: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Сохраняет организацию без дублей (по ИНН или нормализованному названию)."""
+    now = datetime.now().isoformat()
+    name_normalized = normalize_org_name(extract.name)
+    inn_key = extract.inn or ""
+
+    with get_connection(db_path) as conn:
+        row = None
+        if extract.inn:
+            row = conn.execute(
+                "SELECT * FROM organizations WHERE inn = ?",
+                (extract.inn,),
+            ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT * FROM organizations WHERE name_normalized = ? AND COALESCE(inn, '') = ?",
+                (name_normalized, inn_key),
+            ).fetchone()
+
+        if row:
+            org_id = int(row["id"])
+            conn.execute(
+                """
+                UPDATE organizations SET
+                    name = ?,
+                    address = COALESCE(?, address),
+                    postal_code = COALESCE(?, postal_code),
+                    phone = COALESCE(?, phone),
+                    email = COALESCE(?, email),
+                    inn = COALESCE(?, inn),
+                    kpp = COALESCE(?, kpp),
+                    is_accredited = MAX(is_accredited, ?),
+                    fsa_registry_number = COALESCE(?, fsa_registry_number),
+                    org_type = CASE WHEN ? = 'unknown' THEN org_type ELSE ? END,
+                    source = COALESCE(?, source),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    extract.name,
+                    extract.address,
+                    extract.postal_code,
+                    extract.phone,
+                    extract.email,
+                    extract.inn,
+                    extract.kpp,
+                    int(extract.is_accredited),
+                    extract.fsa_registry_number,
+                    extract.org_type,
+                    extract.org_type,
+                    source,
+                    now,
+                    org_id,
+                ),
+            )
+            return org_id
+
+        cursor = conn.execute(
+            """
+            INSERT INTO organizations (
+                name, name_normalized, address, postal_code, phone, email,
+                inn, kpp, is_accredited, fsa_registry_number, org_type,
+                source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                extract.name,
+                name_normalized,
+                extract.address,
+                extract.postal_code,
+                extract.phone,
+                extract.email,
+                extract.inn,
+                extract.kpp,
+                int(extract.is_accredited),
+                extract.fsa_registry_number,
+                extract.org_type,
+                source,
+                now,
+                now,
+            ),
+        )
+        return int(cursor.lastrowid or 0)
+
+
+def save_organizations_from_extraction(
+    organizations: list[OrganizationExtract],
+    *,
+    source: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, int | None]:
+    """Сохраняет организации из заявки; возвращает id заказчика и производителя."""
+    customer_id: int | None = None
+    manufacturer_id: int | None = None
+
+    for org in organizations:
+        org_id = upsert_organization(org, source=source, db_path=db_path)
+        if org.role == "customer" and customer_id is None:
+            customer_id = org_id
+        if org.role == "manufacturer" and manufacturer_id is None:
+            manufacturer_id = org_id
+
+    if customer_id is None and organizations:
+        customer_id = upsert_organization(organizations[0], source=source, db_path=db_path)
+    if manufacturer_id is None and len(organizations) > 1:
+        manufacturer_id = upsert_organization(organizations[1], source=source, db_path=db_path)
+    elif manufacturer_id is None and customer_id is not None:
+        manufacturer_id = customer_id
+
+    return {"customer_org_id": customer_id, "manufacturer_org_id": manufacturer_id}
+
+
+def save_document_extraction(
+    *,
+    source_path: str,
+    source_type: str,
+    text: str,
+    marks_count: int,
+    customer_org_id: int | None = None,
+    manufacturer_org_id: int | None = None,
+    subject: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO document_extractions (
+                source_path, source_type, customer_org_id, manufacturer_org_id,
+                subject, raw_text_length, marks_count, extracted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_path,
+                source_type,
+                customer_org_id,
+                manufacturer_org_id,
+                subject,
+                len(text),
+                marks_count,
+                datetime.now().isoformat(),
+            ),
+        )
+        return int(cursor.lastrowid or 0)
+
+
+def list_organizations(
+    search: str | None = None,
+    org_type: str | None = None,
+    limit: int = 100,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    query = "SELECT * FROM organizations"
+    params: list[Any] = []
+    conditions: list[str] = []
+    if search:
+        conditions.append("(name LIKE ? OR inn LIKE ? OR address LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+    if org_type:
+        conditions.append("org_type = ?")
+        params.append(org_type)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY updated_at DESC LIMIT ?"
+    params.append(limit)
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_organization_by_id(
+    org_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute("SELECT * FROM organizations WHERE id = ?", (org_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_organization(
+    org_id: int,
+    *,
+    name: str,
+    address: str | None = None,
+    postal_code: str | None = None,
+    phone: str | None = None,
+    email: str | None = None,
+    inn: str | None = None,
+    kpp: str | None = None,
+    is_accredited: bool = False,
+    fsa_registry_number: str | None = None,
+    org_type: str = "unknown",
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> bool:
+    """Обновляет организацию по id (ручное редактирование в GUI)."""
+    now = datetime.now().isoformat()
+    name_normalized = normalize_org_name(name)
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE organizations SET
+                name = ?,
+                name_normalized = ?,
+                address = ?,
+                postal_code = ?,
+                phone = ?,
+                email = ?,
+                inn = ?,
+                kpp = ?,
+                is_accredited = ?,
+                fsa_registry_number = ?,
+                org_type = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                name.strip(),
+                name_normalized,
+                address,
+                postal_code,
+                phone,
+                email,
+                inn,
+                kpp,
+                int(is_accredited),
+                fsa_registry_number,
+                org_type,
+                now,
+                org_id,
+            ),
+        )
+        return cursor.rowcount > 0
+
+
+def get_last_document_extraction(
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    """Последняя обработанная заявка (для панели сводки в GUI)."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT d.*,
+                   c.name AS customer_name,
+                   m.name AS manufacturer_name
+            FROM document_extractions d
+            LEFT JOIN organizations c ON c.id = d.customer_org_id
+            LEFT JOIN organizations m ON m.id = d.manufacturer_org_id
+            ORDER BY d.extracted_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def find_organization_id_by_name(
+    name: str,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int | None:
+    if not name or not name.strip():
+        return None
+    normalized = normalize_org_name(name)
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM organizations
+            WHERE name_normalized = ? OR name = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (normalized, name.strip()),
+        ).fetchone()
+        return int(row["id"]) if row else None
+
+
+def _find_cable_mark_id(mark: str, db_path: str | Path) -> int | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM cable_marks WHERE full_mark = ? LIMIT 1",
+            (mark,),
+        ).fetchone()
+        return int(row["id"]) if row else None
+
+
+def create_order_from_kp(
+    *,
+    customer_name: str,
+    manufacturer_name: str | None = None,
+    customer_org_id: int | None = None,
+    manufacturer_org_id: int | None = None,
+    subject: str,
+    note: str | None = None,
+    calculation_ids: list[int],
+    kp_output_path: str,
+    document_extraction_id: int | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """
+    Создаёт заказ после формирования КП.
+    Заказчик — на уровне заказа; каждая марка связана с производителем.
+    """
+    if not calculation_ids:
+        raise ValueError("Нет расчётов для заказа")
+
+    if customer_org_id is None and customer_name:
+        customer_org_id = find_organization_id_by_name(customer_name, db_path)
+    if manufacturer_org_id is None and manufacturer_name:
+        manufacturer_org_id = find_organization_id_by_name(manufacturer_name, db_path)
+    if manufacturer_org_id is None and document_extraction_id:
+        with get_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT manufacturer_org_id FROM document_extractions WHERE id = ?",
+                (document_extraction_id,),
+            ).fetchone()
+            if row and row["manufacturer_org_id"]:
+                manufacturer_org_id = int(row["manufacturer_org_id"])
+
+    rows = get_calculations_for_kp(calculation_ids, db_path=db_path)
+    if not rows:
+        raise ValueError("Расчёты не найдены")
+
+    total_without = round(sum(float(r["total_cost_without_vat"]) for r in rows), 2)
+    total_with = round(sum(float(r["total_cost_with_vat"]) for r in rows), 2)
+    vat_rate = float(rows[0].get("vat_rate") or 0.22)
+    now = datetime.now().isoformat()
+
+    with get_connection(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO orders (
+                customer_org_id, manufacturer_org_id, subject, note, status,
+                total_without_vat, total_with_vat, vat_rate,
+                document_extraction_id, kp_output_path, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'kp_generated', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                customer_org_id,
+                manufacturer_org_id,
+                subject,
+                note,
+                total_without,
+                total_with,
+                vat_rate,
+                document_extraction_id,
+                kp_output_path,
+                now,
+                now,
+            ),
+        )
+        order_id = int(cursor.lastrowid or 0)
+
+        for row in rows:
+            calc_id = int(row["id"])
+            mark = row["mark"]
+            cable_mark_id = _find_cable_mark_id(mark, db_path)
+            conn.execute(
+                """
+                INSERT INTO order_marks (
+                    order_id, calculation_id, cable_mark_id, manufacturer_org_id,
+                    mark, total_without_vat, total_with_vat
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order_id,
+                    calc_id,
+                    cable_mark_id,
+                    manufacturer_org_id,
+                    mark,
+                    float(row["total_cost_without_vat"]),
+                    float(row["total_cost_with_vat"]),
+                ),
+            )
+        return order_id
+
+
+def list_orders(
+    limit: int = 100,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT o.*,
+                   c.name AS customer_name,
+                   m.name AS manufacturer_name,
+                   (SELECT COUNT(*) FROM order_marks om WHERE om.order_id = o.id) AS marks_count
+            FROM orders o
+            LEFT JOIN organizations c ON c.id = o.customer_org_id
+            LEFT JOIN organizations m ON m.id = o.manufacturer_org_id
+            ORDER BY o.created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_order_details(
+    order_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    with get_connection(db_path) as conn:
+        order_row = conn.execute(
+            """
+            SELECT o.*,
+                   c.name AS customer_name,
+                   c.inn AS customer_inn,
+                   c.address AS customer_address,
+                   c.phone AS customer_phone,
+                   m.name AS manufacturer_name,
+                   m.inn AS manufacturer_inn,
+                   m.address AS manufacturer_address,
+                   d.source_path AS source_document
+            FROM orders o
+            LEFT JOIN organizations c ON c.id = o.customer_org_id
+            LEFT JOIN organizations m ON m.id = o.manufacturer_org_id
+            LEFT JOIN document_extractions d ON d.id = o.document_extraction_id
+            WHERE o.id = ?
+            """,
+            (order_id,),
+        ).fetchone()
+        if not order_row:
+            return None
+
+        marks = conn.execute(
+            """
+            SELECT om.*,
+                   mo.name AS manufacturer_name
+            FROM order_marks om
+            LEFT JOIN organizations mo ON mo.id = om.manufacturer_org_id
+            WHERE om.order_id = ?
+            ORDER BY om.id
+            """,
+            (order_id,),
+        ).fetchall()
+
+        result = dict(order_row)
+        result["marks"] = [dict(m) for m in marks]
+        return result
 
 
 def list_cable_marks(

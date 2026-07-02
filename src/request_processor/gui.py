@@ -24,7 +24,7 @@ from .test_rules import (
 )
 from .cost_calculator import calculate_cost, format_breakdown
 from .models import ClimaticTestSettings, TestItemCreate
-from .pdf_extractor import DEFAULT_OCR_DPI, extract_from_pdf
+from .pdf_extractor import DEFAULT_OCR_DPI, extract_from_document
 from .kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
 from .sqlite_repo import (
     DB_PATH_DEFAULT,
@@ -33,13 +33,22 @@ from .sqlite_repo import (
     build_default_hours_map,
     get_calculations_for_kp,
     get_climatic_settings,
+    get_last_document_extraction,
+    get_organization_by_id,
     get_recent_calculations,
     init_db,
     list_cable_marks,
+    list_organizations,
     list_test_items,
     save_calculation,
     save_cable_marks_from_matches,
     save_climatic_settings,
+    save_document_extraction,
+    save_organizations_from_extraction,
+    update_organization,
+    create_order_from_kp,
+    list_orders,
+    get_order_details,
 )
 
 # Цветовая схема
@@ -55,6 +64,15 @@ COLORS = {
     "climatic_bg": "#eff6ff",
     "row_alt": "#f8fafc",
 }
+
+ORG_TYPE_LABELS: dict[str, str] = {
+    "manufacturer": "Производитель",
+    "certification_body": "Орган по сертификации",
+    "testing_center": "Испытательный центр",
+    "dealer": "Дилер",
+    "unknown": "Не указан",
+}
+ORG_TYPE_VALUES = list(ORG_TYPE_LABELS.keys())
 
 
 @dataclass
@@ -72,14 +90,16 @@ class RequestProcessorApp(tk.Tk):
         super().__init__()
         self.db_path = Path(db_path)
         self.generated_dir = GENERATED_DIR_DEFAULT
-        self.title("Request Processor — расчёт испытаний кабелей")
-        self.geometry("1100x760")
-        self.minsize(920, 620)
+        self.title("Request Processor v0.4 — испытания кабелей")
+        self.geometry("1180x800")
+        self.minsize(1000, 680)
         self.configure(bg=COLORS["bg"])
 
         self._tests_by_code: dict[str, dict] = {}
         self._calc_entries: list[CalcTestEntry] = []
         self.notebook: ttk.Notebook | None = None
+        self._last_document_extraction_id: int | None = None
+        self._last_manufacturer_name: str = ""
 
         self._ensure_db()
         self._setup_theme()
@@ -89,6 +109,28 @@ class RequestProcessorApp(tk.Tk):
         self._load_cable_marks()
         self._load_settings()
         self._load_kp_calculations()
+        self._load_organizations()
+        self._refresh_parse_info_panel()
+        self._load_orders_table()
+
+    def _accent_button(self, parent: tk.Misc, text: str, command) -> tk.Button:
+        """Основная кнопка действия — полный текст, контрастный фон."""
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=COLORS["accent"],
+            fg="white",
+            activebackground=COLORS["accent_hover"],
+            activeforeground="white",
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            padx=18,
+            pady=9,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+        )
 
     def _ensure_db(self) -> None:
         if not self.db_path.exists():
@@ -140,6 +182,17 @@ class RequestProcessorApp(tk.Tk):
             style="Subtitle.TLabel",
         ).pack(side="left", padx=(4, 0))
 
+        parse_bar = ttk.Frame(self, padding=(16, 0, 16, 6))
+        parse_bar.pack(fill="x")
+        self.parse_info_var = tk.StringVar(value="Заявка не обработана — вкладка «Заявка»")
+        ttk.Label(
+            parse_bar,
+            textvariable=self.parse_info_var,
+            style="Muted.TLabel",
+            wraplength=1050,
+            justify="left",
+        ).pack(anchor="w")
+
         self.status = tk.StringVar(value="Готово")
         status_bar = ttk.Label(self, textvariable=self.status, anchor="w", padding=(16, 6))
         status_bar.pack(side="bottom", fill="x")
@@ -147,34 +200,47 @@ class RequestProcessorApp(tk.Tk):
         self.notebook = ttk.Notebook(self, padding=(12, 8, 12, 8))
         self.notebook.pack(fill="both", expand=True)
 
-        self.tab_calc = ttk.Frame(self.notebook, padding=10)
         self.tab_pdf = ttk.Frame(self.notebook, padding=10)
-        self.tab_marks = ttk.Frame(self.notebook, padding=10)
+        self.tab_calc = ttk.Frame(self.notebook, padding=10)
         self.tab_kp = ttk.Frame(self.notebook, padding=10)
-        self.tab_history = ttk.Frame(self.notebook, padding=10)
+        self.tab_orders = ttk.Frame(self.notebook, padding=10)
+        self.tab_marks = ttk.Frame(self.notebook, padding=10)
+        self.tab_orgs = ttk.Frame(self.notebook, padding=10)
         self.tab_tests = ttk.Frame(self.notebook, padding=10)
+        self.tab_history = ttk.Frame(self.notebook, padding=10)
         self.tab_settings = ttk.Frame(self.notebook, padding=10)
 
-        self.notebook.add(self.tab_calc, text="  Расчёт  ")
-        self.notebook.add(self.tab_pdf, text="  PDF  ")
+        self.notebook.add(self.tab_pdf, text="  1. Заявка  ")
+        self.notebook.add(self.tab_calc, text="  2. Расчёт  ")
+        self.notebook.add(self.tab_kp, text="  3. КП  ")
+        self.notebook.add(self.tab_orders, text="  4. Заказы  ")
         self.notebook.add(self.tab_marks, text="  Марки  ")
-        self.notebook.add(self.tab_kp, text="  КП  ")
-        self.notebook.add(self.tab_history, text="  История  ")
+        self.notebook.add(self.tab_orgs, text="  Организации  ")
         self.notebook.add(self.tab_tests, text="  Справочник  ")
+        self.notebook.add(self.tab_history, text="  История  ")
         self.notebook.add(self.tab_settings, text="  Настройки  ")
 
-        self._build_calc_tab()
         self._build_pdf_tab()
-        self._build_marks_tab()
+        self._build_calc_tab()
         self._build_kp_tab()
-        self._build_history_tab()
+        self._build_orders_tab()
+        self._build_marks_tab()
+        self._build_orgs_tab()
         self._build_tests_tab()
+        self._build_history_tab()
         self._build_settings_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _on_tab_changed(self, _event: tk.Event | None = None) -> None:
-        if self.notebook and self.notebook.index(self.notebook.select()) == self.notebook.index(self.tab_kp):
+        if not self.notebook:
+            return
+        selected = self.notebook.index(self.notebook.select())
+        if selected == self.notebook.index(self.tab_kp):
             self._load_kp_calculations()
+        elif selected == self.notebook.index(self.tab_orgs):
+            self._load_orgs_table()
+        elif selected == self.notebook.index(self.tab_orders):
+            self._load_orders_table()
 
     def _build_calc_tab(self) -> None:
         top = ttk.LabelFrame(self.tab_calc, text="Марка кабеля", padding=12, style="Card.TLabelframe")
@@ -264,8 +330,7 @@ class RequestProcessorApp(tk.Tk):
 
         btns = ttk.Frame(self.tab_calc)
         btns.pack(fill="x")
-        calc_btn = ttk.Button(btns, text="▶  Рассчитать", style="Accent.TButton", command=self._run_calculate)
-        calc_btn.pack(side="left")
+        self._accent_button(btns, "Рассчитать", self._run_calculate).pack(side="left")
         ttk.Button(btns, text="Очистить всё", command=self._clear_calc).pack(side="left", padx=10)
         ttk.Label(
             btns,
@@ -280,9 +345,7 @@ class RequestProcessorApp(tk.Tk):
         self.pdf_path_var = tk.StringVar()
         ttk.Entry(top, textvariable=self.pdf_path_var).pack(side="left", fill="x", expand=True, ipady=3)
         ttk.Button(top, text="Обзор…", command=self._browse_pdf).pack(side="left", padx=6)
-        ttk.Button(top, text="Извлечь", style="Accent.TButton", command=self._run_extract_pdf).pack(
-            side="left"
-        )
+        self._accent_button(top, "Извлечь", self._run_extract_pdf).pack(side="left", padx=(0, 4))
 
         opts = ttk.Frame(self.tab_pdf)
         opts.pack(fill="x", pady=8)
@@ -291,6 +354,10 @@ class RequestProcessorApp(tk.Tk):
         ttk.Label(opts, text=f"DPI: {DEFAULT_OCR_DPI}", style="Muted.TLabel").pack(side="left", padx=12)
         self.save_marks_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="Сохранять марки в БД", variable=self.save_marks_var).pack(side="left")
+        self.save_orgs_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opts, text="Сохранять организации в БД", variable=self.save_orgs_var).pack(
+            side="left", padx=(12, 0)
+        )
 
         mid = ttk.PanedWindow(self.tab_pdf, orient="horizontal")
         mid.pack(fill="both", expand=True)
@@ -360,9 +427,15 @@ class RequestProcessorApp(tk.Tk):
         grid.columnconfigure(1, weight=1)
 
         ttk.Label(grid, text="Заказчик:", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=4)
-        self.kp_customer_var = tk.StringVar(value='ООО «Калужский кабельный завод»')
-        ttk.Entry(grid, textvariable=self.kp_customer_var, font=("Segoe UI", 10)).grid(
-            row=0, column=1, sticky="ew", padx=(8, 0), pady=4, ipady=2
+        self.kp_customer_var = tk.StringVar(value="")
+        self.kp_customer_combo = ttk.Combobox(
+            grid,
+            textvariable=self.kp_customer_var,
+            font=("Segoe UI", 10),
+        )
+        self.kp_customer_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=4, ipady=2)
+        ttk.Button(grid, text="↻", width=3, command=self._load_organizations).grid(
+            row=0, column=2, padx=(4, 0), pady=4
         )
 
         ttk.Label(grid, text="Предмет:", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=4)
@@ -380,12 +453,7 @@ class RequestProcessorApp(tk.Tk):
         action = ttk.Frame(self.tab_kp)
         action.pack(fill="x", pady=(0, 8))
 
-        ttk.Button(
-            action,
-            text="▶  Сформировать КП (Word)",
-            style="Accent.TButton",
-            command=self._run_generate_kp,
-        ).pack(side="left")
+        self._accent_button(action, "Сформировать КП", self._run_generate_kp).pack(side="left")
         ttk.Button(action, text="Выбрать все", command=self._select_all_kp_calcs).pack(
             side="left", padx=(8, 0)
         )
@@ -436,6 +504,99 @@ class RequestProcessorApp(tk.Tk):
         self.kp_calc_tree.bind("<Double-Button-1>", lambda _e: self._run_generate_kp())
         self.tab_kp.bind("<Return>", lambda _e: self._run_generate_kp())
 
+    def _build_orders_tab(self) -> None:
+        toolbar = ttk.Frame(self.tab_orders)
+        toolbar.pack(fill="x", pady=(0, 8))
+        ttk.Button(toolbar, text="Обновить", command=self._load_orders_table).pack(side="left")
+        self._accent_button(toolbar, "Открыть КП", self._open_selected_order_kp).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(toolbar, text="Печать КП", command=self._print_selected_order_kp).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Label(
+            toolbar,
+            text="Клик по заказу — детали; двойной клик — открыть КП",
+            style="Muted.TLabel",
+        ).pack(side="right")
+
+        paned = ttk.PanedWindow(self.tab_orders, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        left = ttk.LabelFrame(
+            paned, text="Сохранённые заказы", padding=8, style="Card.TLabelframe"
+        )
+        paned.add(left, weight=2)
+        cols = ("id", "date", "customer", "marks", "total", "status")
+        self.orders_tree = ttk.Treeview(
+            left, columns=cols, show="headings", height=16, selectmode="browse"
+        )
+        for col, title, width, anchor in (
+            ("id", "№", 45, "center"),
+            ("date", "Дата", 130, "w"),
+            ("customer", "Заказчик", 240, "w"),
+            ("marks", "Марок", 55, "center"),
+            ("total", "С НДС, ₽", 110, "e"),
+            ("status", "Статус", 100, "w"),
+        ):
+            self.orders_tree.heading(col, text=title, anchor=anchor)
+            self.orders_tree.column(col, width=width, anchor=anchor)
+        self.orders_tree.pack(fill="both", expand=True)
+        self.orders_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_order_details())
+        self.orders_tree.bind("<Double-Button-1>", lambda _e: self._open_selected_order_kp())
+
+        right = ttk.LabelFrame(paned, text="Информация о заказе", padding=8, style="Card.TLabelframe")
+        paned.add(right, weight=1)
+        self.order_details = scrolledtext.ScrolledText(
+            right,
+            height=20,
+            state="disabled",
+            font=("Segoe UI", 10),
+            bg="#f8fafc",
+            relief="flat",
+            padx=8,
+            pady=8,
+        )
+        self.order_details.pack(fill="both", expand=True)
+
+    def _build_orgs_tab(self) -> None:
+        toolbar = ttk.Frame(self.tab_orgs)
+        toolbar.pack(fill="x", pady=(0, 8))
+        ttk.Button(toolbar, text="Обновить", command=self._load_orgs_table).pack(side="left")
+        ttk.Button(toolbar, text="Редактировать…", command=self._edit_selected_organization).pack(
+            side="left", padx=6
+        )
+        self.orgs_search_var = tk.StringVar()
+        self.orgs_search_var.trace_add("write", lambda *_: self._load_orgs_table())
+        ttk.Entry(toolbar, textvariable=self.orgs_search_var, width=36).pack(
+            side="left", padx=(12, 0), ipady=2
+        )
+        ttk.Label(toolbar, text="Двойной клик — редактирование", style="Muted.TLabel").pack(
+            side="right"
+        )
+
+        cols = ("name", "inn", "org_type", "accredited", "address", "phone", "fsa")
+        self.orgs_tree = ttk.Treeview(
+            self.tab_orgs,
+            columns=cols,
+            show="headings",
+            height=20,
+            selectmode="browse",
+        )
+        for col, title, width, anchor in (
+            ("name", "Название", 280, "w"),
+            ("inn", "ИНН", 110, "w"),
+            ("org_type", "Тип", 130, "w"),
+            ("accredited", "Аккред.", 70, "center"),
+            ("address", "Адрес", 220, "w"),
+            ("phone", "Телефон", 120, "w"),
+            ("fsa", "Реестр ФСА", 150, "w"),
+        ):
+            self.orgs_tree.heading(col, text=title, anchor=anchor)
+            self.orgs_tree.column(col, width=width, anchor=anchor)
+        self.orgs_tree.pack(fill="both", expand=True)
+        self.orgs_tree.bind("<Double-Button-1>", lambda _e: self._edit_selected_organization())
+
     def _build_history_tab(self) -> None:
         toolbar = ttk.Frame(self.tab_history)
         toolbar.pack(fill="x")
@@ -475,7 +636,11 @@ class RequestProcessorApp(tk.Tk):
         ttk.Entry(search_frame, textvariable=self.tests_search_var, width=40).pack(
             side="left", padx=8, ipady=2
         )
-        ttk.Label(search_frame, text="Двойной клик — в расчёт", style="Muted.TLabel").pack(
+        self.calc_count_var = tk.StringVar(value="В расчёте: 0")
+        ttk.Label(search_frame, textvariable=self.calc_count_var, style="Muted.TLabel").pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Label(search_frame, text="Двойной клик — добавить в расчёт", style="Muted.TLabel").pack(
             side="right"
         )
 
@@ -603,9 +768,8 @@ class RequestProcessorApp(tk.Tk):
         self._render_calc_entry(entry, len(self._calc_entries) - 1)
         self._hide_calc_empty_hint()
 
-        if self.notebook:
-            self.notebook.select(self.tab_calc)
-        self.status.set(f"Добавлено: {test['name'][:50]}")
+        self._update_calc_count_label()
+        self.status.set(f"Добавлено в расчёт: {test['name'][:50]} (остаётесь в справочнике)")
 
     def _render_calc_entry(self, entry: CalcTestEntry, index: int) -> None:
         bg_style = "Card.TFrame"
@@ -679,6 +843,7 @@ class RequestProcessorApp(tk.Tk):
         if entry.row_frame:
             entry.row_frame.destroy()
         self._show_calc_empty_hint_if_needed()
+        self._update_calc_count_label()
         self.status.set(f"Удалено: {entry.name[:40]}")
 
     def _remove_selected_calc_test(self) -> None:
@@ -691,6 +856,11 @@ class RequestProcessorApp(tk.Tk):
             if child is not self._calc_empty_label:
                 child.destroy()
         self._show_calc_empty_hint_if_needed()
+        self._update_calc_count_label()
+
+    def _update_calc_count_label(self) -> None:
+        if hasattr(self, "calc_count_var"):
+            self.calc_count_var.set(f"В расчёте: {len(self._calc_entries)}")
 
     def _on_test_double_click(self, event: tk.Event) -> None:
         item = self.tests_tree.identify_row(event.y)
@@ -756,28 +926,216 @@ class RequestProcessorApp(tk.Tk):
         self._clear_calc_tests()
         self._set_text(self.calc_output, "")
 
+    def _format_parse_info(
+        self,
+        *,
+        file_name: str,
+        source_type: str,
+        marks_count: int,
+        customer_name: str = "",
+        manufacturer_name: str = "",
+        ocr_used: bool = False,
+        page_count: int = 0,
+        extracted_at: str = "",
+    ) -> str:
+        parts = [
+            f"📄 {file_name}",
+            source_type.upper(),
+        ]
+        if page_count:
+            parts.append(f"{page_count} стр.")
+        parts.append(f"{marks_count} марок")
+        if customer_name:
+            parts.append(f"заказчик: {customer_name}")
+        if manufacturer_name and manufacturer_name != customer_name:
+            parts.append(f"производитель: {manufacturer_name}")
+        if ocr_used:
+            parts.append("OCR")
+        if extracted_at:
+            parts.append(extracted_at[:16].replace("T", " "))
+        return "  ·  ".join(parts)
+
+    def _refresh_parse_info_panel(self) -> None:
+        row = get_last_document_extraction(self.db_path)
+        if not row:
+            self.parse_info_var.set("Заявка не обработана — вкладка «Заявка»")
+            return
+        file_name = Path(row["source_path"]).name
+        self.parse_info_var.set(
+            self._format_parse_info(
+                file_name=file_name,
+                source_type=row.get("source_type") or "unknown",
+                marks_count=int(row.get("marks_count") or 0),
+                customer_name=row.get("customer_name") or "",
+                manufacturer_name=row.get("manufacturer_name") or "",
+                extracted_at=row.get("extracted_at") or "",
+            )
+        )
+
+    def _load_orgs_table(self) -> None:
+        if not hasattr(self, "orgs_tree"):
+            return
+        for item in self.orgs_tree.get_children():
+            self.orgs_tree.delete(item)
+        search = (
+            self.orgs_search_var.get().strip() or None
+            if hasattr(self, "orgs_search_var")
+            else None
+        )
+        for row in list_organizations(search=search, limit=300, db_path=self.db_path):
+            org_type = ORG_TYPE_LABELS.get(row.get("org_type") or "unknown", row.get("org_type"))
+            addr = row.get("address") or ""
+            if row.get("postal_code"):
+                addr = f"{row['postal_code']}, {addr}".strip(", ")
+            self.orgs_tree.insert(
+                "",
+                "end",
+                iid=str(row["id"]),
+                values=(
+                    row["name"],
+                    row.get("inn") or "",
+                    org_type,
+                    "да" if row.get("is_accredited") else "нет",
+                    addr[:80],
+                    row.get("phone") or "",
+                    row.get("fsa_registry_number") or "",
+                ),
+            )
+
+    def _load_organizations(self) -> None:
+        rows = list_organizations(limit=200, db_path=self.db_path)
+        names = [row["name"] for row in rows]
+        self.kp_customer_combo["values"] = names
+        self._load_orgs_table()
+
+    def _edit_selected_organization(self) -> None:
+        if not hasattr(self, "orgs_tree"):
+            return
+        sel = self.orgs_tree.selection()
+        if not sel:
+            messagebox.showinfo("Организации", "Выберите организацию в таблице.")
+            return
+        org_id = int(sel[0])
+        row = get_organization_by_id(org_id, self.db_path)
+        if not row:
+            messagebox.showerror("Организации", "Запись не найдена в БД.")
+            return
+        self._open_organization_editor(row)
+
+    def _open_organization_editor(self, row: dict) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Организация — {row.get('name', '')[:40]}")
+        dialog.geometry("520x520")
+        dialog.configure(bg=COLORS["bg"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        fields: dict[str, tk.Variable] = {
+            "name": tk.StringVar(value=row.get("name") or ""),
+            "inn": tk.StringVar(value=row.get("inn") or ""),
+            "kpp": tk.StringVar(value=row.get("kpp") or ""),
+            "postal_code": tk.StringVar(value=row.get("postal_code") or ""),
+            "address": tk.StringVar(value=row.get("address") or ""),
+            "phone": tk.StringVar(value=row.get("phone") or ""),
+            "email": tk.StringVar(value=row.get("email") or ""),
+            "fsa_registry_number": tk.StringVar(value=row.get("fsa_registry_number") or ""),
+            "org_type": tk.StringVar(value=row.get("org_type") or "unknown"),
+            "is_accredited": tk.BooleanVar(value=bool(row.get("is_accredited"))),
+        }
+
+        form = ttk.Frame(dialog, padding=12)
+        form.pack(fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+
+        labels = (
+            ("Название:", "name"),
+            ("ИНН:", "inn"),
+            ("КПП:", "kpp"),
+            ("Индекс:", "postal_code"),
+            ("Адрес:", "address"),
+            ("Телефон:", "phone"),
+            ("E-mail:", "email"),
+            ("Реестр ФСА:", "fsa_registry_number"),
+        )
+        for r, (label, key) in enumerate(labels):
+            ttk.Label(form, text=label).grid(row=r, column=0, sticky="w", pady=5, padx=(0, 8))
+            ttk.Entry(form, textvariable=fields[key]).grid(row=r, column=1, sticky="ew", pady=5)
+
+        r = len(labels)
+        ttk.Label(form, text="Тип:").grid(row=r, column=0, sticky="w", pady=5, padx=(0, 8))
+        ttk.Combobox(
+            form,
+            textvariable=fields["org_type"],
+            values=ORG_TYPE_VALUES,
+            state="readonly",
+            width=28,
+        ).grid(row=r, column=1, sticky="w", pady=5)
+        r += 1
+        ttk.Checkbutton(form, text="Аккредитовано", variable=fields["is_accredited"]).grid(
+            row=r, column=1, sticky="w", pady=5
+        )
+
+        def save() -> None:
+            name = fields["name"].get().strip()
+            if len(name) < 2:
+                messagebox.showwarning("Организации", "Укажите название организации.")
+                return
+            ok = update_organization(
+                int(row["id"]),
+                name=name,
+                address=fields["address"].get().strip() or None,
+                postal_code=fields["postal_code"].get().strip() or None,
+                phone=fields["phone"].get().strip() or None,
+                email=fields["email"].get().strip() or None,
+                inn=fields["inn"].get().strip() or None,
+                kpp=fields["kpp"].get().strip() or None,
+                is_accredited=fields["is_accredited"].get(),
+                fsa_registry_number=fields["fsa_registry_number"].get().strip() or None,
+                org_type=fields["org_type"].get(),
+                db_path=self.db_path,
+            )
+            if not ok:
+                messagebox.showerror("Организации", "Не удалось сохранить изменения.")
+                return
+            dialog.destroy()
+            self._load_organizations()
+            self.status.set(f"Организация обновлена: {name[:50]}")
+
+        btns = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save).pack(side="left")
+        ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
+
     def _browse_pdf(self) -> None:
         path = filedialog.askopenfilename(
-            title="Выберите PDF",
-            filetypes=[("PDF", "*.pdf"), ("Все файлы", "*.*")],
+            title="Выберите заявку",
+            filetypes=[
+                ("Заявки", "*.pdf;*.docx"),
+                ("PDF", "*.pdf"),
+                ("Word", "*.docx"),
+                ("Все файлы", "*.*"),
+            ],
         )
         if path:
             self.pdf_path_var.set(path)
 
     def _run_extract_pdf(self) -> None:
-        pdf_path = self.pdf_path_var.get().strip()
-        if not pdf_path:
-            messagebox.showwarning("PDF", "Выберите файл.")
+        doc_path = self.pdf_path_var.get().strip()
+        if not doc_path:
+            messagebox.showwarning("Заявка", "Выберите файл PDF или Word.")
             return
 
-        self.status.set("Извлечение PDF…")
+        self.status.set("Извлечение заявки…")
 
         def work() -> None:
             try:
-                result = extract_from_pdf(Path(pdf_path), use_ocr=self.ocr_var.get())
+                result = extract_from_document(
+                    Path(doc_path),
+                    use_ocr=self.ocr_var.get(),
+                )
                 out_dir = Path("data/extracted")
                 out_dir.mkdir(parents=True, exist_ok=True)
-                out_file = out_dir / f"{Path(pdf_path).stem}.json"
+                out_file = out_dir / f"{Path(doc_path).stem}.json"
                 out_file.write_text(
                     result.model_dump_json(indent=2, ensure_ascii=False),
                     encoding="utf-8",
@@ -787,18 +1145,56 @@ class RequestProcessorApp(tk.Tk):
                 if self.save_marks_var.get() and result.cable_marks:
                     db_stats = save_cable_marks_from_matches(
                         result.cable_marks,
-                        source=str(Path(pdf_path).resolve()),
+                        source=str(Path(doc_path).resolve()),
                         db_path=self.db_path,
                     )
 
+                org_ids: dict[str, int | None] = {}
+                if self.save_orgs_var.get() and result.organizations:
+                    org_ids = save_organizations_from_extraction(
+                        result.organizations,
+                        source=str(Path(doc_path).resolve()),
+                        db_path=self.db_path,
+                    )
+                extraction_id = save_document_extraction(
+                    source_path=str(Path(doc_path).resolve()),
+                    source_type=result.source_type,
+                    text=result.text,
+                    marks_count=len(result.cable_marks),
+                    customer_org_id=org_ids.get("customer_org_id"),
+                    manufacturer_org_id=org_ids.get("manufacturer_org_id"),
+                    db_path=self.db_path,
+                )
+                self._last_document_extraction_id = extraction_id
+                self._last_manufacturer_name = result.manufacturer_name or ""
+
                 summary = [
-                    f"Файл: {Path(pdf_path).name}",
+                    f"Файл: {Path(doc_path).name}",
+                    f"Тип: {result.source_type}",
                     f"Страниц: {result.page_count}",
                     f"Марок: {len(result.cable_marks)}",
                     f"OCR: {'да' if result.ocr_used else 'нет'}",
-                    f"В БД: {db_stats['saved']}",
-                    f"JSON: {out_file}",
+                    f"Марок в БД: {db_stats['saved']}",
                 ]
+                if result.customer_name:
+                    summary.append(f"Заказчик: {result.customer_name}")
+                if result.manufacturer_name and result.manufacturer_name != result.customer_name:
+                    summary.append(f"Производитель: {result.manufacturer_name}")
+                for org in result.organizations:
+                    extras = []
+                    if org.inn:
+                        extras.append(f"ИНН {org.inn}")
+                    if org.postal_code:
+                        extras.append(org.postal_code)
+                    if org.is_accredited:
+                        extras.append("аккредитован")
+                    if org.fsa_registry_number:
+                        extras.append(org.fsa_registry_number)
+                    suffix = f" ({', '.join(extras)})" if extras else ""
+                    summary.append(f"  • [{org.role}] {org.name}{suffix}")
+                summary.append(f"JSON: {out_file}")
+
+                customer_name = result.customer_name
 
                 def update_ui() -> None:
                     self.marks_list.delete(0, "end")
@@ -806,11 +1202,26 @@ class RequestProcessorApp(tk.Tk):
                         self.marks_list.insert("end", m.mark)
                     self._set_text(self.pdf_output, "\n".join(summary))
                     self._load_cable_marks()
-                    self.status.set("PDF обработан")
+                    if customer_name:
+                        self.kp_customer_var.set(customer_name)
+                    self._load_organizations()
+                    self.parse_info_var.set(
+                        self._format_parse_info(
+                            file_name=Path(doc_path).name,
+                            source_type=result.source_type,
+                            marks_count=len(result.cable_marks),
+                            customer_name=result.customer_name,
+                            manufacturer_name=result.manufacturer_name,
+                            ocr_used=result.ocr_used,
+                            page_count=result.page_count,
+                            extracted_at=result.extracted_at.isoformat(),
+                        )
+                    )
+                    self.status.set("Заявка обработана")
 
                 self.after(0, update_ui)
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("Ошибка PDF", str(exc)))
+                self.after(0, lambda: messagebox.showerror("Ошибка извлечения", str(exc)))
                 self.after(0, lambda: self.status.set("Ошибка"))
 
         threading.Thread(target=work, daemon=True).start()
@@ -906,8 +1317,12 @@ class RequestProcessorApp(tk.Tk):
         self.status.set("Формирование КП…")
         self.update_idletasks()
 
+        manufacturer = self._last_manufacturer_name.strip() or None
+        doc_extraction_id = self._last_document_extraction_id
+
         def work() -> None:
             saved_path: Path | None = None
+            order_id: int | None = None
             error: str | None = None
             try:
                 saved_path = generate_kp_from_db(
@@ -918,6 +1333,16 @@ class RequestProcessorApp(tk.Tk):
                     db_path=self.db_path,
                     note=note,
                 )
+                order_id = create_order_from_kp(
+                    customer_name=customer,
+                    manufacturer_name=manufacturer,
+                    subject=subject,
+                    note=note,
+                    calculation_ids=ids,
+                    kp_output_path=str(saved_path),
+                    document_extraction_id=doc_extraction_id,
+                    db_path=self.db_path,
+                )
             except Exception as exc:
                 error = str(exc)
 
@@ -927,7 +1352,8 @@ class RequestProcessorApp(tk.Tk):
                     self.status.set("Ошибка формирования КП")
                     return
                 assert saved_path is not None
-                self.status.set(f"КП сохранено: {saved_path}")
+                self.status.set(f"Заказ №{order_id} · КП: {saved_path.name}")
+                self._load_orders_table()
                 try:
                     import os
 
@@ -935,13 +1361,126 @@ class RequestProcessorApp(tk.Tk):
                 except OSError:
                     pass
                 messagebox.showinfo(
-                    "КП готово",
-                    f"Документ сохранён и открыт в Word:\n{saved_path}",
+                    "Заказ оформлен",
+                    f"Заказ №{order_id} сохранён.\n"
+                    f"КП открыт в Word:\n{saved_path}",
                 )
 
             self.after(0, done)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _load_orders_table(self) -> None:
+        if not hasattr(self, "orders_tree"):
+            return
+        for item in self.orders_tree.get_children():
+            self.orders_tree.delete(item)
+        status_labels = {
+            "kp_generated": "КП готов",
+            "draft": "Черновик",
+            "completed": "Завершён",
+        }
+        for row in list_orders(limit=200, db_path=self.db_path):
+            self.orders_tree.insert(
+                "",
+                "end",
+                iid=str(row["id"]),
+                values=(
+                    row["id"],
+                    (row.get("created_at") or "")[:16].replace("T", " "),
+                    (row.get("customer_name") or "—")[:40],
+                    row.get("marks_count") or 0,
+                    f"{float(row.get('total_with_vat') or 0):,.2f}".replace(",", " "),
+                    status_labels.get(row.get("status") or "", row.get("status") or ""),
+                ),
+            )
+
+    def _show_order_details(self) -> None:
+        if not hasattr(self, "orders_tree"):
+            return
+        sel = self.orders_tree.selection()
+        if not sel:
+            return
+        details = get_order_details(int(sel[0]), self.db_path)
+        if not details:
+            self._set_text(self.order_details, "Заказ не найден.")
+            return
+        lines = [
+            f"Заказ №{details['id']}",
+            f"Дата: {(details.get('created_at') or '')[:16].replace('T', ' ')}",
+            f"Статус: {details.get('status', '')}",
+            "",
+            "ЗАКАЗЧИК",
+            f"  {details.get('customer_name') or '—'}",
+        ]
+        if details.get("customer_inn"):
+            lines.append(f"  ИНН: {details['customer_inn']}")
+        if details.get("customer_address"):
+            lines.append(f"  {details['customer_address']}")
+        lines.extend(["", "ПРОИЗВОДИТЕЛЬ", f"  {details.get('manufacturer_name') or '—'}"])
+        if details.get("manufacturer_inn"):
+            lines.append(f"  ИНН: {details['manufacturer_inn']}")
+        lines.extend([
+            "",
+            f"Предмет: {details.get('subject') or '—'}",
+            f"Без НДС: {float(details.get('total_without_vat') or 0):,.2f} ₽".replace(",", " "),
+            f"С НДС: {float(details.get('total_with_vat') or 0):,.2f} ₽".replace(",", " "),
+        ])
+        if details.get("source_document"):
+            lines.append(f"\nЗаявка: {Path(details['source_document']).name}")
+        if details.get("kp_output_path"):
+            lines.append(f"КП: {details['kp_output_path']}")
+        if details.get("note"):
+            lines.append(f"\nПримечание:\n{details['note']}")
+        lines.append("\nМАРКИ:")
+        for m in details.get("marks") or []:
+            mfg = m.get("manufacturer_name") or details.get("manufacturer_name") or "—"
+            lines.append(
+                f"  • {m.get('mark')} — {float(m.get('total_with_vat') or 0):,.2f} ₽ "
+                f"(производитель: {mfg})".replace(",", " ")
+            )
+        self._set_text(self.order_details, "\n".join(lines))
+
+    def _get_selected_order_kp_path(self) -> Path | None:
+        if not hasattr(self, "orders_tree"):
+            return None
+        sel = self.orders_tree.selection()
+        if not sel:
+            messagebox.showinfo("Заказы", "Выберите заказ в списке.")
+            return None
+        details = get_order_details(int(sel[0]), self.db_path)
+        if not details or not details.get("kp_output_path"):
+            messagebox.showwarning("Заказы", "Файл КП для этого заказа не найден.")
+            return None
+        path = Path(details["kp_output_path"])
+        if not path.exists():
+            messagebox.showwarning("Заказы", f"Файл не существует:\n{path}")
+            return None
+        return path
+
+    def _open_selected_order_kp(self) -> None:
+        path = self._get_selected_order_kp_path()
+        if not path:
+            return
+        try:
+            import os
+
+            os.startfile(str(path))
+            self.status.set(f"Открыт КП: {path.name}")
+        except OSError as exc:
+            messagebox.showerror("Заказы", str(exc))
+
+    def _print_selected_order_kp(self) -> None:
+        path = self._get_selected_order_kp_path()
+        if not path:
+            return
+        try:
+            import os
+
+            os.startfile(str(path), "print")
+            self.status.set(f"Печать: {path.name}")
+        except OSError as exc:
+            messagebox.showerror("Печать", f"Не удалось отправить на печать:\n{exc}")
 
     def _load_history(self) -> None:
         for item in self.history_tree.get_children():

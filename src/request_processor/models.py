@@ -198,14 +198,97 @@ class ClimaticTestSettings(BaseModel):
     solar_radiation: float = Field(24.0, gt=0, description="Солнечная радиация")
 
 
+OrganizationRole = Literal["customer", "manufacturer", "dealer", "unknown"]
+OrganizationType = Literal[
+    "manufacturer",
+    "certification_body",
+    "testing_center",
+    "dealer",
+    "unknown",
+]
+
+
+class OrganizationExtract(BaseModel):
+    """Организация, извлечённая из текста заявки (до сохранения в БД)."""
+
+    name: str = Field(..., min_length=2)
+    address: str | None = None
+    postal_code: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    inn: str | None = None
+    kpp: str | None = None
+    is_accredited: bool = False
+    fsa_registry_number: str | None = None
+    org_type: OrganizationType = "unknown"
+    role: OrganizationRole = "unknown"
+    confidence: float = Field(0.5, ge=0, le=1)
+
+
+class Organization(BaseModel):
+    """Организация в справочнике БД."""
+
+    id: int | None = None
+    name: str
+    name_normalized: str
+    address: str | None = None
+    postal_code: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    inn: str | None = None
+    kpp: str | None = None
+    is_accredited: bool = False
+    fsa_registry_number: str | None = None
+    org_type: OrganizationType = "unknown"
+    source: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class OrderMark(BaseModel):
+    """Марка внутри заказа."""
+
+    id: int | None = None
+    order_id: int | None = None
+    calculation_id: int
+    cable_mark_id: int | None = None
+    manufacturer_org_id: int | None = None
+    mark: str
+    total_without_vat: float
+    total_with_vat: float
+
+
+class Order(BaseModel):
+    """Заказ: одна заявка + расчёты + КП."""
+
+    id: int | None = None
+    customer_org_id: int | None = None
+    manufacturer_org_id: int | None = None
+    subject: str = ""
+    note: str | None = None
+    status: Literal["draft", "kp_generated", "completed"] = "kp_generated"
+    total_without_vat: float = 0.0
+    total_with_vat: float = 0.0
+    vat_rate: float = 0.22
+    document_extraction_id: int | None = None
+    kp_output_path: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    marks: list[OrderMark] = Field(default_factory=list)
+
+
 class PdfExtractionResult(BaseModel):
-    """Результат извлечения данных из PDF."""
+    """Результат извлечения из заявки (PDF, Word .docx)."""
 
     source_path: str
+    source_type: Literal["pdf", "docx", "unknown"] = "pdf"
     page_count: int
     text: str
     tables: list[list[list[str]]] = Field(default_factory=list)
     cable_marks: list[CableMarkMatch] = Field(default_factory=list)
+    organizations: list[OrganizationExtract] = Field(default_factory=list)
+    customer_name: str = ""
+    manufacturer_name: str = ""
     is_scanned: bool = False
     ocr_used: bool = False
     extracted_at: datetime = Field(default_factory=datetime.now)

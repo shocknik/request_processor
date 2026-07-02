@@ -1,0 +1,302 @@
+"""
+Извлечение сведений об организациях из текста заявок и писем (PDF/OCR/Word).
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Literal
+
+from .models import OrganizationExtract, OrganizationRole
+
+OrgType = Literal[
+    "manufacturer",
+    "certification_body",
+    "testing_center",
+    "dealer",
+    "unknown",
+]
+
+_ROLE_LABELS: dict[str, OrganizationRole] = {
+    "заказчик": "customer",
+    "покупатель": "customer",
+    "изготовитель": "manufacturer",
+    "производитель": "manufacturer",
+    "завод": "manufacturer",
+    "дилер": "dealer",
+    "поставщик": "dealer",
+    "орган по сертификации": "certification_body",
+    "испытательный центр": "testing_center",
+    "испытательная лаборатория": "testing_center",
+}
+
+_ORG_TYPE_KEYWORDS: list[tuple[OrgType, re.Pattern[str]]] = [
+    ("testing_center", re.compile(r"испытательн\w+\s+(?:центр|лаборатор)", re.I)),
+    ("certification_body", re.compile(r"орган\w*\s+по\s+сертификац", re.I)),
+    ("dealer", re.compile(r"\bдилер\w*\b", re.I)),
+    ("manufacturer", re.compile(r"(?:кабельн\w+\s+завод|завод\w*|производител\w*|изготовител\w*)", re.I)),
+]
+
+_FSA_PATTERN = re.compile(
+    r"РОСС\s*RU\.\d{4}\.\d{2}[A-ZА-Я0-9]+",
+    re.IGNORECASE,
+)
+_INN_KPP_PATTERN = re.compile(
+    r"ИНН\s*/?\s*КПП\s*(\d{10,12})\s*/\s*(\d{9})",
+    re.IGNORECASE,
+)
+_INN_ONLY_PATTERN = re.compile(r"ИНН\s*(\d{10,12})", re.IGNORECASE)
+_POSTAL_ADDRESS_PATTERN = re.compile(
+    r"(\d{6})\s*,\s*(.+?)(?=\s*(?:р/с|p/c|ИНН|ОГРН|БИК|ОКВЭД|ОКПО|Исх|$))",
+    re.IGNORECASE | re.DOTALL,
+)
+_PHONE_PATTERN = re.compile(
+    r"(?:Тел|Tex|тел|Факс|факс)\s*[.:]?\s*(\+7[\d\s\(\)\-]{10,40})",
+    re.IGNORECASE,
+)
+_EMAIL_PATTERN = re.compile(
+    r"(?:E-?mail|электронн\w*\s*почт\w*)\s*[.:]?\s*([\w.\-]+@[\w.\-]+\.\w+)",
+    re.IGNORECASE,
+)
+_OOO_NAME_PATTERN = re.compile(
+    r"(?:ООО|Общество\s+[сc]\s+ограниченной\s+ответственностью)\s*"
+    r"[{«\"'(\[]?([^}\»\"'\]\d]{4,90})",
+    re.IGNORECASE,
+)
+_QUOTED_NAME_PATTERN = re.compile(
+    r"[«\"']([^»\"']{4,80}(?:завод|кабель|завод\w*|центр|лаборатор\w*))[»\"']",
+    re.IGNORECASE,
+)
+_HEADER_CAPS_PATTERN = re.compile(
+    r"^([А-ЯЁA-Z][А-ЯЁA-Z\s\-]{8,60}(?:ЗАВОД|КАБЕЛ\w*|ЦЕНТР))",
+    re.MULTILINE,
+)
+
+
+def normalize_org_name(name: str) -> str:
+    """Ключ для дедупликации организаций."""
+    name = name.lower().strip()
+    name = re.sub(r"[«»\"'`{}\[\]]", "", name)
+    name = re.sub(r"\s+", " ", name)
+    for prefix in (
+        "общество с ограниченной ответственностью",
+        "ооо",
+        "ао",
+        "пао",
+        "зао",
+    ):
+        if name.startswith(prefix + " "):
+            name = name[len(prefix) + 1 :]
+    return name.strip(" .,;-")
+
+
+def _clean_org_name(raw: str) -> str:
+    name = re.sub(r"\s+", " ", raw).strip(" .,;:{}\"")
+
+    name = re.sub(r"(?:л|1)\s*$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s+\d{6}.*$", "", name)
+    name = re.sub(r"\s+(?:российская|рф|россия).*$", "", name, flags=re.IGNORECASE)
+
+    if name and not name.upper().startswith("ООО"):
+        short = name.strip()
+        if len(short) >= 4:
+            return f'ООО «{short}»'
+    if "«" not in name and "»" not in name:
+        core = re.sub(r"^ООО\s+", "", name, flags=re.IGNORECASE).strip()
+        if core:
+            return f"ООО «{core}»"
+    return name
+
+
+def _fix_ocr_name(name: str) -> str:
+    """Поправки типичных OCR-ошибок в названии завода."""
+    fixes = (
+        (r"КААУЖСК", "Калужск"),
+        (r"кабеАьн", "кабельн"),
+        (r"кабеаьн", "кабельн"),
+        (r"ХАВOА", "завод"),
+        (r"ХАВОА", "завод"),
+        (r"Ка\^ужск", "Калужск"),
+        (r"заводл", "завод"),
+    )
+    for pattern, repl in fixes:
+        name = re.sub(pattern, repl, name, flags=re.IGNORECASE)
+    return name
+
+
+def _infer_org_type(text: str, name: str) -> OrgType:
+    blob = f"{name}\n{text[:2500]}"
+    for org_type, pattern in _ORG_TYPE_KEYWORDS:
+        if pattern.search(blob):
+            return org_type
+    if re.search(r"кабельн\w+|завод", name, re.I):
+        return "manufacturer"
+    return "unknown"
+
+
+def _extract_name(text: str) -> str | None:
+    header = text[:2000]
+    for pattern in (_OOO_NAME_PATTERN, _QUOTED_NAME_PATTERN, _HEADER_CAPS_PATTERN):
+        match = pattern.search(header)
+        if match:
+            raw = _fix_ocr_name(match.group(1))
+            name = _clean_org_name(raw)
+            if len(normalize_org_name(name)) >= 4:
+                return name
+    return None
+
+
+def _extract_labeled_org(text: str, label: str) -> OrganizationExtract | None:
+    pattern = re.compile(
+        rf"{label}\s*[:\-]\s*(.+?)(?=\n|заказчик|изготовитель|производитель|марка|№|$)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+    chunk = match.group(1).strip()[:300]
+    name = _clean_org_name(_fix_ocr_name(chunk.split(",")[0]))
+    if len(normalize_org_name(name)) < 4:
+        return None
+    return OrganizationExtract(
+        name=name,
+        org_type=_infer_org_type(text, name),
+        role=_ROLE_LABELS.get(label.lower(), "unknown"),
+        confidence=0.75,
+    )
+
+
+def _build_org_from_header(text: str) -> OrganizationExtract | None:
+    name = _extract_name(text)
+    if not name:
+        return None
+
+    inn = kpp = None
+    inn_match = _INN_KPP_PATTERN.search(text[:3000])
+    if inn_match:
+        inn, kpp = inn_match.group(1), inn_match.group(2)
+    else:
+        solo = _INN_ONLY_PATTERN.search(text[:3000])
+        if solo:
+            inn = solo.group(1)
+
+    postal_code = address = None
+    addr_match = _POSTAL_ADDRESS_PATTERN.search(text[:3000])
+    if addr_match:
+        postal_code = addr_match.group(1)
+        address = re.sub(r"\s+", " ", addr_match.group(2)).strip(" .,;")
+
+    phone = None
+    phone_match = _PHONE_PATTERN.search(text[:3000])
+    if phone_match:
+        phone = re.sub(r"\s+", " ", phone_match.group(1)).strip()
+
+    email = None
+    email_match = _EMAIL_PATTERN.search(text[:3000])
+    if email_match:
+        email = email_match.group(1).replace(" ", "")
+
+    fsa = None
+    fsa_match = _FSA_PATTERN.search(text)
+    if fsa_match:
+        fsa = fsa_match.group(0).upper().replace("  ", " ")
+
+    is_accredited = bool(fsa) or bool(
+        re.search(r"аккредитован\w*", text[:4000], re.IGNORECASE)
+    )
+
+    org_type = _infer_org_type(text, name)
+    if org_type == "unknown" and re.search(r"завод|кабель", name, re.I):
+        org_type = "manufacturer"
+
+    confidence = 0.5
+    if inn:
+        confidence += 0.2
+    if postal_code:
+        confidence += 0.1
+    if address:
+        confidence += 0.1
+
+    return OrganizationExtract(
+        name=name,
+        address=address,
+        postal_code=postal_code,
+        phone=phone,
+        email=email,
+        inn=inn,
+        kpp=kpp,
+        is_accredited=is_accredited,
+        fsa_registry_number=fsa,
+        org_type=org_type,
+        role="unknown",
+        confidence=min(confidence, 0.95),
+    )
+
+
+def extract_organizations(text: str) -> list[OrganizationExtract]:
+    """
+    Извлекает организации из текста заявки.
+
+    Возвращает заказчика, производителя и отправителя письма (шапка).
+    Отправитель письма с запросом испытаний обычно совпадает с заказчиком.
+    """
+    if not text or not text.strip():
+        return []
+
+    found: list[OrganizationExtract] = []
+    seen: set[str] = set()
+
+    def add(org: OrganizationExtract | None, default_role: OrganizationRole) -> None:
+        if not org or not org.name:
+            return
+        key = normalize_org_name(org.name)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        if org.role == "unknown":
+            org.role = default_role
+        found.append(org)
+
+    for label, role in _ROLE_LABELS.items():
+        labeled = _extract_labeled_org(text, label)
+        if labeled:
+            labeled.role = role
+            add(labeled, role)
+
+    header_org = _build_org_from_header(text)
+    if header_org:
+        add(header_org, "customer")
+
+    if not found and header_org:
+        manufacturer = header_org.model_copy(deep=True)
+        manufacturer.role = "manufacturer"
+        add(manufacturer, "manufacturer")
+
+    if len(found) == 1 and found[0].role == "customer":
+        manufacturer = found[0].model_copy(deep=True)
+        manufacturer.role = "manufacturer"
+        if normalize_org_name(manufacturer.name) not in seen:
+            seen.add(normalize_org_name(manufacturer.name))
+            found.append(manufacturer)
+
+    return found
+
+
+def pick_customer_name(organizations: list[OrganizationExtract]) -> str:
+    for org in organizations:
+        if org.role == "customer" and org.name:
+            return org.name
+    for org in organizations:
+        if org.role in ("manufacturer", "unknown") and org.name:
+            return org.name
+    return ""
+
+
+def pick_manufacturer_name(organizations: list[OrganizationExtract]) -> str:
+    for org in organizations:
+        if org.role == "manufacturer" and org.name:
+            return org.name
+    for org in organizations:
+        if org.org_type == "manufacturer" and org.name:
+            return org.name
+    return pick_customer_name(organizations)
