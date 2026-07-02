@@ -478,6 +478,10 @@ def extract_from_pdf(
         text = extract_text(path)
         tables = extract_tables(path)
 
+    search_text = text
+    if tables:
+        search_text = f"{text}\n{_tables_to_text(tables)}".strip()
+
     cable_marks = _resolve_cable_marks(text, tables)
     organizations = extract_organizations(search_text)
 
