@@ -50,12 +50,15 @@ from .sqlite_repo import (
     get_order_details,
     get_last_document_extraction,
     list_test_applications,
+    list_test_mappings,
+    add_test_mapping,
 )
 from .cost_calculator import calculate_cost, print_breakdown
 from .kp_generator import generate_kp_from_db
 from .application_generator import generate_application_from_order
 from .pdf_extractor import extract_from_document
 from .extraction_validator import format_validation_report, validate_extraction
+from .requirement_mapper import map_requirements_to_tests, suggest_tests_for_mark
 from request_processor import __version__
 
 def _slugify(text: str) -> str:
@@ -463,6 +466,91 @@ def add_test_item_cmd(
     )
     new_id = add_test_item(item)
     click.echo(f"✓ Добавлено испытание (id={new_id}) | {code}")
+
+
+@cli.command("suggest-tests")
+@click.option(
+    "--requirements",
+    "requirements_text",
+    default=None,
+    help="Текст контролируемых показателей / требований",
+)
+@click.option("--mark", default=None, help="Условное обозначение (для поиска в последнем JSON)")
+@click.option("--db", default="data/app.db", show_default=True)
+def suggest_tests_cmd(
+    requirements_text: str | None,
+    mark: str | None,
+    db: str,
+) -> None:
+    """Предлагает коды испытаний по тексту требований из заявки."""
+    migrate_db(db)
+    suggestions = []
+
+    if requirements_text:
+        suggestions = map_requirements_to_tests(requirements_text, db_path=db)
+    elif mark:
+        last = get_last_document_extraction(db)
+        if not last:
+            raise click.ClickException("Нет извлечённых заявок в БД. Сначала extract-pdf.")
+        import json as _json
+        from pathlib import Path as _Path
+
+        src = last.get("source_path") or ""
+        stem = _Path(src).stem
+        json_path = _Path("data/extracted") / f"{stem}.json"
+        if not json_path.exists():
+            raise click.ClickException(f"JSON не найден: {json_path}")
+        from .models import PdfExtractionResult
+
+        result = PdfExtractionResult.model_validate(
+            _json.loads(json_path.read_text(encoding="utf-8"))
+        )
+        match = next((m for m in result.cable_marks if mark.lower() in m.mark.lower()), None)
+        if not match:
+            raise click.ClickException(f"Марка «{mark}» не найдена в {json_path.name}")
+        suggestions = suggest_tests_for_mark(match, db_path=db)
+    else:
+        raise click.ClickException("Укажите --requirements или --mark")
+
+    if not suggestions:
+        click.echo("Испытания не определены по тексту требований.")
+        return
+
+    click.echo(click.style("Предложенные испытания:\n", bold=True))
+    for s in suggestions:
+        src = "БД" if s.source == "database" else "правило"
+        pat = f"  «{s.matched_pattern}»" if s.matched_pattern else ""
+        click.echo(f"  {s.code:<22} {s.confidence:>4.0%}  {s.name[:45]:<45}  [{src}]{pat}")
+
+
+@cli.command("list-test-mappings")
+@click.option("--test-code", default=None, help="Фильтр по коду испытания")
+@click.option("--limit", default=50, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_test_mappings_cmd(test_code: str | None, limit: int, db: str) -> None:
+    """Справочник маппинга «фраза требования → испытание»."""
+    migrate_db(db)
+    rows = list_test_mappings(test_code=test_code, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Маппинги не найдены.")
+        return
+    for row in rows:
+        click.echo(
+            f"{row['id']:>4}  {row['test_code']:<22}  "
+            f"×{row.get('usage_count', 0):<3}  {row['requirement_pattern']}"
+        )
+
+
+@cli.command("add-test-mapping")
+@click.option("--pattern", required=True, help="Фраза из заявки (подстрока, без учёта регистра)")
+@click.option("--test-code", required=True, help="Код испытания из test_items")
+@click.option("--note", default=None)
+@click.option("--db", default="data/app.db", show_default=True)
+def add_test_mapping_cmd(pattern: str, test_code: str, note: str | None, db: str) -> None:
+    """Добавляет маппинг требования на испытание."""
+    migrate_db(db)
+    mapping_id = add_test_mapping(pattern, test_code, note=note, db_path=db)
+    click.echo(click.style(f"✓ Маппинг сохранён (id={mapping_id})", fg="green"))
 
 
 @cli.command("list-cable-marks")

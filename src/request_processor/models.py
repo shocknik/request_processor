@@ -314,12 +314,32 @@ class FieldStatus(str, Enum):
     error = "error"
 
 
+class TestSuggestion(BaseModel):
+    """Предложенное испытание по тексту требований из заявки."""
+
+    code: str
+    name: str
+    confidence: float = Field(ge=0, le=1)
+    source: Literal["builtin", "database"] = "builtin"
+    matched_pattern: str | None = None
+    note: str | None = None
+    mapping_id: int | None = None
+
+
 class MarkValidation(BaseModel):
     """Проверенная марка кабеля для панели подтверждения (поля → cable_marks)."""
 
     mark: str = Field(..., description="Условное обозначение (full_mark в БД)")
     document: str | None = None
     context: str | None = None
+    requirements_raw: str | None = Field(
+        None,
+        description="Контролируемые показатели из таблицы направления",
+    )
+    suggested_tests: list[str] = Field(
+        default_factory=list,
+        description="Коды test_items, предложенные requirement_mapper",
+    )
     brand: str | None = Field(None, description="Буквенная часть без пожарного класса")
     fire_class: str | None = None
     cores_count: int | None = Field(None, ge=1, description="Количество ТПЖ")

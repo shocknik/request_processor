@@ -2,7 +2,7 @@
 
 Автоматизация расчёта стоимости испытаний кабельной продукции, обработки заявок и формирования документов (КП и заявка на испытания).
 
-**Версия:** 0.6.2  
+**Версия:** 0.7.0  
 **Репозиторий:** https://github.com/shocknik/request_processor
 
 ---
@@ -11,6 +11,7 @@
 
 - Извлечение из **PDF** и **Word** (марки, заказчик, производитель)
 - **Валидация парсинга** — отчёт уверенности, human-in-the-loop в GUI
+- **Маппинг требований** — `test_mappings`, предложение испытаний из направлений
 - Расчёт испытаний (`fixed`, `per_core`, `per_group`, `time_based`)
 - **КП в Word** по нескольким маркам
 - **Заявка на испытания в Word** — форма + приложение с объёмом испытаний
@@ -88,6 +89,7 @@ tests/
 request-processor extract-pdf --pdf letter.pdf --show-marks
 request-processor extract-pdf --pdf letter.pdf --dry-run          # JSON без БД
 request-processor extract-pdf --pdf letter.pdf --validate         # отчёт валидатора
+request-processor suggest-tests --requirements "солнечного излучения"
 
 # Документы
 request-processor generate-kp --customer "ООО …" --calc-ids "1,2,3"

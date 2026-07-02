@@ -361,12 +361,22 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_test_applications_order_id ON test_applications(order_id);
             CREATE INDEX IF NOT EXISTS idx_test_applications_created_at ON test_applications(created_at);
+            CREATE TABLE IF NOT EXISTS test_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                requirement_pattern TEXT NOT NULL UNIQUE,
+                test_code TEXT NOT NULL,
+                note TEXT,
+                usage_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_test_mappings_code ON test_mappings(test_code);
             """
         )
     _migrate_orders_columns(db_path)
     _migrate_organizations_columns(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
+    sync_default_test_mappings(db_path)
 
 
 def _migrate_orders_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:
@@ -575,6 +585,91 @@ def sync_climatic_tests(db_path: str | Path = DB_PATH_DEFAULT) -> None:
             },
         )
         insert_test_item(item, db_path)
+
+
+_DEFAULT_TEST_MAPPINGS: list[tuple[str, str, str | None]] = [
+    ("солнечного излучения", "solar_radiation", "Направления в ИЛ, ГОСТ 20.57.406"),
+    ("повышенной влажности", "humidity", "Климатика"),
+    ("пониженной температуры", "temp_low", "Климатика"),
+    ("повышенной температуры", "temp_high", "Климатика"),
+    ("изменению температур", "temp_cycling", "Климатика"),
+    ("испытание напряжением", "voltage_test", "Электрические НЧ"),
+]
+
+
+def sync_default_test_mappings(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """Заполняет test_mappings базовыми фразами (идемпотентно)."""
+    now = datetime.now().isoformat()
+    with get_connection(db_path) as conn:
+        for pattern, test_code, note in _DEFAULT_TEST_MAPPINGS:
+            conn.execute(
+                """
+                INSERT INTO test_mappings (requirement_pattern, test_code, note, usage_count, created_at)
+                VALUES (?, ?, ?, 0, ?)
+                ON CONFLICT(requirement_pattern) DO NOTHING
+                """,
+                (pattern.lower(), test_code, note, now),
+            )
+
+
+def list_test_mappings(
+    *,
+    test_code: str | None = None,
+    limit: int = 200,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    query = "SELECT * FROM test_mappings"
+    params: list[Any] = []
+    if test_code:
+        query += " WHERE test_code = ?"
+        params.append(test_code)
+    query += " ORDER BY usage_count DESC, requirement_pattern LIMIT ?"
+    params.append(limit)
+    with get_connection(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def add_test_mapping(
+    requirement_pattern: str,
+    test_code: str,
+    *,
+    note: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Добавляет или обновляет маппинг «фраза → код испытания»."""
+    pattern = requirement_pattern.strip().lower()
+    if not pattern:
+        raise ValueError("Пустой шаблон требования")
+    now = datetime.now().isoformat()
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO test_mappings (requirement_pattern, test_code, note, usage_count, created_at)
+            VALUES (?, ?, ?, 0, ?)
+            ON CONFLICT(requirement_pattern) DO UPDATE SET
+                test_code = excluded.test_code,
+                note = COALESCE(excluded.note, test_mappings.note)
+            """,
+            (pattern, test_code, note, now),
+        )
+        row = conn.execute(
+            "SELECT id FROM test_mappings WHERE requirement_pattern = ?",
+            (pattern,),
+        ).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def record_mapping_usage(
+    mapping_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    """Увеличивает счётчик срабатывания маппинга (для обучения на подтверждениях оператора)."""
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE test_mappings SET usage_count = usage_count + 1 WHERE id = ?",
+            (mapping_id,),
+        )
 
 
 CLIMATIC_SETTINGS_KEY = "climatic_test_hours"

@@ -22,6 +22,7 @@ from .models import (
     ValidationReport,
 )
 from .pdf_extractor import is_plausible_mark
+from .requirement_mapper import map_requirements_to_tests
 
 _TESTING_CENTER_HINTS = re.compile(
     r"кабель[\s\-–]*тест|испытательн\w*\s+(?:центр|лаборатор)|видяев|"
@@ -100,13 +101,20 @@ def _validate_mark(
     seen_keys.add(key)
 
     confidence = round(min(max(confidence, 0.0), 1.0), 2)
-    return mark_validation_from_match(
+    result = mark_validation_from_match(
         match,
         confidence=confidence,
         status=status,
         warnings=warnings,
         accepted=status != FieldStatus.error,
     )
+    if match.requirements_raw:
+        suggestions = map_requirements_to_tests(match.requirements_raw)
+        if suggestions:
+            result = result.model_copy(
+                update={"suggested_tests": [s.code for s in suggestions]}
+            )
+    return result
 
 
 def _validate_org(
@@ -326,7 +334,10 @@ def format_validation_report(report: ValidationReport, *, source_name: str = "")
         icon = {"ok": "[✓]", "warning": "[⚠]", "error": "[✗]"}[mark.status.value]
         accepted = " " if mark.accepted else " (снята)"
         tu = f"  {mark.document}" if mark.document else ""
-        lines.append(f"  {icon} {mark.confidence:.0%}  {mark.mark}{tu}{accepted}")
+        tests = ""
+        if mark.suggested_tests:
+            tests = f"  → {', '.join(mark.suggested_tests)}"
+        lines.append(f"  {icon} {mark.confidence:.0%}  {mark.mark}{tu}{tests}{accepted}")
 
     if report.organizations:
         lines.append("Организации:")
