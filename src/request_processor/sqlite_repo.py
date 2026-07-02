@@ -151,6 +151,8 @@ def init_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
         name TEXT NOT NULL,
         name_normalized TEXT NOT NULL,
         address TEXT,
+        legal_address TEXT,
+        actual_address TEXT,
         postal_code TEXT,
         phone TEXT,
         email TEXT,
@@ -277,6 +279,8 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 name TEXT NOT NULL,
                 name_normalized TEXT NOT NULL,
                 address TEXT,
+                legal_address TEXT,
+                actual_address TEXT,
                 postal_code TEXT,
                 phone TEXT,
                 email TEXT,
@@ -360,6 +364,7 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
             """
         )
     _migrate_orders_columns(db_path)
+    _migrate_organizations_columns(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
 
@@ -369,6 +374,43 @@ def _migrate_orders_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
         if "application_path" not in cols:
             conn.execute("ALTER TABLE orders ADD COLUMN application_path TEXT")
+
+
+def _migrate_organizations_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    from .organization_extractor import sanitize_address
+
+    with get_connection(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(organizations)").fetchall()}
+        if "legal_address" not in cols:
+            conn.execute("ALTER TABLE organizations ADD COLUMN legal_address TEXT")
+        if "actual_address" not in cols:
+            conn.execute("ALTER TABLE organizations ADD COLUMN actual_address TEXT")
+
+        rows = conn.execute(
+            "SELECT id, address, legal_address, actual_address FROM organizations"
+        ).fetchall()
+        for row in rows:
+            raw = row["address"]
+            legal = row["legal_address"]
+            actual = row["actual_address"]
+            clean = sanitize_address(raw)
+            clean_legal = sanitize_address(legal) if legal else clean
+            clean_actual = sanitize_address(actual) if actual else None
+            if clean and (not legal or len(str(legal)) > 250):
+                legal = clean_legal
+            if not actual and clean_actual:
+                actual = clean_actual
+            if raw != clean or legal != row["legal_address"] or actual != row["actual_address"]:
+                conn.execute(
+                    """
+                    UPDATE organizations SET
+                        address = ?,
+                        legal_address = COALESCE(?, legal_address),
+                        actual_address = COALESCE(?, actual_address)
+                    WHERE id = ?
+                    """,
+                    (clean or raw, legal, actual, row["id"]),
+                )
 
 
 def get_calculation_lines(
@@ -677,6 +719,9 @@ def upsert_organization(
                 (name_normalized, inn_key),
             ).fetchone()
 
+        legal = extract.legal_address or extract.address
+        actual = extract.actual_address or legal
+
         if row:
             org_id = int(row["id"])
             conn.execute(
@@ -684,6 +729,8 @@ def upsert_organization(
                 UPDATE organizations SET
                     name = ?,
                     address = COALESCE(?, address),
+                    legal_address = COALESCE(?, legal_address),
+                    actual_address = COALESCE(?, actual_address),
                     postal_code = COALESCE(?, postal_code),
                     phone = COALESCE(?, phone),
                     email = COALESCE(?, email),
@@ -699,6 +746,8 @@ def upsert_organization(
                 (
                     extract.name,
                     extract.address,
+                    legal,
+                    actual,
                     extract.postal_code,
                     extract.phone,
                     extract.email,
@@ -718,15 +767,18 @@ def upsert_organization(
         cursor = conn.execute(
             """
             INSERT INTO organizations (
-                name, name_normalized, address, postal_code, phone, email,
+                name, name_normalized, address, legal_address, actual_address,
+                postal_code, phone, email,
                 inn, kpp, is_accredited, fsa_registry_number, org_type,
                 source, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 extract.name,
                 name_normalized,
                 extract.address,
+                legal,
+                actual,
                 extract.postal_code,
                 extract.phone,
                 extract.email,
@@ -1065,10 +1117,17 @@ def get_order_details(
                    c.name AS customer_name,
                    c.inn AS customer_inn,
                    c.address AS customer_address,
+                   c.legal_address AS customer_legal_address,
+                   c.actual_address AS customer_actual_address,
                    c.phone AS customer_phone,
+                   c.email AS customer_email,
                    m.name AS manufacturer_name,
                    m.inn AS manufacturer_inn,
                    m.address AS manufacturer_address,
+                   m.legal_address AS manufacturer_legal_address,
+                   m.actual_address AS manufacturer_actual_address,
+                   m.phone AS manufacturer_phone,
+                   m.email AS manufacturer_email,
                    d.source_path AS source_document
             FROM orders o
             LEFT JOIN organizations c ON c.id = o.customer_org_id

@@ -46,12 +46,9 @@ _INN_KPP_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _INN_ONLY_PATTERN = re.compile(r"ИНН\s*(\d{10,12})", re.IGNORECASE)
-_POSTAL_ADDRESS_PATTERN = re.compile(
-    r"(\d{6})\s*,\s*(.+?)(?=\s*(?:р/с|p/c|ИНН|ОГРН|БИК|ОКВЭД|ОКПО|Исх|$))",
-    re.IGNORECASE | re.DOTALL,
-)
+_POSTAL_CODE_PATTERN = re.compile(r"\b(\d{6})\b")
 _PHONE_PATTERN = re.compile(
-    r"(?:Тел|Tex|тел|Факс|факс)\s*[.:]?\s*(\+7[\d\s\(\)\-]{10,40})",
+    r"(?:Тел|Tex|тел|т/ф|Факс|факс)\s*[.:]?\s*(\+?\d[\d\s\(\)\-]{9,35})",
     re.IGNORECASE,
 )
 _EMAIL_PATTERN = re.compile(
@@ -72,6 +69,29 @@ _HEADER_CAPS_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+_ADDRESS_STOP_MARKERS = (
+    "НАПРАВЛЕНИЕ",
+    "Наименование и адрес",
+    "Прошу провести",
+    "Прош у провести",
+    "№ п/п",
+    "№ Наименование",
+    "Образцы представлены",
+    "Испытания следует",
+    "Изготовитель:",
+    "Дополнительная информация",
+    "Допо лнительная информация",
+    "Серийный выпуск",
+    "Эксперт",
+    "Эксп ерт",
+    "т/ф ",
+    "тел.",
+    "ИНН",
+    "ОГРН",
+    "р/с",
+    "p/c",
+)
+
 
 def normalize_org_name(name: str) -> str:
     """Ключ для дедупликации организаций."""
@@ -90,12 +110,145 @@ def normalize_org_name(name: str) -> str:
     return name.strip(" .,;-")
 
 
+def normalize_address_text(raw: str) -> str:
+    """Сжимает пробелы и правит типичные OCR-ошибки в адресе."""
+    text = re.sub(r"\s+", " ", raw.replace("\n", " ")).strip(" .,;")
+    text = re.sub(r"С\s+анкт", "Санкт", text, flags=re.IGNORECASE)
+    text = re.sub(r"Р\s+ОССИЯ", "РОССИЯ", text, flags=re.IGNORECASE)
+    return text
+
+
+def sanitize_address(address: str | None, *, max_len: int = 220) -> str | None:
+    """
+    Обрезает «хвост» адреса, если в поле попал текст всего документа.
+    Возвращает только осмысленную часть адреса.
+    """
+    if not address or not str(address).strip():
+        return None
+    text = normalize_address_text(str(address))
+    if len(text) < 8:
+        return None
+
+    upper = text.upper()
+    cut_at = len(text)
+    for marker in _ADDRESS_STOP_MARKERS:
+        idx = upper.find(marker.upper())
+        if idx > 15:
+            cut_at = min(cut_at, idx)
+    text = text[:cut_at].strip(" .,;")
+
+    if len(text) > max_len:
+        parts = [normalize_address_text(p) for p in text.split(";") if p.strip()]
+        parts = [p for p in parts if _POSTAL_CODE_PATTERN.search(p)]
+        if parts:
+            text = parts[0]
+        else:
+            text = text[:max_len].rsplit(" ", 1)[0].strip(" .,;")
+
+    return text if len(text) >= 8 else None
+
+
+def _postal_from_address(address: str | None) -> str | None:
+    if not address:
+        return None
+    match = _POSTAL_CODE_PATTERN.search(address)
+    return match.group(1) if match else None
+
+
+def _extract_labeled_address(text: str, labels: tuple[str, ...], *, stop_before: str) -> str | None:
+    for label in labels:
+        pattern = re.compile(
+            rf"{label}\s*[:\-]?\s*(.+?)(?={stop_before})",
+            re.IGNORECASE | re.DOTALL,
+        )
+        match = pattern.search(text[:6000])
+        if not match:
+            continue
+        addr = sanitize_address(match.group(1))
+        if addr:
+            return addr
+    return None
+
+
+def extract_customer_addresses(text: str) -> tuple[str | None, str | None]:
+    """Юридический и фактический адрес заказчика из шапки документа."""
+    stop = (
+        r"(?:Адрес\s+места\s+осуществления|т/ф|Тел|тел|НАПРАВЛЕНИЕ|"
+        r"Наименование\s+и\s+адрес|№\s+Наименование|Изготовитель\s*:|$)"
+    )
+    legal = _extract_labeled_address(
+        text,
+        ("Место нахождения", "юридический адрес", "Юридический адрес"),
+        stop_before=stop,
+    )
+    actual = _extract_labeled_address(
+        text,
+        ("Адрес места осуществления деятельности", "фактический адрес", "Фактический адрес"),
+        stop_before=(
+            r"(?:т/ф|Тел|тел|НАПРАВЛЕНИЕ|Наименование\s+и\s+адрес|"
+            r"№\s+Наименование|Изготовитель\s*:|$)"
+        ),
+    )
+    if actual and ";" in actual:
+        actual = sanitize_address(actual.split(";")[0])
+    return legal, actual
+
+
+def extract_manufacturer_details(text: str) -> tuple[str | None, str | None]:
+    """Изготовитель и его адрес из блока «Изготовитель:»."""
+    pattern = re.compile(
+        r"Изготовитель\s*:\s*(.+?)(?:\n|\r)([\d\D]+?)"
+        r"(?=\n\s*(?:Серийный\s+выпуск|Код\s*\(|Допо|Эксп|$))",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None, None
+
+    name_raw = match.group(1).strip().strip('"«»')
+    name = _clean_org_name(_fix_ocr_name(name_raw))
+    if '"' in name_raw and not name.endswith('"'):
+        name = name + '"'
+    if len(normalize_org_name(name)) < 4:
+        return None, None
+
+    addr_raw = match.group(2).strip()
+    addr = sanitize_address(addr_raw)
+    if not addr and _POSTAL_CODE_PATTERN.search(addr_raw):
+        addr = sanitize_address(_POSTAL_CODE_PATTERN.sub(r"\1, ", addr_raw, count=1))
+
+    return name, addr
+
+
+def resolve_org_addresses(org: dict | OrganizationExtract | None) -> tuple[str, str]:
+    """
+    Возвращает (юридический, фактический) адрес организации для формы заявки.
+    """
+    if not org:
+        return "—", "—"
+
+    if isinstance(org, OrganizationExtract):
+        legal = sanitize_address(org.legal_address) or sanitize_address(org.address)
+        actual = sanitize_address(org.actual_address) or legal
+    else:
+        legal = (
+            sanitize_address(org.get("legal_address"))
+            or sanitize_address(org.get("address"))
+        )
+        actual = sanitize_address(org.get("actual_address")) or legal
+
+    return legal or "—", actual or "—"
+
+
 def _clean_org_name(raw: str) -> str:
     name = re.sub(r"\s+", " ", raw).strip(" .,;:{}\"")
 
     name = re.sub(r"(?:л|1)\s*$", "", name, flags=re.IGNORECASE)
     name = re.sub(r"\s+\d{6}.*$", "", name)
     name = re.sub(r"\s+(?:российская|рф|россия).*$", "", name, flags=re.IGNORECASE)
+
+    if re.search(r"АКЦИОНЕРНОЕ\s+ОБЩЕСТВО|АО\s*«", name, re.IGNORECASE):
+        return name.strip()
 
     if name and not name.upper().startswith("ООО"):
         short = name.strip()
@@ -180,14 +333,12 @@ def _build_org_from_header(text: str) -> OrganizationExtract | None:
         if solo:
             inn = solo.group(1)
 
-    postal_code = address = None
-    addr_match = _POSTAL_ADDRESS_PATTERN.search(text[:3000])
-    if addr_match:
-        postal_code = addr_match.group(1)
-        address = re.sub(r"\s+", " ", addr_match.group(2)).strip(" .,;")
+    legal_address, actual_address = extract_customer_addresses(text)
+    address = legal_address
+    postal_code = _postal_from_address(legal_address or actual_address)
 
     phone = None
-    phone_match = _PHONE_PATTERN.search(text[:3000])
+    phone_match = _PHONE_PATTERN.search(text[:4000])
     if phone_match:
         phone = re.sub(r"\s+", " ", phone_match.group(1)).strip()
 
@@ -197,7 +348,7 @@ def _build_org_from_header(text: str) -> OrganizationExtract | None:
         email = email_match.group(1).replace(" ", "")
 
     fsa = None
-    fsa_match = _FSA_PATTERN.search(text)
+    fsa_match = _FSA_PATTERN.search(text[:2500])
     if fsa_match:
         fsa = fsa_match.group(0).upper().replace("  ", " ")
 
@@ -214,12 +365,14 @@ def _build_org_from_header(text: str) -> OrganizationExtract | None:
         confidence += 0.2
     if postal_code:
         confidence += 0.1
-    if address:
-        confidence += 0.1
+    if legal_address:
+        confidence += 0.15
 
     return OrganizationExtract(
         name=name,
         address=address,
+        legal_address=legal_address,
+        actual_address=actual_address,
         postal_code=postal_code,
         phone=phone,
         email=email,
@@ -266,6 +419,36 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
     header_org = _build_org_from_header(text)
     if header_org:
         add(header_org, "customer")
+
+    mfg_name, mfg_addr = extract_manufacturer_details(text)
+    if mfg_name:
+        mfg_key = normalize_org_name(mfg_name)
+        found = [
+            org
+            for org in found
+            if not (
+                org.role == "manufacturer"
+                and mfg_key
+                and (
+                    normalize_org_name(org.name) == mfg_key
+                    or normalize_org_name(org.name) in mfg_key
+                    or mfg_key in normalize_org_name(org.name)
+                )
+            )
+        ]
+        if mfg_key in seen:
+            seen.discard(mfg_key)
+        manufacturer = OrganizationExtract(
+            name=mfg_name,
+            address=mfg_addr,
+            legal_address=mfg_addr,
+            actual_address=mfg_addr,
+            postal_code=_postal_from_address(mfg_addr),
+            org_type="manufacturer",
+            role="manufacturer",
+            confidence=0.85 if mfg_addr else 0.7,
+        )
+        add(manufacturer, "manufacturer")
 
     if not found and header_org:
         manufacturer = header_org.model_copy(deep=True)

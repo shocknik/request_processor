@@ -213,6 +213,8 @@ class OrganizationExtract(BaseModel):
 
     name: str = Field(..., min_length=2)
     address: str | None = None
+    legal_address: str | None = None
+    actual_address: str | None = None
     postal_code: str | None = None
     phone: str | None = None
     email: str | None = None

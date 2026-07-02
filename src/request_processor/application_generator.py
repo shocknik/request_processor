@@ -12,6 +12,7 @@ from pathlib import Path
 
 from docx import Document
 
+from .organization_extractor import resolve_org_addresses, sanitize_address
 from .sqlite_repo import (
     DB_PATH_DEFAULT,
     GENERATED_DIR_DEFAULT,
@@ -31,12 +32,30 @@ def _unique_cells(row) -> list:
     return seen
 
 
+def _set_cell_text(cell, value: str) -> None:
+    """Записывает текст в ячейку без дублирования в объединённых областях."""
+    text = (value or "—").strip() or "—"
+    cell.text = text
+
+
 def _set_row_value(table, row_idx: int, value: str, *, col: int = 1) -> None:
     if row_idx >= len(table.rows):
         return
     cells = _unique_cells(table.rows[row_idx])
     if len(cells) > col:
-        cells[col].text = value or "—"
+        _set_cell_text(cells[col], value)
+
+
+def _org_field(org: dict | None, *keys: str, fallback: str = "—") -> str:
+    if not org:
+        return fallback
+    for key in keys:
+        val = org.get(key)
+        if val and str(val).strip():
+            cleaned = sanitize_address(str(val)) if "address" in key else str(val).strip()
+            if cleaned:
+                return cleaned
+    return fallback
 
 
 def _format_criteria(lines: list[dict]) -> str:
@@ -148,40 +167,93 @@ def generate_application_from_order(
     order_no = str(order_id)
     _set_row_value(form, 0, f"ЗАЯВКА № {order_no}", col=0)
 
-    customer_name = details.get("customer_name") or "—"
+    customer_org = (
+        get_organization_by_id(int(details["customer_org_id"]), db_path)
+        if details.get("customer_org_id")
+        else None
+    )
+    customer_name = details.get("customer_name") or _org_field(customer_org, "name")
     customer_ral = "—"
-    if details.get("customer_org_id"):
-        org = get_organization_by_id(int(details["customer_org_id"]), db_path)
-        if org and org.get("fsa_registry_number"):
-            customer_ral = org["fsa_registry_number"]
-        elif org and org.get("is_accredited"):
+    if customer_org:
+        if customer_org.get("fsa_registry_number"):
+            customer_ral = customer_org["fsa_registry_number"]
+        elif customer_org.get("is_accredited"):
             customer_ral = "аккредитован"
+
+    cust_legal, cust_actual = resolve_org_addresses(
+        {
+            "legal_address": details.get("customer_legal_address"),
+            "actual_address": details.get("customer_actual_address"),
+            "address": details.get("customer_address"),
+        }
+    )
+    if customer_org:
+        org_legal, org_actual = resolve_org_addresses(customer_org)
+        if org_legal != "—":
+            cust_legal = org_legal
+        if org_actual != "—":
+            cust_actual = org_actual
 
     _set_row_value(form, 4, customer_name)
     _set_row_value(form, 5, customer_ral)
-    _set_row_value(form, 6, details.get("customer_address") or "—")
-    _set_row_value(form, 7, details.get("customer_address") or "—")
-    if details.get("customer_org_id"):
-        org = get_organization_by_id(int(details["customer_org_id"]), db_path)
-        if org:
-            _set_row_value(form, 8, org.get("phone") or "—")
-            _set_row_value(form, 9, org.get("email") or "—")
+    _set_row_value(form, 6, cust_legal)
+    _set_row_value(form, 7, cust_actual if cust_actual != cust_legal else cust_legal)
+    _set_row_value(
+        form,
+        8,
+        _org_field(customer_org, "phone", fallback=details.get("customer_phone") or "—"),
+    )
+    _set_row_value(
+        form,
+        9,
+        _org_field(customer_org, "email", fallback=details.get("customer_email") or "—"),
+    )
 
-    mfg_name = details.get("manufacturer_name") or customer_name
+    manufacturer_org = (
+        get_organization_by_id(int(details["manufacturer_org_id"]), db_path)
+        if details.get("manufacturer_org_id")
+        else None
+    )
+    marks = details.get("marks") or []
+    if not manufacturer_org and marks:
+        mfg_org_id = marks[0].get("manufacturer_org_id")
+        if mfg_org_id:
+            manufacturer_org = get_organization_by_id(int(mfg_org_id), db_path)
+
+    mfg_name = details.get("manufacturer_name") or _org_field(manufacturer_org, "name", fallback=customer_name)
+    mfg_legal, mfg_actual = resolve_org_addresses(
+        {
+            "legal_address": details.get("manufacturer_legal_address"),
+            "actual_address": details.get("manufacturer_actual_address"),
+            "address": details.get("manufacturer_address"),
+        }
+    )
+    if manufacturer_org:
+        org_legal, org_actual = resolve_org_addresses(manufacturer_org)
+        if org_legal != "—":
+            mfg_legal = org_legal
+        if org_actual != "—":
+            mfg_actual = org_actual
+    if mfg_legal == "—" and mfg_name == customer_name:
+        mfg_legal, mfg_actual = cust_legal, cust_actual
+
     _set_row_value(form, 11, mfg_name)
-    mfg_addr = details.get("manufacturer_address") or details.get("customer_address") or "—"
-    _set_row_value(form, 12, mfg_addr)
-    _set_row_value(form, 13, mfg_addr)
-    if details.get("manufacturer_org_id"):
-        morg = get_organization_by_id(int(details["manufacturer_org_id"]), db_path)
-        if morg:
-            _set_row_value(form, 14, morg.get("phone") or "—")
-            _set_row_value(form, 15, morg.get("email") or "—")
+    _set_row_value(form, 12, mfg_legal)
+    _set_row_value(form, 13, mfg_actual if mfg_actual != mfg_legal else mfg_legal)
+    _set_row_value(
+        form,
+        14,
+        _org_field(manufacturer_org, "phone", fallback=details.get("manufacturer_phone") or "—"),
+    )
+    _set_row_value(
+        form,
+        15,
+        _org_field(manufacturer_org, "email", fallback=details.get("manufacturer_email") or "—"),
+    )
 
     test_type = _detect_test_type(details.get("subject"))
     _set_row_value(form, 17, test_type)
 
-    marks = details.get("marks") or []
     docs = sorted(
         {get_cable_mark_document(m.get("mark") or "", db_path) or "" for m in marks}
         - {""}
