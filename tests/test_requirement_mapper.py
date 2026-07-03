@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from request_processor.extraction_validator import validate_extraction
+from request_processor.validation.extraction_validator import validate_extraction
 from request_processor.models import CableMarkMatch, PdfExtractionResult
-from request_processor.requirement_mapper import (
+from request_processor.mapping.requirement_mapper import (
     map_requirements_to_tests,
     suggest_tests_for_mark,
 )
-from request_processor.pdf_extractor import _resolve_cable_marks
-from request_processor.sqlite_repo import add_test_mapping, init_db
+from request_processor.extraction.pdf_extractor import _resolve_cable_marks
+from request_processor.persistence.sqlite_repo import add_test_mapping, init_db
 
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "extracted" / (
     "27_1-2-2026 Направление в ИЛ 10094807 Кабель-Тест.json"
@@ -49,7 +49,7 @@ def test_suggest_tests_for_mark(direction_result: PdfExtractionResult) -> None:
 def test_validation_report_includes_suggested_tests(
     direction_result: PdfExtractionResult,
 ) -> None:
-    from request_processor.pdf_extractor import _resolve_cable_marks
+    from request_processor.extraction.pdf_extractor import _resolve_cable_marks
 
     marks = _resolve_cable_marks(direction_result.text, direction_result.tables)
     result = direction_result.model_copy(update={"cable_marks": marks})

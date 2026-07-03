@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from request_processor.sqlite_repo import (
+from request_processor.persistence.sqlite_repo import (
+    build_default_hours_map,
     create_order_from_kp,
     init_db,
     list_generated_documents,
     save_calculation,
     save_generated_document,
 )
-from request_processor.cost_calculator import calculate_cost
-from request_processor.sqlite_repo import build_default_hours_map
+from request_processor.calculation.cost_calculator import calculate_cost
 
 
 def _save_demo_calc(db: Path, mark: str = "ВВГ 3х2,5") -> int:

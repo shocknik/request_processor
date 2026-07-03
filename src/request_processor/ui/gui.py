@@ -15,18 +15,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from .climatic_tests import climatic_settings_fields, is_climatic_code
-from .test_rules import (
+from ..calculation.climatic_tests import climatic_settings_fields, is_climatic_code
+from ..calculation.test_rules import (
     CATEGORY_COLORS,
     CATEGORY_SHORT,
     category_sort_key,
     rule_type_label,
 )
-from .cable_mark_parser import parse_cable_mark_record
-from .cost_calculator import calculate_cost, format_breakdown
-from .extraction_validator import apply_operator_edits, validate_extraction
-from .requirement_mapper import map_requirements_to_tests
-from .models import (
+from ..parsing.cable_mark_parser import parse_cable_mark_record
+from ..calculation.cost_calculator import calculate_cost, format_breakdown
+from ..validation.extraction_validator import apply_operator_edits, validate_extraction
+from ..mapping.requirement_mapper import map_requirements_to_tests
+from ..models import (
     CableMarkMatch,
     ClimaticTestSettings,
     FieldStatus,
@@ -35,10 +35,16 @@ from .models import (
     TestItemCreate,
     ValidationReport,
 )
-from .pdf_extractor import DEFAULT_OCR_DPI, extract_from_document
-from .application_generator import generate_application_from_order
-from .kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
-from .sqlite_repo import (
+from ..extraction.test_type_extractor import (
+    TEST_TYPE_OPTIONS,
+    build_kp_subject,
+    detect_test_type,
+    format_test_type_label,
+)
+from ..extraction.pdf_extractor import DEFAULT_OCR_DPI, extract_from_document
+from ..generation.application_generator import generate_application_from_order
+from ..generation.kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
+from ..persistence.sqlite_repo import (
     DB_PATH_DEFAULT,
     GENERATED_DIR_DEFAULT,
     add_test_item,
@@ -63,6 +69,10 @@ from .sqlite_repo import (
     list_orders,
     get_order_details,
     list_test_applications,
+    list_test_mappings,
+    add_test_mapping,
+    update_test_mapping,
+    delete_test_mapping,
     record_mapping_usage,
 )
 
@@ -138,6 +148,8 @@ class RequestProcessorApp(tk.Tk):
 
         self._tests_by_code: dict[str, dict] = {}
         self._calc_entries: list[CalcTestEntry] = []
+        self._calc_picker_vars: dict[str, tk.BooleanVar] = {}
+        self._calc_picker_syncing: bool = False
         self.notebook: ttk.Notebook | None = None
         self._last_document_extraction_id: int | None = None
         self._last_manufacturer_name: str = ""
@@ -155,6 +167,109 @@ class RequestProcessorApp(tk.Tk):
         self._load_organizations()
         self._refresh_parse_info_panel()
         self._load_orders_table()
+        self._install_clipboard_support()
+
+    def _install_clipboard_support(self) -> None:
+        """Ctrl+C / Ctrl+A и контекстное меню «Копировать» во всех полях ввода."""
+        for widget in self.winfo_children():
+            self._bind_clipboard_recursive(widget)
+
+    def _bind_clipboard_recursive(self, widget: tk.Misc) -> None:
+        cls = widget.winfo_class()
+        if cls in ("Entry", "TEntry", "Text", "Scrolledtext", "Combobox", "TCombobox"):
+            self._bind_clipboard(widget)
+        for child in widget.winfo_children():
+            self._bind_clipboard_recursive(child)
+
+    def _bind_clipboard(self, widget: tk.Misc) -> None:
+        if getattr(widget, "_clipboard_bound", False):
+            return
+        widget._clipboard_bound = True  # type: ignore[attr-defined]
+
+        def _copy(_event: tk.Event | None = None) -> str:
+            self._copy_widget_selection(widget)
+            return "break"
+
+        def _select_all(_event: tk.Event | None = None) -> str:
+            self._select_all_widget(widget)
+            return "break"
+
+        widget.bind("<Control-c>", _copy, add="+")
+        widget.bind("<Control-C>", _copy, add="+")
+        widget.bind("<Control-a>", _select_all, add="+")
+        widget.bind("<Control-A>", _select_all, add="+")
+        widget.bind("<Button-3>", lambda e, w=widget: self._show_copy_menu(e, w), add="+")
+
+    def _copy_widget_selection(self, widget: tk.Misc) -> None:
+        text = self._get_widget_selection(widget)
+        if text:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+
+    def _get_widget_selection(self, widget: tk.Misc) -> str:
+        cls = widget.winfo_class()
+        try:
+            if cls in ("Entry", "TEntry", "Combobox", "TCombobox"):
+                if cls == "TCombobox" and str(widget.cget("state")) == "readonly":
+                    return str(widget.get())
+                start = widget.index("sel.first")
+                end = widget.index("sel.last")
+                return str(widget.get())[start:end]
+            if cls in ("Text", "Scrolledtext"):
+                was_disabled = str(widget.cget("state")) == "disabled"
+                if was_disabled:
+                    widget.configure(state="normal")
+                try:
+                    if widget.tag_ranges("sel"):
+                        return widget.get("sel.first", "sel.last")
+                finally:
+                    if was_disabled:
+                        widget.configure(state="disabled")
+        except tk.TclError:
+            if cls in ("TCombobox", "Combobox"):
+                try:
+                    return str(widget.get())
+                except tk.TclError:
+                    return ""
+            try:
+                return str(widget.get())
+            except tk.TclError:
+                return ""
+        return ""
+
+    def _select_all_widget(self, widget: tk.Misc) -> None:
+        cls = widget.winfo_class()
+        try:
+            if cls in ("Entry", "TEntry", "Combobox", "TCombobox"):
+                widget.selection_range(0, "end")
+                widget.icursor("end")
+                return
+            if cls in ("Text", "Scrolledtext"):
+                was_disabled = str(widget.cget("state")) == "disabled"
+                if was_disabled:
+                    widget.configure(state="normal")
+                try:
+                    widget.tag_add("sel", "1.0", "end-1c")
+                finally:
+                    if was_disabled:
+                        widget.configure(state="disabled")
+        except tk.TclError:
+            pass
+
+    def _show_copy_menu(self, event: tk.Event, widget: tk.Misc) -> None:
+        menu = tk.Menu(widget, tearoff=0)
+        menu.add_command(
+            label="Копировать",
+            command=lambda: self._copy_widget_selection(widget),
+        )
+        menu.add_command(
+            label="Выделить всё",
+            command=lambda: self._select_all_widget(widget),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _accent_button(self, parent: tk.Misc, text: str, command) -> tk.Button:
         """Основная кнопка действия — полный текст, контрастный фон."""
@@ -201,7 +316,7 @@ class RequestProcessorApp(tk.Tk):
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             init_db(self.db_path)
         else:
-            from .sqlite_repo import _seed_default_settings, migrate_db
+            from ..persistence.sqlite_repo import _seed_default_settings, migrate_db
 
             migrate_db(self.db_path)
             _seed_default_settings(self.db_path)
@@ -370,6 +485,8 @@ class RequestProcessorApp(tk.Tk):
             self._load_orgs_table()
         elif selected == self.notebook.index(self.tab_orders):
             self._load_orders_table()
+        elif selected == self.notebook.index(self.tab_settings):
+            self._load_mappings_table()
 
     def _build_calc_tab(self) -> None:
         btns = ttk.Frame(self.tab_calc)
@@ -408,10 +525,22 @@ class RequestProcessorApp(tk.Tk):
         ).pack(anchor="w", pady=(4, 0))
         ttk.Label(
             inner,
+            text="С вкладки «1. Заявка»: выберите марку → «→ В расчёт» или двойной клик по строке",
+            style="CardMuted.TLabel",
+        ).pack(anchor="w", pady=(2, 0))
+        ttk.Label(
+            inner,
             text="Пример: ВВГ-Пнг(А) 3х4ок(М,РЕ)-0,66",
             style="CardMuted.TLabel",
         ).pack(anchor="w", pady=(2, 0))
-        self.mark_var.trace_add("write", lambda *_: self._update_calc_suggestions_hint())
+        self.mark_var.trace_add(
+            "write",
+            lambda *_: (
+                self._update_calc_suggestions_hint(),
+                self._show_calc_picker_mode(),
+                self._refresh_calc_picker(),
+            ),
+        )
 
         mid = ttk.PanedWindow(self.tab_calc, orient="horizontal")
         mid.pack(fill="both", expand=True)
@@ -467,11 +596,63 @@ class RequestProcessorApp(tk.Tk):
             side="left", padx=8
         )
 
-        right = ttk.LabelFrame(mid, text="Результат расчёта", padding=8, style="Card.TLabelframe")
-        mid.add(right, weight=2)
+        self.calc_right_panel = ttk.LabelFrame(
+            mid, text="Испытания для расчёта", padding=8, style="Card.TLabelframe"
+        )
+        mid.add(self.calc_right_panel, weight=2)
 
+        self.calc_picker_frame = ttk.Frame(self.calc_right_panel, style="Card.TFrame")
+        ttk.Label(
+            self.calc_picker_frame,
+            text="Отметьте испытания — они появятся слева (часы для климатики).",
+            style="CardMuted.TLabel",
+            wraplength=420,
+        ).pack(anchor="w", pady=(0, 6))
+
+        picker_canvas_frame = ttk.Frame(self.calc_picker_frame, style="Card.TFrame")
+        picker_canvas_frame.pack(fill="both", expand=True)
+        self._calc_picker_canvas = tk.Canvas(
+            picker_canvas_frame,
+            bg=COLORS["card"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        picker_scroll = ttk.Scrollbar(
+            picker_canvas_frame, orient="vertical", command=self._calc_picker_canvas.yview
+        )
+        self.calc_picker_inner = ttk.Frame(self._calc_picker_canvas, style="Card.TFrame")
+        self.calc_picker_inner.bind(
+            "<Configure>",
+            lambda e: self._calc_picker_canvas.configure(
+                scrollregion=self._calc_picker_canvas.bbox("all")
+            ),
+        )
+        self._calc_picker_canvas.create_window((0, 0), window=self.calc_picker_inner, anchor="nw")
+        self._calc_picker_canvas.configure(yscrollcommand=picker_scroll.set)
+        self._calc_picker_canvas.pack(side="left", fill="both", expand=True)
+        picker_scroll.pack(side="right", fill="y")
+
+        self.calc_picker_empty_var = tk.StringVar(
+            value="Укажите марку — появятся испытания из заявки или полный справочник."
+        )
+        self._calc_picker_empty_label = ttk.Label(
+            self.calc_picker_inner,
+            textvariable=self.calc_picker_empty_var,
+            style="CardMuted.TLabel",
+            wraplength=400,
+            justify="left",
+        )
+        self._calc_picker_empty_label.pack(anchor="w", pady=8)
+
+        self.calc_result_frame = ttk.Frame(self.calc_right_panel, style="Card.TFrame")
+        self.calc_result_btns = ttk.Frame(self.calc_result_frame, style="Card.TFrame")
+        ttk.Button(
+            self.calc_result_btns,
+            text="← К выбору испытаний",
+            command=self._show_calc_picker_mode,
+        ).pack(anchor="w", pady=(0, 6))
         self.calc_output = scrolledtext.ScrolledText(
-            right,
+            self.calc_result_frame,
             height=14,
             state="disabled",
             font=("Consolas", 10),
@@ -482,6 +663,8 @@ class RequestProcessorApp(tk.Tk):
             pady=8,
         )
         self.calc_output.pack(fill="both", expand=True)
+
+        self._show_calc_picker_mode()
 
     def _build_pdf_tab(self) -> None:
         bottom = ttk.Frame(self.tab_pdf)
@@ -568,6 +751,16 @@ class RequestProcessorApp(tk.Tk):
         ttk.Button(mark_toolbar, text="Удалить", command=self._remove_draft_mark).pack(side="left", padx=6)
         ttk.Button(mark_toolbar, text="✓/—", command=self._toggle_draft_mark).pack(side="left")
         ttk.Button(mark_toolbar, text="Изменить", command=self._edit_draft_mark).pack(side="left", padx=6)
+        self._accent_button(
+            mark_toolbar,
+            "→ В расчёт",
+            self._use_mark_in_calc,
+        ).pack(side="left", padx=(12, 0))
+        ttk.Label(
+            mark_toolbar,
+            text="двойной клик по строке",
+            style="CardMuted.TLabel",
+        ).pack(side="left", padx=(8, 0))
 
         cols = ("accepted", "mark", "brand", "cores", "size", "document", "status", "confidence")
         self.marks_tree = ttk.Treeview(left, columns=cols, show="headings", height=7)
@@ -591,7 +784,7 @@ class RequestProcessorApp(tk.Tk):
         self.marks_tree.pack(fill="both", expand=True)
         self.marks_tree.bind("<<TreeviewSelect>>", self._on_draft_mark_select)
         self.marks_tree.bind("<Double-Button-1>", self._on_draft_mark_double_click)
-        ttk.Button(left, text="→ В расчёт", command=self._use_mark_in_calc).pack(pady=(8, 0))
+        self.marks_tree.bind("<Return>", lambda _e: self._use_mark_in_calc())
 
         right = ttk.LabelFrame(mid, text="Организации", padding=8, style="Card.TLabelframe")
         mid.add(right, weight=2)
@@ -697,11 +890,19 @@ class RequestProcessorApp(tk.Tk):
             row=0, column=2, padx=(4, 0), pady=4
         )
 
-        ttk.Label(grid, text="Предмет:", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=4)
-        self.kp_subject_var = tk.StringVar(value="Проведение периодических испытаний")
-        ttk.Entry(grid, textvariable=self.kp_subject_var, font=("Segoe UI", 10)).grid(
-            row=1, column=1, sticky="ew", padx=(8, 0), pady=4, ipady=2
+        ttk.Label(grid, text="Вид испытаний:", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", pady=4
         )
+        self.kp_test_type_var = tk.StringVar(value="Периодические")
+        self.kp_test_type_combo = ttk.Combobox(
+            grid,
+            textvariable=self.kp_test_type_var,
+            values=list(TEST_TYPE_OPTIONS),
+            state="readonly",
+            font=("Segoe UI", 10),
+        )
+        self.kp_test_type_combo.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4, ipady=2)
+        self.kp_test_type_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_kp_preview())
 
         ttk.Label(grid, text="Примечание:", style="Card.TLabel").grid(
             row=2, column=0, sticky="nw", pady=4
@@ -978,21 +1179,77 @@ class RequestProcessorApp(tk.Tk):
             pady=(16, 0),
         )
 
+        map_frame = ttk.LabelFrame(
+            self.tab_settings,
+            text="Маппинг требований → испытания (test_mappings)",
+            padding=12,
+            style="Card.TLabelframe",
+        )
+        map_frame.pack(fill="both", expand=True, pady=(12, 0))
+
+        map_toolbar = ttk.Frame(map_frame)
+        map_toolbar.pack(fill="x", pady=(0, 8))
+        ttk.Button(map_toolbar, text="Обновить", command=self._load_mappings_table).pack(side="left")
+        ttk.Button(map_toolbar, text="Добавить…", command=self._add_mapping_dialog).pack(
+            side="left", padx=6
+        )
+        ttk.Button(map_toolbar, text="Изменить…", command=self._edit_mapping_dialog).pack(
+            side="left", padx=0
+        )
+        ttk.Button(map_toolbar, text="Удалить", command=self._delete_mapping).pack(side="left", padx=6)
+        ttk.Label(
+            map_toolbar,
+            text="Фраза из заявки → код испытания. Двойной клик — изменить.",
+            style="Muted.TLabel",
+        ).pack(side="right")
+
+        self.mappings_search_var = tk.StringVar()
+        self.mappings_search_var.trace_add("write", lambda *_: self._load_mappings_table())
+        search_row = ttk.Frame(map_frame)
+        search_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(search_row, text="Поиск:").pack(side="left")
+        ttk.Entry(search_row, textvariable=self.mappings_search_var, width=40).pack(
+            side="left", padx=8, ipady=2
+        )
+
+        map_cols = ("pattern", "test_code", "usage", "note")
+        self.mappings_tree = ttk.Treeview(
+            map_frame,
+            columns=map_cols,
+            show="headings",
+            height=10,
+            selectmode="browse",
+        )
+        for col, title, width, anchor in (
+            ("pattern", "Фраза требования", 360, "w"),
+            ("test_code", "Код испытания", 220, "w"),
+            ("usage", "×", 40, "center"),
+            ("note", "Примечание", 200, "w"),
+        ):
+            self.mappings_tree.heading(col, text=title, anchor=anchor)
+            self.mappings_tree.column(col, width=width, anchor=anchor)
+        map_scroll = ttk.Scrollbar(map_frame, orient="vertical", command=self.mappings_tree.yview)
+        self.mappings_tree.configure(yscrollcommand=map_scroll.set)
+        self.mappings_tree.pack(side="left", fill="both", expand=True)
+        map_scroll.pack(side="right", fill="y")
+        self.mappings_tree.bind("<Double-1>", lambda _e: self._edit_mapping_dialog())
+
         hint = scrolledtext.ScrolledText(
             self.tab_settings,
-            height=8,
+            height=4,
             state="disabled",
             font=("Segoe UI", 10),
             bg="#f8fafc",
             relief="flat",
         )
-        hint.pack(fill="both", expand=True, pady=8)
+        hint.pack(fill="x", pady=8)
         self._set_text(
             hint,
-            "Эти значения подставляются при добавлении климатического испытания в расчёт.\n"
-            "В списке «Выбранные испытания» часы можно изменить для конкретного расчёта.\n\n"
-            "Все климатические испытания — time_based (база + стоимость за час выдержки).",
+            "Часы выдержки — для климатики (time_based).\n"
+            "Маппинг — подсказки на вкладке «Расчёт» (кнопка «Испытания из заявки»). "
+            "Счётчик × растёт при применении маппинга из БД.",
         )
+        self._load_mappings_table()
 
     def _default_hours_for(self, code: str, hours_key: str | None, rule_params: dict) -> float:
         defaults = build_default_hours_map(self.db_path)
@@ -1035,6 +1292,7 @@ class RequestProcessorApp(tk.Tk):
         self._calc_entries.append(entry)
         self._render_calc_entry(entry, len(self._calc_entries) - 1)
         self._hide_calc_empty_hint()
+        self._sync_picker_var(entry.code, True)
 
         self._update_calc_count_label()
         self.status.set(f"Добавлено в расчёт: {test['name'][:50]} (остаётесь в справочнике)")
@@ -1110,6 +1368,7 @@ class RequestProcessorApp(tk.Tk):
         self._calc_entries.remove(entry)
         if entry.row_frame:
             entry.row_frame.destroy()
+        self._sync_picker_var(entry.code, False)
         self._show_calc_empty_hint_if_needed()
         self._update_calc_count_label()
         self.status.set(f"Удалено: {entry.name[:40]}")
@@ -1125,6 +1384,7 @@ class RequestProcessorApp(tk.Tk):
                 child.destroy()
         self._show_calc_empty_hint_if_needed()
         self._update_calc_count_label()
+        self._refresh_calc_picker()
 
     def _update_calc_count_label(self) -> None:
         if hasattr(self, "calc_count_var"):
@@ -1195,10 +1455,123 @@ class RequestProcessorApp(tk.Tk):
         codes = self._suggested_test_codes_for_mark(mark)
         if codes:
             self.calc_suggestions_var.set(
-                f"Из заявки для этой марки: {', '.join(codes)} — кнопка «Испытания из заявки»"
+                f"Из заявки для этой марки: {', '.join(codes)} — отметьте справа или «Испытания из заявки»"
             )
         else:
-            self.calc_suggestions_var.set("")
+            self.calc_suggestions_var.set(
+                "Подсказок из заявки нет — отметьте испытания справа или добавьте из справочника."
+                if mark
+                else ""
+            )
+
+    def _show_calc_picker_mode(self) -> None:
+        if not hasattr(self, "calc_picker_frame"):
+            return
+        if hasattr(self, "calc_result_frame"):
+            self.calc_result_frame.pack_forget()
+        self.calc_picker_frame.pack(fill="both", expand=True)
+        self.calc_right_panel.configure(text="Испытания для расчёта")
+        self._refresh_calc_picker()
+
+    def _show_calc_result_mode(self, text: str) -> None:
+        if not hasattr(self, "calc_picker_frame"):
+            return
+        self.calc_picker_frame.pack_forget()
+        if hasattr(self, "calc_result_btns"):
+            self.calc_result_btns.pack(fill="x", anchor="w")
+        if hasattr(self, "calc_result_frame"):
+            self.calc_result_frame.pack(fill="both", expand=True)
+        self.calc_right_panel.configure(text="Результат расчёта")
+        self._set_text(self.calc_output, text)
+
+    def _picker_candidate_codes(self, mark: str) -> list[str]:
+        suggested = self._suggested_test_codes_for_mark(mark)
+        selected = [e.code for e in self._calc_entries]
+        if suggested:
+            merged = list(dict.fromkeys(suggested + selected))
+            return merged
+        if not self._tests_by_code:
+            return selected
+        return sorted(
+            self._tests_by_code.keys(),
+            key=lambda c: (
+                self._tests_by_code[c].get("category") or "",
+                self._tests_by_code[c].get("name") or c,
+            ),
+        )
+
+    def _sync_picker_var(self, code: str, checked: bool) -> None:
+        var = self._calc_picker_vars.get(code)
+        if var is None:
+            return
+        self._calc_picker_syncing = True
+        try:
+            var.set(checked)
+        finally:
+            self._calc_picker_syncing = False
+
+    def _on_picker_toggle(self, code: str) -> None:
+        if self._calc_picker_syncing:
+            return
+        var = self._calc_picker_vars.get(code)
+        if var is None:
+            return
+        if var.get():
+            if not any(e.code == code for e in self._calc_entries):
+                self._add_test_to_calc(code)
+        else:
+            entry = next((e for e in self._calc_entries if e.code == code), None)
+            if entry:
+                self._remove_calc_entry(entry)
+
+    def _refresh_calc_picker(self) -> None:
+        if not hasattr(self, "calc_picker_inner"):
+            return
+        for child in self.calc_picker_inner.winfo_children():
+            if child is not self._calc_picker_empty_label:
+                child.destroy()
+        self._calc_picker_vars.clear()
+
+        mark = self.mark_var.get().strip()
+        codes = self._picker_candidate_codes(mark) if mark else []
+        suggested = set(self._suggested_test_codes_for_mark(mark)) if mark else set()
+        selected = {e.code for e in self._calc_entries}
+
+        if not codes:
+            self._calc_picker_empty_label.pack(anchor="w", pady=8)
+            self.calc_picker_empty_var.set(
+                "Укажите марку — появятся испытания из заявки или полный справочник."
+            )
+            return
+
+        self._calc_picker_empty_label.pack_forget()
+        if suggested:
+            hint = f"Из заявки ({len(suggested)}); отмеченные добавляются в список слева."
+        else:
+            hint = f"Справочник ({len(codes)} испытаний); отметьте нужные."
+        ttk.Label(
+            self.calc_picker_inner,
+            text=hint,
+            style="CardMuted.TLabel",
+            wraplength=400,
+        ).pack(anchor="w", pady=(0, 4))
+
+        for code in codes:
+            test = self._tests_by_code.get(code)
+            if not test:
+                continue
+            name = (test.get("name") or code)[:72]
+            var = tk.BooleanVar(value=code in selected)
+            self._calc_picker_vars[code] = var
+            row = ttk.Frame(self.calc_picker_inner, style="Card.TFrame")
+            row.pack(fill="x", anchor="w", pady=1)
+            cb = ttk.Checkbutton(
+                row,
+                text=f"{code} — {name}",
+                variable=var,
+                command=lambda c=code: self._on_picker_toggle(c),
+            )
+            cb.pack(anchor="w")
 
     def _apply_suggested_tests_from_application(self) -> None:
         mark = self.mark_var.get().strip()
@@ -1259,6 +1632,7 @@ class RequestProcessorApp(tk.Tk):
                 "Все предложенные испытания уже в списке расчёта.",
             )
         self._update_calc_suggestions_hint()
+        self._refresh_calc_picker()
 
     def _run_calculate(self) -> None:
         mark = self.mark_var.get().strip()
@@ -1278,7 +1652,7 @@ class RequestProcessorApp(tk.Tk):
                 calc = calculate_cost(mark, test_list, hours, self.db_path)
                 calc_id = save_calculation(calc, self.db_path)
                 text = format_breakdown(calc) + f"\n\n✓ Сохранено в БД (id={calc_id})"
-                self.after(0, lambda: self._set_text(self.calc_output, text))
+                self.after(0, lambda: self._show_calc_result_mode(text))
                 self.after(0, self._load_history)
                 self.after(0, self._load_kp_calculations)
                 self.after(0, lambda: self.status.set("Расчёт выполнен"))
@@ -1291,7 +1665,9 @@ class RequestProcessorApp(tk.Tk):
     def _clear_calc(self) -> None:
         self.mark_var.set("")
         self._clear_calc_tests()
+        self._show_calc_picker_mode()
         self._set_text(self.calc_output, "")
+        self._refresh_calc_picker()
 
     def _format_parse_info(
         self,
@@ -1608,15 +1984,29 @@ class RequestProcessorApp(tk.Tk):
 
         customer_org = next((o for o in report.organizations if o.role == "customer"), None)
         self.draft_customer_inn_var.set(customer_org.inn if customer_org and customer_org.inn else "")
-        self.draft_customer_addr_var.set(
-            customer_org.address if customer_org and customer_org.address else ""
-        )
+        addr = ""
+        if customer_org and customer_org.address:
+            from ..extraction.organization_extractor import finalize_organization_address
+            from ..models import OrganizationExtract
+
+            source_text = self._extraction_draft.result.text if self._extraction_draft else ""
+            fixed = finalize_organization_address(
+                OrganizationExtract(
+                    name=customer_org.name,
+                    address=customer_org.address,
+                    role="customer",
+                ),
+                source_text,
+            )
+            addr = fixed.address or customer_org.address
+        self.draft_customer_addr_var.set(addr)
 
     def _show_extraction_draft(self, draft: ExtractionDraft) -> None:
         self._extraction_draft = draft
         self._extraction_confirmed = False
         self._refresh_marks_tree()
         self._fill_draft_org_fields(draft)
+        self._apply_test_type_from_document(draft.result.text)
         self._update_validation_warnings(draft.report)
         self._set_text(self.mark_context_text, "")
         self._update_validation_status_bar(
@@ -1639,6 +2029,33 @@ class RequestProcessorApp(tk.Tk):
             )
         )
 
+    def _format_mark_context_panel(self, mark: MarkValidation) -> str:
+        """Показывает нормализованную марку, а не сырой OCR-мусор."""
+        lines = [f"Марка: {mark.mark}"]
+        if mark.document:
+            lines.append(f"ТУ/ГОСТ: {mark.document}")
+        raw = (mark.context or "").strip()
+        if not raw:
+            lines.append("\n(фрагмент документа не сохранён)")
+            return "\n".join(lines)
+        probe = re.sub(r"\s+", "", mark.mark.lower())[:24]
+        blob = re.sub(r"\s+", " ", raw)
+        pos = blob.lower().find(probe[:16]) if probe else -1
+        if pos < 0:
+            pos = blob.lower().find(mark.mark[:12].lower())
+        if pos >= 0:
+            left = max(0, pos - 60)
+            right = min(len(blob), pos + len(mark.mark) + 80)
+            snippet = blob[left:right].strip()
+            if left > 0:
+                snippet = "…" + snippet
+            if right < len(blob):
+                snippet += "…"
+            lines.append(f"\nФрагмент в документе:\n{snippet}")
+        else:
+            lines.append(f"\nФрагмент в документе:\n{blob[:280]}…")
+        return "\n".join(lines)
+
     def _on_draft_mark_select(self, _event=None) -> None:
         if not self._extraction_draft:
             return
@@ -1647,8 +2064,10 @@ class RequestProcessorApp(tk.Tk):
             return
         idx = int(sel[0])
         if 0 <= idx < len(self._extraction_draft.marks):
-            context = self._extraction_draft.marks[idx].context or "(контекст не сохранён)"
-            self._set_text(self.mark_context_text, context)
+            self._set_text(
+                self.mark_context_text,
+                self._format_mark_context_panel(self._extraction_draft.marks[idx]),
+            )
 
     def _toggle_draft_mark(self) -> None:
         if not self._extraction_draft:
@@ -1889,7 +2308,20 @@ class RequestProcessorApp(tk.Tk):
     def _on_draft_mark_double_click(self, event) -> None:
         if self.marks_tree.identify_region(event.x, event.y) == "heading":
             return
-        self._edit_draft_mark()
+        self._use_mark_in_calc()
+
+    def _selected_draft_mark(self) -> MarkValidation | None:
+        if not self._extraction_draft or not hasattr(self, "marks_tree"):
+            return None
+        sel = self.marks_tree.selection()
+        if sel:
+            idx = int(sel[0])
+            if 0 <= idx < len(self._extraction_draft.marks):
+                return self._extraction_draft.marks[idx]
+        accepted = [m for m in self._extraction_draft.marks if m.accepted]
+        if len(accepted) == 1:
+            return accepted[0]
+        return None
 
     def _revalidate_draft(self) -> None:
         if not self._extraction_draft:
@@ -2124,6 +2556,7 @@ class RequestProcessorApp(tk.Tk):
         self._load_cable_marks()
         if customer_name:
             self.kp_customer_var.set(customer_name)
+        self._apply_test_type_from_document(result.text)
         self._load_organizations()
 
         self._update_validation_status_bar(
@@ -2265,24 +2698,36 @@ class RequestProcessorApp(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def _use_mark_in_calc(self) -> None:
-        mark_text = ""
-        if hasattr(self, "marks_tree"):
-            sel = self.marks_tree.selection()
-            if sel and self._extraction_draft:
-                idx = int(sel[0])
-                if 0 <= idx < len(self._extraction_draft.marks):
-                    entry = self._extraction_draft.marks[idx]
-                    if entry.accepted:
-                        mark_text = entry.mark
-        if not mark_text:
-            messagebox.showinfo("Расчёт", "Выберите принятую марку (✓) в таблице.")
+        if not self._extraction_draft:
+            messagebox.showinfo(
+                "Расчёт",
+                "Сначала извлеките заявку на вкладке «1. Заявка».",
+            )
             return
-        if self._extraction_draft and not self._extraction_confirmed and self.confirm_only_var.get():
+
+        entry = self._selected_draft_mark()
+        if entry is None:
+            messagebox.showinfo(
+                "Расчёт",
+                "Выберите марку в таблице (клик по строке), затем «→ В расчёт» или двойной клик.",
+            )
+            return
+
+        if not entry.accepted:
+            if not messagebox.askyesno(
+                "Марка снята",
+                f"Марка «{entry.mark[:60]}» не принята (—).\nВсё равно подставить в расчёт?",
+            ):
+                return
+
+        if not self._extraction_confirmed and self.confirm_only_var.get():
             if not messagebox.askyesno(
                 "Черновик",
                 "Заявка ещё не подтверждена. Подставить марку из черновика?",
             ):
                 return
+
+        mark_text = entry.mark
         self.mark_var.set(mark_text)
         if self.notebook:
             self.notebook.select(self.tab_calc)
@@ -2293,7 +2738,7 @@ class RequestProcessorApp(tk.Tk):
                 f"Марка подставлена · из заявки: {', '.join(codes)} — «Испытания из заявки»"
             )
         else:
-            self.status.set("Марка подставлена в расчёт")
+            self.status.set("Марка подставлена в расчёт — нажмите «Рассчитать»")
 
     def _use_db_mark_in_calc(self) -> None:
         sel = self.cable_marks_tree.selection()
@@ -2331,6 +2776,14 @@ class RequestProcessorApp(tk.Tk):
             self.kp_calc_tree.selection_set(children)
             self._update_kp_preview()
 
+    def _kp_subject_text(self) -> str:
+        return build_kp_subject(test_type=self.kp_test_type_var.get())
+
+    def _apply_test_type_from_document(self, text: str | None) -> None:
+        label = format_test_type_label(detect_test_type(text))
+        self.kp_test_type_var.set(label)
+        self._update_kp_preview()
+
     def _update_kp_preview(self) -> None:
         try:
             ids = self._get_selected_kp_calc_ids()
@@ -2343,7 +2796,7 @@ class RequestProcessorApp(tk.Tk):
                 return
             proposal = proposal_from_calculations(
                 customer=self.kp_customer_var.get(),
-                subject=self.kp_subject_var.get(),
+                subject=self._kp_subject_text(),
                 calculations=rows,
             )
             self.kp_preview_var.set(
@@ -2378,7 +2831,7 @@ class RequestProcessorApp(tk.Tk):
             return
 
         customer = self.kp_customer_var.get().strip()
-        subject = self.kp_subject_var.get().strip()
+        subject = self._kp_subject_text()
         note = self.kp_note_text.get("1.0", "end").strip() or None
 
         safe_customer = re.sub(r'[<>:"/\\|?*«»]', "_", customer).strip("._ ")[:40] or "заказчик"
@@ -2497,7 +2950,7 @@ class RequestProcessorApp(tk.Tk):
             lines.append(f"  ИНН: {details['manufacturer_inn']}")
         lines.extend([
             "",
-            f"Предмет: {details.get('subject') or '—'}",
+            f"Вид испытаний: {details.get('subject') or '—'}",
             f"Без НДС: {float(details.get('total_without_vat') or 0):,.2f} ₽".replace(",", " "),
             f"С НДС: {float(details.get('total_with_vat') or 0):,.2f} ₽".replace(",", " "),
         ])
@@ -2732,6 +3185,7 @@ class RequestProcessorApp(tk.Tk):
                     ),
                     tags=tags,
                 )
+        self._refresh_calc_picker()
 
     def _load_cable_marks(self) -> None:
         for item in self.cable_marks_tree.get_children():
@@ -2771,6 +3225,144 @@ class RequestProcessorApp(tk.Tk):
             return
         save_climatic_settings(settings, self.db_path)
         self.status.set("Настройки выдержки сохранены")
+
+    def _load_mappings_table(self) -> None:
+        if not hasattr(self, "mappings_tree"):
+            return
+        for item in self.mappings_tree.get_children():
+            self.mappings_tree.delete(item)
+        search = self.mappings_search_var.get().strip().lower() if hasattr(self, "mappings_search_var") else ""
+        rows = list_test_mappings(limit=500, db_path=self.db_path)
+        for row in rows:
+            pattern = row.get("requirement_pattern") or ""
+            code = row.get("test_code") or ""
+            note = row.get("note") or ""
+            if search and search not in pattern.lower() and search not in code.lower() and search not in note.lower():
+                continue
+            self.mappings_tree.insert(
+                "",
+                "end",
+                iid=str(row["id"]),
+                values=(pattern, code, row.get("usage_count", 0), note),
+            )
+
+    def _selected_mapping_id(self) -> int | None:
+        sel = self.mappings_tree.selection()
+        if not sel:
+            return None
+        try:
+            return int(sel[0])
+        except ValueError:
+            return None
+
+    def _mapping_test_codes(self) -> list[str]:
+        rows = list_test_items(limit=500, db_path=self.db_path)
+        return sorted({row["code"] for row in rows if row.get("code")})
+
+    def _open_mapping_editor(
+        self,
+        *,
+        mapping_id: int | None,
+        title: str,
+        save_label: str,
+    ) -> None:
+        initial_pattern = ""
+        initial_code = ""
+        initial_note = ""
+        if mapping_id is not None:
+            rows = list_test_mappings(limit=500, db_path=self.db_path)
+            row = next((r for r in rows if r["id"] == mapping_id), None)
+            if row:
+                initial_pattern = row.get("requirement_pattern") or ""
+                initial_code = row.get("test_code") or ""
+                initial_note = row.get("note") or ""
+
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.geometry("520x260")
+        dialog.configure(bg=COLORS["bg"])
+        dialog.transient(self)
+        dialog.grab_set()
+
+        pattern_var = tk.StringVar(value=initial_pattern)
+        code_var = tk.StringVar(value=initial_code)
+        note_var = tk.StringVar(value=initial_note)
+        codes = self._mapping_test_codes()
+
+        ttk.Label(dialog, text="Фраза из заявки (подстрока):").grid(
+            row=0, column=0, sticky="w", padx=12, pady=8
+        )
+        ttk.Entry(dialog, textvariable=pattern_var, width=48).grid(
+            row=0, column=1, sticky="ew", padx=12, pady=8
+        )
+        ttk.Label(dialog, text="Код испытания:").grid(row=1, column=0, sticky="w", padx=12, pady=8)
+        ttk.Combobox(
+            dialog,
+            textvariable=code_var,
+            values=codes,
+            width=46,
+        ).grid(row=1, column=1, sticky="ew", padx=12, pady=8)
+        ttk.Label(dialog, text="Примечание:").grid(row=2, column=0, sticky="w", padx=12, pady=8)
+        ttk.Entry(dialog, textvariable=note_var, width=48).grid(
+            row=2, column=1, sticky="ew", padx=12, pady=8
+        )
+
+        def save() -> None:
+            pattern = pattern_var.get().strip()
+            code = code_var.get().strip()
+            note = note_var.get().strip() or None
+            if not pattern or not code:
+                messagebox.showwarning("Маппинг", "Укажите фразу и код испытания.", parent=dialog)
+                return
+            try:
+                if mapping_id is None:
+                    add_test_mapping(pattern, code, note=note, db_path=self.db_path)
+                else:
+                    update_test_mapping(
+                        mapping_id,
+                        requirement_pattern=pattern,
+                        test_code=code,
+                        note=note,
+                        db_path=self.db_path,
+                    )
+            except Exception as exc:
+                messagebox.showerror("Маппинг", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+            self._load_mappings_table()
+            self.status.set("Маппинг сохранён")
+
+        ttk.Button(dialog, text=save_label, style="Accent.TButton", command=save).grid(
+            row=3, column=0, columnspan=2, pady=14
+        )
+        dialog.columnconfigure(1, weight=1)
+
+    def _add_mapping_dialog(self) -> None:
+        self._open_mapping_editor(mapping_id=None, title="Новый маппинг", save_label="Добавить")
+
+    def _edit_mapping_dialog(self) -> None:
+        mapping_id = self._selected_mapping_id()
+        if mapping_id is None:
+            messagebox.showinfo("Маппинг", "Выберите строку в таблице.")
+            return
+        self._open_mapping_editor(
+            mapping_id=mapping_id,
+            title="Изменить маппинг",
+            save_label="Сохранить",
+        )
+
+    def _delete_mapping(self) -> None:
+        mapping_id = self._selected_mapping_id()
+        if mapping_id is None:
+            messagebox.showinfo("Маппинг", "Выберите строку для удаления.")
+            return
+        if not messagebox.askyesno("Маппинг", "Удалить выбранный маппинг?"):
+            return
+        if delete_test_mapping(mapping_id, self.db_path):
+            self._load_mappings_table()
+            self.status.set("Маппинг удалён")
+        else:
+            messagebox.showerror("Маппинг", "Запись не найдена.")
 
     def _add_test_dialog(self) -> None:
         dialog = tk.Toplevel(self)

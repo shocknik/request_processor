@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from request_processor.direction_table_extractor import (
+from request_processor.extraction.direction_table_extractor import (
     extract_marks_from_direction_table,
     extract_marks_from_tables,
     is_direction_table,
 )
 from request_processor.models import PdfExtractionResult
-from request_processor.pdf_extractor import _resolve_cable_marks
+from request_processor.extraction.pdf_extractor import _resolve_cable_marks
 
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "extracted" / (
     "27_1-2-2026 Направление в ИЛ 10094807 Кабель-Тест.json"

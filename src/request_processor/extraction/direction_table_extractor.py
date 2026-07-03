@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import re
 
-from .cable_mark_parser import extract_document_from_text
-from .models import CableMarkMatch
+from ..parsing.cable_mark_parser import extract_document_from_text
+from ..models import CableMarkMatch
 
 _PRODUCT_HEADER = re.compile(r"наименован\w*\s+продукц", re.IGNORECASE)
 _INDICATORS_HEADER = re.compile(r"контролируем\w*\s+показател", re.IGNORECASE)
@@ -104,6 +104,7 @@ def _row_to_match(row: list[str], cols: dict[str, int]) -> CableMarkMatch | None
 
     req_text = row[req_idx] if req_idx is not None and req_idx < len(row) else ""
     ind_text = row[ind_idx] if ind_idx is not None and ind_idx < len(row) else ""
+    req_blob = _normalize_cell(req_text) if req_text.strip() else ""
 
     document = (
         extract_document_from_text(req_text)
@@ -112,8 +113,8 @@ def _row_to_match(row: list[str], cols: dict[str, int]) -> CableMarkMatch | None
     )
 
     requirements_raw: str | None = None
-    if ind_idx is not None and ind_idx < len(row) and row[ind_idx].strip():
-        requirements_raw = _normalize_cell(row[ind_idx])
+    if ind_text.strip():
+        requirements_raw = _normalize_cell(ind_text)
     elif req_blob:
         requirements_raw = req_blob
 

@@ -14,7 +14,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from .models import CommercialProposal, KPMarkLine
+from ..models import CommercialProposal, KPMarkLine
 
 LAB_NAME = "ООО «НИЦ Кабель-Тест»"
 LAB_TAGLINE = "Испытательный центр кабельной продукции"
@@ -235,7 +235,11 @@ def generate_kp_from_db(
     note: str | None = None,
 ) -> Path:
     """Загружает расчёты из БД и сохраняет КП в Word."""
-    from .sqlite_repo import DB_PATH_DEFAULT, get_calculations_for_kp, update_calculation_output_path
+    from ..persistence.sqlite_repo import (
+        DB_PATH_DEFAULT,
+        get_calculations_for_kp,
+        update_calculation_output_path,
+    )
 
     if db_path is None:
         db_path = DB_PATH_DEFAULT

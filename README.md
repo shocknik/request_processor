@@ -2,7 +2,7 @@
 
 Автоматизация расчёта стоимости испытаний кабельной продукции, обработки заявок и формирования документов (КП и заявка на испытания).
 
-**Версия:** 0.7.1  
+**Версия:** 0.8.2
 **Репозиторий:** https://github.com/shocknik/request_processor
 
 ---
@@ -11,14 +11,17 @@
 
 - Извлечение из **PDF** и **Word** (марки, заказчик, производитель)
 - **Валидация парсинга** — отчёт уверенности, human-in-the-loop в GUI
-- **Маппинг требований** — `test_mappings`, предложение испытаний из направлений
+- **Маппинг требований** — `test_mappings` (25+ фраз, GUI на вкладке «Настройки»), «Испытания из заявки»
 - Расчёт испытаний (`fixed`, `per_core`, `per_group`, `time_based`)
 - **КП в Word** по нескольким маркам
 - **Заявка на испытания в Word** — форма + приложение с объёмом испытаний
 - **Заказы** — заявка + расчёты + КП = один заказ в БД
 - Справочники: испытания, марки, организации
 - GUI (tkinter) и CLI (Click)
-- **pytest** — smoke-тесты валидатора и CLI
+- **OCR** — Tesseract (приоритет) + кэш `data/ocr_cache/`, EasyOCR fallback
+- **Нормализация OCR-марок** — латиница → кириллица (`KCBur(A)` → `КСБнг(А)`), подсказка по `cable_marks`
+- **Вид испытаний** — автоопределение из письма/заявки (вкладка «КП»)
+- **pytest** — 64 теста (валидатор, CLI, марки, OCR, организации, GUI smoke)
 
 ---
 
@@ -34,7 +37,7 @@ request-processor migrate-db
 request-processor gui
 ```
 
-Или двойной клик: `start_gui.bat`
+Или двойной клик: `start_gui.bat` (или ярлык на рабочем столе — см. ниже)
 
 ---
 
@@ -51,19 +54,26 @@ request-processor gui
 
 ```
 src/request_processor/
-├── pdf_extractor.py           # Заявки PDF/Word
-├── extraction_validator.py    # Валидация парсинга (P0–P2)
-├── organization_extractor.py  # Парсинг организаций
-├── cable_mark_parser.py       # Разбор марки → поля БД
-├── cost_calculator.py
-├── kp_generator.py            # КП Word
-├── application_generator.py   # Заявка на испытания Word
-├── sqlite_repo.py             # БД: orders, organizations, …
-└── gui.py
-tests/
-├── test_extraction_validator.py
-└── test_cli_extract_pdf.py
+├── config.py                  # Пути: data/, templates/, ocr_cache/
+├── cli.py, models.py
+├── extraction/                # Заявки, OCR, организации, вид испытаний
+│   ├── pdf_extractor.py
+│   ├── ocr_mark_normalizer.py
+│   ├── test_type_extractor.py
+│   └── …
+├── parsing/                   # Разбор марки кабеля
+├── persistence/               # SQLite (sqlite_repo)
+├── generation/                # КП и заявка на испытания (Word)
+├── calculation/               # Стоимость, климатика, правила
+├── mapping/                   # Требования → испытания
+├── validation/                # Human-in-the-loop (P0–P2)
+├── nlp/                       # NER (опционально)
+└── ui/                        # tkinter GUI
+tests/                         # pytest (64 теста)
+data/                          # БД, шаблоны, кэш OCR, generated/
 ```
+
+Пакет `assistant/` — задел ИИ-ассистента (коррекция марок по базе `cable_marks`).
 
 Шаблон заявки: `data/templates/zayavka_ispytaniy.docx`
 
@@ -110,10 +120,24 @@ pytest tests/ -q
 
 ---
 
+## Ярлык на рабочем столе
+
+```powershell
+cd D:\My_projects\request_processor
+powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1
+```
+
+Или вручную: ярлык на `start_gui.bat`, рабочая папка = корень проекта.
+
+Запуск: `python -m request_processor.ui.gui` или `request-processor-gui`.
+
+---
+
 ## Документация
 
 - Obsidian: `Python/Проект request-processor/`
 - `docs/README.md`
+- План ИИ-ассистента: Obsidian [[34 — План разработки ИИ-ассистента (2026-07-03)]]
 
 ---
 

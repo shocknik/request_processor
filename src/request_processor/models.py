@@ -171,7 +171,7 @@ class CommercialProposal(BaseModel):
     customer: str = Field("", description="Заказчик / изготовитель")
     subject: str = Field(
         "Проведение периодических испытаний",
-        description="Предмет КП",
+        description="Вид испытаний (фраза для вводной КП)",
     )
     note: str | None = Field(None, description="Дополнительный текст из письма")
     marks: list[KPMarkLine] = Field(default_factory=list)
@@ -354,7 +354,7 @@ class MarkValidation(BaseModel):
 
     def to_cable_mark_record(self, source: str | None = None) -> "CableMarkRecord":
         """Собирает запись для таблицы cable_marks с учётом правок оператора."""
-        from .cable_mark_parser import parse_cable_mark_record
+        from .parsing.cable_mark_parser import parse_cable_mark_record
 
         record = parse_cable_mark_record(
             self.mark,

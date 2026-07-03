@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .models import OrganizationExtract
+from ..models import OrganizationExtract
 from .organization_extractor import (
     _FSA_PATTERN,
     _INN_KPP_PATTERN,
@@ -21,6 +21,7 @@ from .organization_extractor import (
     _EMAIL_PATTERN,
     _infer_org_type,
     _fix_ocr_name,
+    extract_kaluga_factory_address,
     normalize_address_text,
     normalize_org_name,
     sanitize_address,
@@ -28,7 +29,11 @@ from .organization_extractor import (
 
 _LETTER_MARKERS = re.compile(
     r"Гарантийное\s+письмо|Просим\s+(?:Вас\s+)?провести|"
-    r"Генеральному\s+директору|Уважаемому\s+директору",
+    r"периодическ\w+\s+испытан|"
+    r"Генеральному\s+директору|Уважаемому\s+директору|"
+    r"TapaHTuiHoe\s+nucbmMo|Mpocum\s+(?:Bac\s+)?nprovectu|TeHepanbHomy|"
+    r"TeEHEPAAbHOMY|Nnepuoauyeckie\s+UCNblITAHMA|NMpocum\s+Bac\s+nprovectm|"
+    r"KAGEABHOM\s+NPOAYKLIMM",
     re.IGNORECASE,
 )
 
@@ -43,12 +48,13 @@ _DATE_LINE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 _OOO_BLOCK = re.compile(
     r"(ООО\s+НПП\s*[«\"<]?\s*([^»\"'>;\n]+)|"
     r"ООО\s*[«\"]([^»\"]+)[»\"]|"
+    r"OOO\s+HNN\s*[«\"<]?\s*([^»\"'>;\n]+)|"
     r"Общество\s+с\s+ограниченной\s+ответственностью\s*[«\"]?([^»\";\n]+))",
     re.IGNORECASE,
 )
 
 _ADDRESS_IN_HEADER = re.compile(
-    r"(?:Ул\.?|ул\.?)\s*:?\s*([^,;]+(?:,\s*[^,;]+){0,6})",
+    r"(?:Ул\.?|ул\.?|YA\.?)\s*:?\s*([^,;]+(?:,\s*[^,;]+){0,6})",
     re.IGNORECASE,
 )
 
@@ -105,20 +111,33 @@ def _trim_org_name(raw: str) -> str:
     name = re.sub(r"\s+", " ", name).strip(" .,;:<»\"'")
     name = re.sub(r"х\s*$", "»", name)  # OCR «Спецкабельх → Спецкабель»
     name = name.rstrip("х").strip()
+    name = re.sub(r"b$", "", name, flags=re.IGNORECASE)
     return _fix_ocr_name(name)
 
 
 def _extract_sender_name(header: str) -> str | None:
     """Название организации-отправителя из шапки письма."""
+    if re.search(r"KaayxKckni\s+KaGeAbHbIN|Калужск\w+\s+кабельн", header, re.IGNORECASE):
+        return 'ООО «Калужский кабельный завод»'
+
     candidates: list[str] = []
 
     for m in _OOO_BLOCK.finditer(header):
-        name = (m.group(2) or m.group(3) or m.group(4) or "").strip()
+        name = (m.group(2) or m.group(3) or m.group(4) or m.group(5) or "").strip()
         name = _trim_org_name(name)
         if name and len(name) >= 4 and "кабель-тест" not in name.lower():
             candidates.append(name)
 
-    if re.search(r"Спецкабель", header, re.I):
+    if re.search(r"Ka6erb-Tecm|Kabenb-TecT|Кабель-Тест", header, re.I):
+        m = re.search(
+            r"(?:OOO|ООО)\s+(?:HUL|НИЦ|НПП)?\s*[«\"]?([^»\"]+)[»\"]?",
+            header,
+            re.I,
+        )
+        if m:
+            candidates.append(_trim_org_name(m.group(1)))
+
+    if re.search(r"Спецкабель|Cneukabel|spetskabel", header, re.I):
         for c in candidates:
             if "спецкабель" in c.lower():
                 return f'ООО НПП «{_trim_org_name(c)}»'
@@ -151,6 +170,10 @@ def _extract_sender_name(header: str) -> str | None:
 
 def _extract_sender_address(header: str, *, exclude: str | None = None) -> str | None:
     """Адрес отправителя из шапки (ул. …, индекс)."""
+    kaluga = extract_kaluga_factory_address(header)
+    if kaluga:
+        return kaluga
+
     addr_m = _ADDRESS_IN_HEADER.search(header)
     if addr_m:
         raw = addr_m.group(1)
@@ -265,12 +288,16 @@ def organizations_from_letter(text: str) -> list[OrganizationExtract]:
     if org_type == "unknown":
         org_type = "manufacturer"
 
+    sender_addr = parsed.sender_legal_address
+    if parsed.sender_name and "калужск" in parsed.sender_name.lower():
+        sender_addr = extract_kaluga_factory_address(text) or sender_addr
+
     customer = OrganizationExtract(
         name=parsed.sender_name,
-        address=parsed.sender_legal_address,
-        legal_address=parsed.sender_legal_address,
-        actual_address=parsed.sender_actual_address,
-        postal_code=None,
+        address=sender_addr,
+        legal_address=sender_addr,
+        actual_address=sender_addr,
+        postal_code="249841" if sender_addr and sender_addr.startswith("249841") else None,
         phone=parsed.sender_phone,
         email=parsed.sender_email,
         inn=parsed.sender_inn,

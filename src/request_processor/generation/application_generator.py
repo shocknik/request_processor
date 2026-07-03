@@ -12,8 +12,9 @@ from pathlib import Path
 
 from docx import Document
 
-from .organization_extractor import resolve_org_addresses, sanitize_address
-from .sqlite_repo import (
+from ..extraction.test_type_extractor import detect_test_type
+from ..extraction.organization_extractor import resolve_org_addresses, sanitize_address
+from ..persistence.sqlite_repo import (
     DB_PATH_DEFAULT,
     GENERATED_DIR_DEFAULT,
     PROJECT_ROOT,
@@ -72,16 +73,7 @@ def _format_criteria(lines: list[dict]) -> str:
 
 
 def _detect_test_type(subject: str | None) -> str:
-    if not subject:
-        return TEST_TYPE_DEFAULT
-    s = subject.lower()
-    if "сертификац" in s:
-        return "сертификационные"
-    if "контрольн" in s:
-        return "контрольные"
-    if "периодич" in s:
-        return "периодические"
-    return TEST_TYPE_DEFAULT
+    return detect_test_type(subject).lower()
 
 
 def _append_table_row(table) -> None:
@@ -130,7 +122,7 @@ def generate_application_from_order(
     """
     Формирует заявку на испытания по заказу: лист 1 — форма, лист 2 — объём испытаний.
     """
-    from .sqlite_repo import (
+    from ..persistence.sqlite_repo import (
         get_calculation_lines,
         get_cable_mark_document,
         get_organization_by_id,

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import re
 
-from .letter_extractor import is_business_letter, parse_business_letter
-from .cable_mark_parser import mark_validation_from_match
-from .models import (
+from ..extraction.letter_extractor import is_business_letter, parse_business_letter
+from ..extraction.organization_extractor import finalize_organization_address, sanitize_address
+from ..parsing.cable_mark_parser import mark_validation_from_match
+from ..models import (
     CableMarkMatch,
     DocumentType,
     FieldStatus,
@@ -21,8 +22,8 @@ from .models import (
     PdfExtractionResult,
     ValidationReport,
 )
-from .pdf_extractor import is_plausible_mark
-from .requirement_mapper import map_requirements_to_tests
+from ..extraction.pdf_extractor import is_plausible_mark
+from ..mapping.requirement_mapper import map_requirements_to_tests
 
 _TESTING_CENTER_HINTS = re.compile(
     r"кабель[\s\-–]*тест|испытательн\w*\s+(?:центр|лаборатор)|видяев|"
@@ -46,8 +47,14 @@ def detect_document_type(text: str) -> DocumentType:
     if is_business_letter(text):
         return "letter"
     head = text[:3000]
-    if re.search(r"Генеральному|Уважаем\w+", head, re.IGNORECASE) and re.search(
-        r"Просим\s+.*провести", head, re.IGNORECASE
+    if re.search(
+        r"Генеральному|Уважаем\w+|TeEHEPAAbHOMY|TeHepanbHomy",
+        head,
+        re.IGNORECASE,
+    ) and re.search(
+        r"Просим\s+.*провести|NMpocum\s+Bac|Mpocum\s+Bac|периодическ",
+        head,
+        re.IGNORECASE,
     ):
         return "letter"
     if re.search(r"НАПРАВЛЕНИЕ", text, re.IGNORECASE) and re.search(
@@ -121,6 +128,7 @@ def _validate_org(
     org: OrganizationExtract,
     *,
     document_type: DocumentType,
+    source_text: str = "",
 ) -> OrgValidation:
     confidence = round(min(max(org.confidence, 0.0), 1.0), 2)
     status = FieldStatus.ok
@@ -149,11 +157,16 @@ def _validate_org(
         confidence = max(0.0, confidence - _NO_INN_LETTER_PENALTY)
         warnings.append("P1-5: у заказчика в письме не найден ИНН")
 
+    finalized = finalize_organization_address(org, source_text)
+    address = finalized.legal_address or finalized.address
+    if address:
+        address = sanitize_address(address) or address
+
     return OrgValidation(
         role=org.role,
         name=org.name,
         inn=org.inn,
-        address=org.address or org.legal_address,
+        address=address,
         confidence=confidence,
         status=status,
         warnings=warnings,
@@ -248,7 +261,8 @@ def validate_extraction(result: PdfExtractionResult) -> ValidationReport:
         for m in result.cable_marks
     ]
     organizations = [
-        _validate_org(org, document_type=document_type) for org in result.organizations
+        _validate_org(org, document_type=document_type, source_text=result.text)
+        for org in result.organizations
     ]
 
     recipient_name = _recipient_from_letter(result.text) if document_type == "letter" else None
@@ -309,6 +323,7 @@ def apply_operator_edits(
                         org_type="manufacturer",
                     ),
                     document_type=updated.document_type,
+                    source_text=text,
                 )
             updated.organizations = orgs
 

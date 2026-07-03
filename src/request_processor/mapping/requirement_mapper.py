@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .models import CableMarkMatch, TestSuggestion
+from ..models import CableMarkMatch, TestSuggestion
 
 MappingSource = Literal["builtin", "database"]
 
@@ -26,25 +26,48 @@ class _MappingRule:
     is_regex: bool = False
 
 
+# Устаревшие slug → коды из прайса (test_items), если climatic-код не найден в БД.
+_CODE_ALIASES: dict[str, str] = {
+    "resistance_core": "электрическое_сопротивление_тпж",
+    "insulation_resistance": "электрическое_сопротивление_изоляции_тпж",
+    "voltage_test": "испытание_напряжением",
+    "capacitance": "измерение_емкостииндуктивности",
+    "inductance": "измерение_емкостииндуктивности",
+    "attenuation": "измерение_затухания_экранирования",
+}
+
 # Порядок: более специфичные фразы выше. Проверка — по вхождению в нижний регистр.
 _BUILTIN_RULES: tuple[_MappingRule, ...] = (
+    _MappingRule("воздействию солнечного", "solar_radiation", 0.93, "Направления в ИЛ"),
     _MappingRule("солнечного излучения", "solar_radiation", 0.92, "ГОСТ 20.57.406"),
     _MappingRule("солнечной радиации", "solar_radiation", 0.92),
     _MappingRule("20.57.406", "solar_radiation", 0.88, "ГОСТ солнечного излучения"),
+    _MappingRule("метод 211-1", "solar_radiation", 0.86),
+    _MappingRule("ультрафиолет", "solar_radiation", 0.78, "УФ"),
     _MappingRule("повышенной влажности", "humidity", 0.90),
+    _MappingRule("влажности воздуха", "humidity", 0.88),
     _MappingRule("влажност", "humidity", 0.75),
     _MappingRule("пониженной температур", "temp_low", 0.90),
+    _MappingRule("отрицательной температур", "temp_low", 0.85),
     _MappingRule("повышенной температур", "temp_high", 0.90),
     _MappingRule("изменению температур", "temp_cycling", 0.88),
     _MappingRule("циклическ", "temp_cycling", 0.70),
-    _MappingRule("сопротивлен", "resistance_core", 0.80, is_regex=True),
-    _MappingRule(r"сопротивлен\w*\s+изоляц", "insulation_resistance", 0.88, is_regex=True),
-    _MappingRule("изоляц", "insulation_resistance", 0.72),
-    _MappingRule("испытание напряжением", "voltage_test", 0.90),
-    _MappingRule("напряжени", "voltage_test", 0.75),
-    _MappingRule("емкост", "capacitance", 0.80),
-    _MappingRule("индуктивн", "inductance", 0.80),
-    _MappingRule("затухан", "attenuation", 0.80),
+    _MappingRule("простому изгибу", "стойкость_к_простому_изгибу_100_циклов", 0.82),
+    _MappingRule("огнестойк", "огнестойкость", 0.85),
+    _MappingRule(
+        "электрическое сопротивление тпж",
+        "электрическое_сопротивление_тпж",
+        0.90,
+    ),
+    _MappingRule(r"сопротивлен\w*\s+изоляц", "электрическое_сопротивление_изоляции_тпж", 0.88, is_regex=True),
+    _MappingRule("сопротивлен", "электрическое_сопротивление_тпж", 0.80, is_regex=True),
+    _MappingRule("изоляц", "электрическое_сопротивление_изоляции_тпж", 0.72),
+    _MappingRule("испытание напряжением", "испытание_напряжением", 0.90),
+    _MappingRule("напряжени", "испытание_напряжением", 0.75),
+    _MappingRule("емкост", "измерение_емкостииндуктивности", 0.80),
+    _MappingRule("индуктивн", "измерение_емкостииндуктивности", 0.80),
+    _MappingRule("затухания экранирования", "измерение_затухания_экранирования", 0.85),
+    _MappingRule("затухан", "измерение_затухания_экранирования", 0.78),
 )
 
 
@@ -56,11 +79,29 @@ def _normalize_requirements(text: str | None) -> str:
     return text.strip()
 
 
+def resolve_test_code(code: str, db_path: str | Path | None = None) -> str:
+    """
+    Подбирает код испытания, существующий в test_items.
+
+    Сначала исходный code, затем алиас из _CODE_ALIASES.
+    """
+    if db_path is None:
+        return code
+    from ..persistence.sqlite_repo import get_test_item_by_code
+
+    if get_test_item_by_code(code, db_path):
+        return code
+    alias = _CODE_ALIASES.get(code)
+    if alias and get_test_item_by_code(alias, db_path):
+        return alias
+    return code
+
+
 def _match_builtin(text: str) -> list[tuple[str, float, str | None, str]]:
     """Возвращает (test_code, confidence, note, matched_pattern)."""
     hits: dict[str, tuple[float, str | None, str]] = {}
     for rule in _BUILTIN_RULES:
-        if rule.test_code == "resistance_core" and "изоляц" in text:
+        if rule.test_code == "электрическое_сопротивление_тпж" and "изоляц" in text:
             continue
         matched = False
         matched_pat = rule.pattern
@@ -83,7 +124,7 @@ def _match_database(
     text: str,
     db_path: str | Path,
 ) -> list[tuple[str, float, str | None, str, int]]:
-    from .sqlite_repo import list_test_mappings
+    from ..persistence.sqlite_repo import list_test_mappings
 
     hits: dict[str, tuple[float, str | None, str, int]] = {}
     for row in list_test_mappings(db_path=db_path):
@@ -104,12 +145,12 @@ def _match_database(
 
 def _resolve_test_name(code: str, db_path: str | Path | None) -> str:
     if db_path is not None:
-        from .sqlite_repo import get_test_item_by_code
+        from ..persistence.sqlite_repo import get_test_item_by_code
 
         item = get_test_item_by_code(code, db_path)
         if item:
             return item.name
-    from .climatic_tests import CLIMATIC_TESTS
+    from ..calculation.climatic_tests import CLIMATIC_TESTS
 
     for spec in CLIMATIC_TESTS:
         if spec["code"] == code:
@@ -134,9 +175,10 @@ def map_requirements_to_tests(
     merged: dict[str, TestSuggestion] = {}
 
     for code, conf, note, pattern in _match_builtin(text):
-        merged[code] = TestSuggestion(
-            code=code,
-            name=_resolve_test_name(code, db_path),
+        resolved = resolve_test_code(code, db_path)
+        merged[resolved] = TestSuggestion(
+            code=resolved,
+            name=_resolve_test_name(resolved, db_path),
             confidence=conf,
             source="builtin",
             matched_pattern=pattern,
@@ -145,11 +187,12 @@ def map_requirements_to_tests(
 
     if db_path is not None:
         for code, conf, note, pattern, mapping_id in _match_database(text, db_path):
-            existing = merged.get(code)
+            resolved = resolve_test_code(code, db_path)
+            existing = merged.get(resolved)
             if existing is None or conf > existing.confidence:
-                merged[code] = TestSuggestion(
-                    code=code,
-                    name=_resolve_test_name(code, db_path),
+                merged[resolved] = TestSuggestion(
+                    code=resolved,
+                    name=_resolve_test_name(resolved, db_path),
                     confidence=conf,
                     source="database",
                     matched_pattern=pattern,

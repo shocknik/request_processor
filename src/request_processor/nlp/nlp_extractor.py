@@ -15,8 +15,8 @@ import re
 from functools import lru_cache
 from typing import Any
 
-from .models import OrganizationExtract
-from .organization_extractor import normalize_org_name, sanitize_address
+from ..models import OrganizationExtract
+from ..extraction.organization_extractor import normalize_org_name, sanitize_address
 
 logger = logging.getLogger(__name__)
 

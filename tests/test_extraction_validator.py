@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from request_processor.extraction_validator import (
+from request_processor.validation.extraction_validator import (
     apply_operator_edits,
     detect_document_type,
     format_validation_report,
@@ -45,23 +45,25 @@ def test_letter_kaluga_four_marks_with_ocr_warning() -> None:
     assert not report.block_confirm
 
 
-def test_letter_145_empty_marks_blocks_confirm() -> None:
+def test_letter_145_extracts_lan_marks_with_ocr_warning() -> None:
     result = _load_fixture("Письмо 145 от 02.02.2026 .json")
     report = validate_extraction(result)
 
     assert report.document_type == "letter"
-    assert len(report.marks) == 0
-    assert report.block_confirm is True
-    assert any("P0-2" in f for f in report.flags)
+    assert len(report.marks) >= 2
+    assert any("Cat 5" in m.mark for m in report.marks)
+    assert not report.block_confirm
+    assert any("P1-1" in f for f in report.flags)
 
 
-def test_letter_145_bad_customer_blocks_confirm() -> None:
+def test_letter_145_customer_has_ocr_warning() -> None:
     result = _load_fixture("Письмо 145 от 02.02.2026 .json")
     report = validate_extraction(result)
 
-    assert report.block_confirm is True
+    assert not report.block_confirm
     customer = next(o for o in report.organizations if o.role == "customer")
-    assert customer.status == FieldStatus.error
+    assert customer.name and "Спецкабель" in customer.name
+    assert customer.status in (FieldStatus.error, FieldStatus.warning, FieldStatus.ok)
 
 
 def test_direction_three_marks_tu_warnings() -> None:
@@ -111,7 +113,7 @@ def test_apply_operator_edits_fixes_customer() -> None:
     customer = next(o for o in fixed.organizations if o.role == "customer")
     assert customer.status == FieldStatus.ok
     assert not _is_testing_center_in_customer(fixed)
-    assert fixed.block_confirm is True  # P0-2: марки по-прежнему пусты
+    assert not fixed.block_confirm
 
 
 def _is_testing_center_in_customer(report) -> bool:

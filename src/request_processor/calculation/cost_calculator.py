@@ -13,9 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from .models import CableMark, Calculation, CalculationLine, TestItem
-from .cable_mark_parser import parse_cable_mark
-from .sqlite_repo import get_test_item_by_code
+from ..models import CableMark, Calculation, CalculationLine, TestItem
+from ..parsing.cable_mark_parser import parse_cable_mark
+from ..persistence.sqlite_repo import get_test_item_by_code
 
 
 def _apply_rule(

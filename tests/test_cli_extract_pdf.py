@@ -24,9 +24,26 @@ def letter_result() -> PdfExtractionResult:
 
 @pytest.fixture
 def blocked_result() -> PdfExtractionResult:
-    path = EXTRACTED_DIR / "Письмо 145 от 02.02.2026 .json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return PdfExtractionResult.model_validate(data)
+    """Заблокированное извлечение: нет марок, заказчик — испытательный центр."""
+    from request_processor.models import OrganizationExtract
+
+    return PdfExtractionResult(
+        source_path="blocked.pdf",
+        page_count=1,
+        text="Генеральному директору\nПросим провести\nмарки: ",
+        cable_marks=[],
+        organizations=[
+            OrganizationExtract(
+                name='ООО НИЦ «Кабель-Тест»',
+                role="customer",
+                org_type="testing_center",
+                confidence=0.7,
+            )
+        ],
+        customer_name='ООО НИЦ «Кабель-Тест»',
+        ocr_used=True,
+        is_scanned=True,
+    )
 
 
 def test_extract_pdf_dry_run_writes_json_skips_db(tmp_path: Path, letter_result: PdfExtractionResult) -> None:

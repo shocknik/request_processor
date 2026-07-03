@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from request_processor.models import PdfExtractionResult
-from request_processor.pdf_extractor import extract_from_document
+from request_processor.extraction.pdf_extractor import extract_from_document
 
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "extracted" / (
     "27_1-2-2026 Направление в ИЛ 10094807 Кабель-Тест.json"
@@ -30,15 +30,15 @@ def test_extract_from_pdf_does_not_raise_search_text(
     pdf.write_bytes(b"%PDF-1.4")
 
     with patch(
-        "request_processor.pdf_extractor.extract_text",
+        "request_processor.extraction.pdf_extractor.extract_text",
         return_value=direction_result.text,
     ):
         with patch(
-            "request_processor.pdf_extractor.extract_tables",
+            "request_processor.extraction.pdf_extractor.extract_tables",
             return_value=direction_result.tables,
         ):
             with patch(
-                "request_processor.pdf_extractor._detect_scanned",
+                "request_processor.extraction.pdf_extractor._detect_scanned",
                 return_value=(False, direction_result.page_count),
             ):
                 result = extract_from_document(pdf, use_ocr=False)

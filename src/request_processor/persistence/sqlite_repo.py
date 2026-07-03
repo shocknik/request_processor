@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from .models import (
+from ..models import (
     Calculation,
     CalculationLine,
     CableMarkRecord,
@@ -40,15 +40,13 @@ from .models import (
     TestItemUpdate,
     TestItemCreate,
 )
-from .organization_extractor import normalize_org_name
-from .cable_mark_parser import parse_cable_mark_record
-from .climatic_tests import CLIMATIC_TESTS, climatic_settings_fields
-from .test_rules import DEFAULT_PRICE_XLSX, infer_rule_type
+from ..extraction.organization_extractor import normalize_org_name
+from ..parsing.cable_mark_parser import parse_cable_mark_record
+from ..calculation.climatic_tests import CLIMATIC_TESTS, climatic_settings_fields
+from ..calculation.test_rules import DEFAULT_PRICE_XLSX, infer_rule_type
 
 # Корень проекта (не зависит от текущей рабочей директории при запуске GUI/CLI)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DB_PATH_DEFAULT = PROJECT_ROOT / "data" / "app.db"
-GENERATED_DIR_DEFAULT = PROJECT_ROOT / "data" / "generated"
+from ..config import DB_PATH_DEFAULT, GENERATED_DIR_DEFAULT, PROJECT_ROOT
 
 
 def resolve_db_path(db_path: str | Path = DB_PATH_DEFAULT) -> Path:
@@ -401,7 +399,8 @@ def _migrate_orders_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:
 
 
 def _migrate_organizations_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:
-    from .organization_extractor import sanitize_address
+    from ..extraction.organization_extractor import finalize_organization_address, sanitize_address
+    from ..models import OrganizationExtract
 
     with get_connection(db_path) as conn:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(organizations)").fetchall()}
@@ -417,9 +416,22 @@ def _migrate_organizations_columns(db_path: str | Path = DB_PATH_DEFAULT) -> Non
             raw = row["address"]
             legal = row["legal_address"]
             actual = row["actual_address"]
-            clean = sanitize_address(raw)
-            clean_legal = sanitize_address(legal) if legal else clean
-            clean_actual = sanitize_address(actual) if actual else None
+            org_row = conn.execute(
+                "SELECT name FROM organizations WHERE id = ?", (row["id"],)
+            ).fetchone()
+            org_name = org_row["name"] if org_row else ""
+            finalized = finalize_organization_address(
+                OrganizationExtract(
+                    name=org_name or "—",
+                    address=raw,
+                    legal_address=legal,
+                    actual_address=actual,
+                ),
+                str(raw or ""),
+            )
+            clean = finalized.address or sanitize_address(raw)
+            clean_legal = finalized.legal_address or sanitize_address(legal) if legal else clean
+            clean_actual = finalized.actual_address or sanitize_address(actual) if actual else None
             if clean and (not legal or len(str(legal)) > 250):
                 legal = clean_legal
             if not actual and clean_actual:
@@ -609,12 +621,35 @@ def sync_climatic_tests(db_path: str | Path = DB_PATH_DEFAULT) -> None:
 
 
 _DEFAULT_TEST_MAPPINGS: list[tuple[str, str, str | None]] = [
-    ("солнечного излучения", "solar_radiation", "Направления в ИЛ, ГОСТ 20.57.406"),
+    # Климатика (направления в ИЛ, ТУ, прайс)
+    ("воздействию солнечного", "solar_radiation", "Направления в ИЛ"),
+    ("солнечного излучения", "solar_radiation", "ГОСТ 20.57.406"),
+    ("солнечной радиации", "solar_radiation", "Климатика"),
+    ("20.57.406", "solar_radiation", "ГОСТ солнечного излучения"),
+    ("метод 211-1", "solar_radiation", "ГОСТ 20.57.406 метод 211-1"),
     ("повышенной влажности", "humidity", "Климатика"),
+    ("влажности воздуха", "humidity", "Климатика"),
     ("пониженной температуры", "temp_low", "Климатика"),
+    ("пониженной температуре", "temp_low", "Климатика"),
     ("повышенной температуры", "temp_high", "Климатика"),
+    ("повышенной температуре", "temp_high", "Климатика"),
     ("изменению температур", "temp_cycling", "Климатика"),
-    ("испытание напряжением", "voltage_test", "Электрические НЧ"),
+    ("изменению температуры", "temp_cycling", "Климатика"),
+    ("циклическ", "temp_cycling", "Климатика"),
+    ("отрицательной температур", "temp_low", "Морозостойкость"),
+    ("простому изгибу", "стойкость_к_простому_изгибу_100_циклов", "Механика"),
+    # Электрические (коды из прайса)
+    ("электрическое сопротивление тпж", "электрическое_сопротивление_тпж", "Прайс НЧ"),
+    ("сопротивление изоляции", "электрическое_сопротивление_изоляции_тпж", "Прайс НЧ"),
+    ("сопротивление изоляции тпж", "электрическое_сопротивление_изоляции_тпж", "Прайс НЧ"),
+    ("испытание напряжением", "испытание_напряжением", "Прайс НЧ"),
+    ("испытание напряжение", "испытание_напряжением", "Прайс НЧ"),
+    ("емкости", "измерение_емкостииндуктивности", "ВЧ параметры"),
+    ("индуктивности", "измерение_емкостииндуктивности", "ВЧ параметры"),
+    ("затухания экранирования", "измерение_затухания_экранирования", "ВЧ"),
+    ("затухания излучения", "измерение_затухания_излучения", "ВЧ"),
+    ("огнестойкость", "огнестойкость", "Пожарная безопасность"),
+    ("ультрафиолет", "solar_radiation", "УФ → солнечная радиация"),
 ]
 
 
@@ -662,6 +697,9 @@ def add_test_mapping(
     pattern = requirement_pattern.strip().lower()
     if not pattern:
         raise ValueError("Пустой шаблон требования")
+    code = test_code.strip()
+    if not code:
+        raise ValueError("Пустой код испытания")
     now = datetime.now().isoformat()
     with get_connection(db_path) as conn:
         conn.execute(
@@ -672,13 +710,65 @@ def add_test_mapping(
                 test_code = excluded.test_code,
                 note = COALESCE(excluded.note, test_mappings.note)
             """,
-            (pattern, test_code, note, now),
+            (pattern, code, note, now),
         )
         row = conn.execute(
             "SELECT id FROM test_mappings WHERE requirement_pattern = ?",
             (pattern,),
         ).fetchone()
         return int(row["id"]) if row else 0
+
+
+def get_test_mapping(
+    mapping_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM test_mappings WHERE id = ?",
+            (mapping_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_test_mapping(
+    mapping_id: int,
+    *,
+    requirement_pattern: str | None = None,
+    test_code: str | None = None,
+    note: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    """Обновляет запись маппинга по id."""
+    current = get_test_mapping(mapping_id, db_path)
+    if not current:
+        raise ValueError(f"Маппинг id={mapping_id} не найден")
+    pattern = (requirement_pattern or current["requirement_pattern"]).strip().lower()
+    code = (test_code or current["test_code"]).strip()
+    if not pattern:
+        raise ValueError("Пустой шаблон требования")
+    if not code:
+        raise ValueError("Пустой код испытания")
+    new_note = note if note is not None else current.get("note")
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE test_mappings
+            SET requirement_pattern = ?, test_code = ?, note = ?
+            WHERE id = ?
+            """,
+            (pattern, code, new_note, mapping_id),
+        )
+
+
+def delete_test_mapping(
+    mapping_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> bool:
+    """Удаляет маппинг. Возвращает False, если запись не найдена."""
+    with get_connection(db_path) as conn:
+        cur = conn.execute("DELETE FROM test_mappings WHERE id = ?", (mapping_id,))
+        return cur.rowcount > 0
 
 
 def save_generated_document(
@@ -869,7 +959,7 @@ def save_cable_marks_from_validations(
     db_path: str | Path = DB_PATH_DEFAULT,
 ) -> dict[str, int]:
     """Сохраняет подтверждённые марки с полями, заданными оператором."""
-    from .models import MarkValidation
+    from ..models import MarkValidation
 
     stats = {"saved": 0, "errors": 0}
     for item in validations:
@@ -899,6 +989,9 @@ def upsert_organization(
     db_path: str | Path = DB_PATH_DEFAULT,
 ) -> int:
     """Сохраняет организацию без дублей (по ИНН или нормализованному названию)."""
+    from ..extraction.organization_extractor import finalize_organization_address
+
+    extract = finalize_organization_address(extract)
     now = datetime.now().isoformat()
     name_normalized = normalize_org_name(extract.name)
     inn_key = extract.inn or ""

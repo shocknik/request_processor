@@ -28,7 +28,7 @@ from request_processor.models import TestItemCreate
 
 from .models import ClimaticTestSettings
 
-from .sqlite_repo import (
+from .persistence.sqlite_repo import (
     init_db,
     load_price_list_from_xlsx,
     save_calculation,
@@ -51,15 +51,17 @@ from .sqlite_repo import (
     get_last_document_extraction,
     list_test_applications,
     list_test_mappings,
+    delete_test_mapping,
+    update_test_mapping,
     add_test_mapping,
     list_generated_documents,
 )
-from .cost_calculator import calculate_cost, print_breakdown
-from .kp_generator import generate_kp_from_db
-from .application_generator import generate_application_from_order
-from .pdf_extractor import extract_from_document
-from .extraction_validator import format_validation_report, validate_extraction
-from .requirement_mapper import map_requirements_to_tests, suggest_tests_for_mark
+from .calculation.cost_calculator import calculate_cost, print_breakdown
+from .generation.kp_generator import generate_kp_from_db
+from .generation.application_generator import generate_application_from_order
+from .extraction.pdf_extractor import extract_from_document
+from .validation.extraction_validator import format_validation_report, validate_extraction
+from .mapping.requirement_mapper import map_requirements_to_tests, suggest_tests_for_mark
 from request_processor import __version__
 
 def _slugify(text: str) -> str:
@@ -180,6 +182,7 @@ def calculate_cmd(
 @click.option("--full-text", is_flag=True, help="Вывести полный извлечённый текст")
 @click.option("--no-ocr", is_flag=True, help="Не запускать OCR для сканов")
 @click.option("--ocr-dpi", default=200, show_default=True, type=int, help="DPI для OCR сканов")
+@click.option("--no-ocr-cache", is_flag=True, help="Не читать/писать кэш OCR (data/ocr_cache/)")
 @click.option("--no-save-marks", is_flag=True, help="Не сохранять марки в БД")
 @click.option("--no-save-orgs", is_flag=True, help="Не сохранять организации в БД")
 @click.option(
@@ -200,6 +203,7 @@ def extract_pdf_cmd(
     full_text: bool,
     no_ocr: bool,
     ocr_dpi: int,
+    no_ocr_cache: bool,
     no_save_marks: bool,
     no_save_orgs: bool,
     dry_run: bool,
@@ -210,7 +214,12 @@ def extract_pdf_cmd(
     pdf_file = Path(pdf)
 
     try:
-        result = extract_from_document(pdf_file, use_ocr=not no_ocr, ocr_dpi=ocr_dpi)
+        result = extract_from_document(
+            pdf_file,
+            use_ocr=not no_ocr,
+            ocr_dpi=ocr_dpi,
+            use_ocr_cache=not no_ocr_cache,
+        )
     except Exception as e:
         click.echo(click.style(f"Ошибка извлечения: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
@@ -235,7 +244,10 @@ def extract_pdf_cmd(
 
     if result.is_scanned:
         if result.ocr_used:
-            click.echo(click.style("Скан распознан через OCR.", fg="cyan"))
+            from .extraction.pdf_extractor import resolve_ocr_engine
+
+            engine = resolve_ocr_engine()
+            click.echo(click.style(f"Скан распознан через OCR ({engine}).", fg="cyan"))
         elif no_ocr:
             click.echo(
                 click.style(
@@ -554,6 +566,45 @@ def add_test_mapping_cmd(pattern: str, test_code: str, note: str | None, db: str
     click.echo(click.style(f"✓ Маппинг сохранён (id={mapping_id})", fg="green"))
 
 
+@cli.command("update-test-mapping")
+@click.option("--id", "mapping_id", required=True, type=int, help="ID записи test_mappings")
+@click.option("--pattern", default=None, help="Новая фраза")
+@click.option("--test-code", default=None, help="Новый код испытания")
+@click.option("--note", default=None, help="Примечание")
+@click.option("--db", default="data/app.db", show_default=True)
+def update_test_mapping_cmd(
+    mapping_id: int,
+    pattern: str | None,
+    test_code: str | None,
+    note: str | None,
+    db: str,
+) -> None:
+    """Обновляет маппинг по id."""
+    migrate_db(db)
+    try:
+        update_test_mapping(
+            mapping_id,
+            requirement_pattern=pattern,
+            test_code=test_code,
+            note=note,
+            db_path=db,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(click.style(f"✓ Маппинг id={mapping_id} обновлён", fg="green"))
+
+
+@cli.command("delete-test-mapping")
+@click.option("--id", "mapping_id", required=True, type=int, help="ID записи test_mappings")
+@click.option("--db", default="data/app.db", show_default=True)
+def delete_test_mapping_cmd(mapping_id: int, db: str) -> None:
+    """Удаляет маппинг по id."""
+    migrate_db(db)
+    if not delete_test_mapping(mapping_id, db_path=db):
+        raise click.ClickException(f"Маппинг id={mapping_id} не найден")
+    click.echo(click.style(f"✓ Маппинг id={mapping_id} удалён", fg="green"))
+
+
 @cli.command("list-cable-marks")
 @click.option("--search", default=None, help="Поиск по марке")
 @click.option("--limit", default=50, show_default=True)
@@ -680,7 +731,7 @@ def import_tests(file_path: str, dry_run: bool, sheet: Optional[str]):
     "--subject",
     default="Проведение периодических испытаний",
     show_default=True,
-    help="Предмет коммерческого предложения",
+    help="Вид испытаний для вводной КП (по умолчанию — периодические)",
 )
 @click.option("--calc-ids", required=True, help="ID расчётов через запятую (например: 1,2,3,4)")
 @click.option("--note", default=None, help="Дополнительный текст")
@@ -709,7 +760,7 @@ def generate_kp_cmd(
         out = Path(output_path)
     else:
         safe = re.sub(r'[<>:"/\\|?*]', "", customer)[:40] or "заказчик"
-        from .sqlite_repo import GENERATED_DIR_DEFAULT
+        from .config import GENERATED_DIR_DEFAULT
 
         out = GENERATED_DIR_DEFAULT / f"КП_{safe}.docx"
 
@@ -834,7 +885,7 @@ def list_orders_cmd(limit: int, db: str) -> None:
 @cli.command("gui")
 def gui_cmd() -> None:
     """Запускает графический интерфейс (tkinter)."""
-    from .gui import main
+    from .ui.gui import main
 
     main()
 

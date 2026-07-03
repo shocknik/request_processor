@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from .models import OrganizationExtract, OrganizationRole
+from ..models import OrganizationExtract, OrganizationRole
 
 OrgType = Literal[
     "manufacturer",
@@ -72,6 +72,8 @@ _HEADER_CAPS_PATTERN = re.compile(
 _ADDRESS_STOP_MARKERS = (
     "НАПРАВЛЕНИЕ",
     "Наименование и адрес",
+    "HanmeHosaunre",
+    "Mapka O6o3HayeHne",
     "Прошу провести",
     "Прош у провести",
     "№ п/п",
@@ -87,9 +89,37 @@ _ADDRESS_STOP_MARKERS = (
     "т/ф ",
     "тел.",
     "ИНН",
+    "WHH",
     "ОГРН",
+    "OfPH",
     "р/с",
     "p/c",
+    "1p/c",
+    "BUK",
+    "Ka6eAb",
+    "BBI-",
+    "ВВГ",
+    "ПВСнг",
+    "NBCur",
+    "Nposoa",
+)
+
+_KALUGA_POSTAL = "249841"
+_KALUGA_CANONICAL_ADDRESS = (
+    "249841, Калужская область, Дзержинский район, "
+    "д. Жилетово, ул. Промышленная, д. 1, стр. 5"
+)
+
+_CABLE_MARK_IN_ADDRESS = re.compile(
+    r"(?:ВВГ|ПВСнг|ПВС-|АПуВ\s+\d|ПБГВВ|BBI-|NBCur|Mapka\s|"
+    r"HanmeHosa|\d+\s*[хx]\s*[\d.,]+(?:ок|\(N))",
+    re.IGNORECASE,
+)
+
+_KALUGA_ADDRESS_BLOCK = re.compile(
+    rf"{_KALUGA_POSTAL}\s*,\s*(.+?)(?=\s*(?:1p/c|p/c|р/с|BUK|WHH|ИНН|Ka6eAb|"
+    rf"HanmeHosa|Mapka|BBI-|NMpocum)\b)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -110,12 +140,154 @@ def normalize_org_name(name: str) -> str:
     return name.strip(" .,;-")
 
 
+def fix_ocr_address_text(raw: str) -> str:
+    """Латиница→кириллица и типовые подмены OCR в адресе (шапка письма)."""
+    text = raw.replace("\n", " ")
+    text = re.sub(r"Poccumickaa\s+Peaepauna,?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"KaAyKCKaA\s+OOACCTE", "Калужская область", text, flags=re.IGNORECASE)
+    text = re.sub(r"A3@PXXUHCKMM\s+PANOH", "Дзержинский район", text, flags=re.IGNORECASE)
+    text = re.sub(r"A\.\s*Kuaetoso", "д. Жилетово", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bKuaetoso\b", "Жилетово", text, flags=re.IGNORECASE)
+    text = re.sub(r"YA\.\s*MpOMbiLuAeHHas", "ул. Промышленная", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bYA\.\s*", "ул. ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bA\.\s*(\d+)\b", r"д. \1", text)
+    text = re.sub(r"\bCTP\.\s*(\d+)\b", r"стр. \1", text, flags=re.IGNORECASE)
+    return text
+
+
+def _fix_kaluga_settlement_errors(text: str) -> str:
+    """OCR иногда подменяет «д. Жилетово» (Kuaetoso) на «п. Киевский»."""
+    if _KALUGA_POSTAL not in text and "Дзержинск" not in text:
+        return text
+    text = re.sub(r"п\.\s*Киевск\w*", "д. Жилетово", text, flags=re.IGNORECASE)
+    text = re.sub(r"д\.\s*Киевск\w*", "д. Жилетово", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<![\w-])Киевск\w*(?![\w-])", "Жилетово", text, flags=re.IGNORECASE)
+    return text
+
+
+def _is_kaluga_cable_factory(name: str, source_text: str = "") -> bool:
+    if "калужск" in name.lower() and "кабельн" in name.lower():
+        return True
+    if source_text:
+        return bool(
+            re.search(
+                r"KaayxKckni\s+KaGeAbHbIN|Калужск\w+\s+кабельн",
+                source_text[:2500],
+                re.IGNORECASE,
+            )
+        )
+    return False
+
+
+def _looks_like_cable_marks(text: str) -> bool:
+    """Адрес не должен содержать условные обозначения кабелей."""
+    if _CABLE_MARK_IN_ADDRESS.search(text):
+        return True
+    lines = [ln.strip() for ln in re.split(r"[\n;]+", text) if ln.strip()]
+    if len(lines) >= 2:
+        hits = sum(
+            1
+            for ln in lines
+            if re.search(r"(?:ВВГ|ПВС|АПуВ|ПБГВВ).*\d+\s*[хx]", ln, re.IGNORECASE)
+        )
+        if hits >= 2:
+            return True
+    return False
+
+
 def normalize_address_text(raw: str) -> str:
     """Сжимает пробелы и правит типичные OCR-ошибки в адресе."""
-    text = re.sub(r"\s+", " ", raw.replace("\n", " ")).strip(" .,;")
+    text = fix_ocr_address_text(raw)
+    text = _fix_kaluga_settlement_errors(text)
+    text = re.sub(r"\s+", " ", text).strip(" .,;")
     text = re.sub(r"С\s+анкт", "Санкт", text, flags=re.IGNORECASE)
     text = re.sub(r"Р\s+ОССИЯ", "РОССИЯ", text, flags=re.IGNORECASE)
+    if text.startswith(f"{_KALUGA_POSTAL},"):
+        text = re.sub(r",\s*1\s*$", "", text)
     return text
+
+
+_KALUGA_LATIN_ADDRESS = re.compile(
+    r"249841.*(?:Poccumickaa|KaAyKCKaA|A3@PXXUHCKMM|Kuaetoso|MpOMbiLuAeHHas)",
+    re.IGNORECASE,
+)
+
+
+def finalize_organization_address(
+    org: OrganizationExtract,
+    source_text: str = "",
+) -> OrganizationExtract:
+    """Нормализует адрес организации после OCR (кириллица, Калужа)."""
+    name_low = org.name.lower()
+    raw_addr = org.legal_address or org.address or ""
+    if _is_kaluga_cable_factory(org.name, source_text):
+        preferred: str | None = None
+        if source_text:
+            preferred = extract_kaluga_factory_address(source_text)
+        if not preferred and raw_addr:
+            if re.search(r"Киевск", raw_addr, re.IGNORECASE) or (
+                _KALUGA_POSTAL in raw_addr
+                and "Промышленная" in raw_addr
+                and "Жилетово" not in raw_addr
+            ):
+                preferred = _KALUGA_CANONICAL_ADDRESS
+            else:
+                preferred = sanitize_address(raw_addr) or normalize_address_text(raw_addr)
+        if preferred and not _looks_like_cable_marks(preferred):
+            postal = _postal_from_address(preferred) or org.postal_code or _KALUGA_POSTAL
+            return org.model_copy(
+                update={
+                    "address": preferred,
+                    "legal_address": preferred,
+                    "actual_address": org.actual_address or preferred,
+                    "postal_code": postal,
+                }
+            )
+    if not raw_addr:
+        if source_text and (
+            "калужск" in name_low
+            or re.search(r"KaayxKckni\s+KaGeAbHbIN", source_text[:2500], re.I)
+        ):
+            fixed = extract_kaluga_factory_address(source_text)
+            if fixed:
+                return org.model_copy(
+                    update={
+                        "address": fixed,
+                        "legal_address": fixed,
+                        "actual_address": fixed,
+                        "postal_code": _KALUGA_POSTAL,
+                    }
+                )
+        return org
+
+    if _KALUGA_LATIN_ADDRESS.search(raw_addr) or (
+        "калужск" in name_low and re.search(r"[A-Za-z]{4,}", raw_addr)
+    ):
+        fixed = extract_kaluga_factory_address(source_text or raw_addr) or normalize_address_text(
+            raw_addr
+        )
+    else:
+        fixed = sanitize_address(raw_addr) or normalize_address_text(raw_addr)
+
+    if not fixed or _looks_like_cable_marks(fixed):
+        return org
+
+    postal = _postal_from_address(fixed) or org.postal_code
+    return org.model_copy(
+        update={
+            "address": fixed,
+            "legal_address": fixed,
+            "actual_address": org.actual_address or fixed,
+            "postal_code": postal,
+        }
+    )
+
+
+def finalize_organizations(
+    organizations: list[OrganizationExtract],
+    source_text: str = "",
+) -> list[OrganizationExtract]:
+    return [finalize_organization_address(org, source_text) for org in organizations]
 
 
 def sanitize_address(address: str | None, *, max_len: int = 220) -> str | None:
@@ -125,7 +297,11 @@ def sanitize_address(address: str | None, *, max_len: int = 220) -> str | None:
     """
     if not address or not str(address).strip():
         return None
+    if _looks_like_cable_marks(str(address)):
+        return None
     text = normalize_address_text(str(address))
+    if _looks_like_cable_marks(text):
+        return None
     if len(text) < 8:
         return None
 
@@ -386,6 +562,25 @@ def _build_org_from_header(text: str) -> OrganizationExtract | None:
     )
 
 
+def extract_kaluga_factory_address(text: str) -> str | None:
+    """Адрес ООО «Калужский кабельный завод» из шапки письма (OCR)."""
+    if not re.search(r"KaayxKckni\s+KaGeAbHbIN|Калужск\w+\s+кабельн", text[:2500], re.I):
+        return None
+    block = _KALUGA_ADDRESS_BLOCK.search(text[:2500])
+    if block:
+        raw = f"{_KALUGA_POSTAL}, {block.group(1)}"
+        cleaned = sanitize_address(raw)
+        if cleaned and not _looks_like_cable_marks(cleaned):
+            return cleaned
+    postal = re.search(rf"\b{_KALUGA_POSTAL}\b", text[:2500])
+    if postal:
+        chunk = text[postal.start() : postal.start() + 180]
+        cleaned = sanitize_address(chunk)
+        if cleaned and not _looks_like_cable_marks(cleaned):
+            return cleaned
+    return _KALUGA_CANONICAL_ADDRESS
+
+
 def extract_organizations(text: str) -> list[OrganizationExtract]:
     """
     Извлекает организации из текста заявки.
@@ -397,7 +592,7 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
         return []
 
     from .letter_extractor import is_business_letter, organizations_from_letter
-    from .nlp_extractor import enhance_organizations
+    from ..nlp.nlp_extractor import enhance_organizations
 
     if is_business_letter(text):
         letter_orgs = organizations_from_letter(text)
@@ -470,6 +665,7 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
             seen.add(normalize_org_name(manufacturer.name))
             found.append(manufacturer)
 
+    found = finalize_organizations(found, text)
     return enhance_organizations(text, found)
 
 

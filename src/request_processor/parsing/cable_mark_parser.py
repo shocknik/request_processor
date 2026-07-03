@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from .models import CableMark, CableMarkMatch, CableMarkRecord, FieldStatus, MarkValidation
+from ..models import CableMark, CableMarkMatch, CableMarkRecord, FieldStatus, MarkValidation
 
 _FIRE_PATTERNS = [
     r"нг\(А\)-LSLTx",
