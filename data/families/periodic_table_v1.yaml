@@ -1,0 +1,37 @@
+id: kaluga_periodic_v1
+display_name: Письмо на периодические испытания (таблица Калуга)
+document_type: letter_periodic
+priority: 10
+enabled: true
+min_marks_threshold: 3
+confidence_threshold: 0.85
+
+sender_patterns:
+  - "калужск\\w+\\s+кабельн"
+  - "KaayxKckni\\s+KaGeAbHbIN"
+
+detection:
+  markers:
+    - "периодическ"
+    - "Nnepuoauyeckie"
+    - "NMpocum\\s+Bac\\s+nprovectm"
+  table_hints:
+    - "(?:13[хx×]4ок\\s*\\(N|[1-4]\\s+(?:ПВСнг|NBCur|АПуВ|AllyB|ПБГВВ|NBIBB))"
+
+mark_patterns:
+  - kind: cable
+    pattern: "(?:Кабель\\s+силовой\\s+марк[аи]:|BBI-MHr\\(A\\)|ВВГнг\\(А\\))\\s*((?:ВВГнг\\(А\\)\\s*)?3[хx×]?4ок\\s*\\(N,?\\s*PE\\)-0,66)"
+  - kind: wire
+    pattern: "(ПВСнг\\(А\\)-LS\\s*3[хx×]?2,50|NBCur\\(A\\)-LS\\s*3x2,50)"
+  - kind: product
+    pattern: "Провод\\s+марк[аи]\\s+(АПуВ\\s*1[хx×]?6|AllyB\\s*1x6|ПБГВВ\\s*2[хx×]?1,5|NBIBB\\s*2x1,5)"
+
+row_sort:
+  - pattern: "4ок.*\\(n"
+    priority: 1
+  - pattern: "пвс"
+    priority: 2
+  - pattern: "апув"
+    priority: 3
+  - pattern: "пбгвв"
+    priority: 4

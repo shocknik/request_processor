@@ -22,6 +22,7 @@ from ..config import OCR_CACHE_DIR
 from ..parsing.cable_mark_parser import extract_document_from_text, fix_ocr_document_text
 from ..assistant.mark_corrector import suggest_mark_correction
 from ..models import CableMarkMatch, PdfExtractionResult
+from .ocr_text_normalizer import normalize_ocr_text
 from .organization_extractor import (
     extract_organizations,
     finalize_organizations,
@@ -217,19 +218,7 @@ def _fix_periodic_letter_ocr(text: str) -> str:
 
 def _fix_ocr_confusables(text: str) -> str:
     """Исправляет типичные OCR-ошибки перед поиском марок и ТУ."""
-    text = fix_ocr_document_text(text)
-    text = _fix_speclan_letter_ocr(text)
-    text = _fix_periodic_letter_ocr(text)
-    text = re.sub(r"(?<=[А-ЯЁA-Zа-яё])l(?=[хx×]|\d)", "1", text)
-    text = re.sub(r"(?<=[А-ЯЁA-Zа-яё])I(?=[хx×]|\d)", "1", text)
-    text = re.sub(r"\bl(?=[хx×]\s*[\d.,])", "1", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bI(?=[хx×]\s*[\d.,])", "1", text)
-    text = re.sub(r"\bЗ\s*х\b", "3х", text, flags=re.IGNORECASE)
-    text = re.sub(r"(\d+)\s*х\s*ок\b", r"\1х4ок", text, flags=re.IGNORECASE)
-    text = re.sub(r"N;\s*PE", "(N,PE)", text, flags=re.IGNORECASE)
-    text = re.sub(r"\)J\b", ")", text)
-    text = re.sub(r"PEJ", "PE)", text, flags=re.IGNORECASE)
-    return text
+    return normalize_ocr_text(text)
 
 
 def is_plausible_mark(mark: str) -> bool:
@@ -548,7 +537,7 @@ def ocr_pdf(
         cached = _read_ocr_cache(path, dpi, engine)
         if cached is not None:
             logger.debug("OCR cache hit: %s (%s, dpi=%d)", path.name, engine, dpi)
-            return cached
+            return normalize_ocr_text(cached)
 
     text = ""
     if engine == "tesseract":
@@ -570,6 +559,9 @@ def ocr_pdf(
             raise RuntimeError(
                 "Для сканов нужен OCR. Установи Tesseract (rus) или: pip install easyocr"
             ) from exc
+
+    if text.strip():
+        text = normalize_ocr_text(text)
 
     if use_cache and text.strip():
         _write_ocr_cache(path, dpi, engine, text)
@@ -740,6 +732,23 @@ def extract_text_from_docx(docx_path: Path | str) -> str:
     return "\n".join(parts)
 
 
+def extract_tables_from_docx(docx_path: Path | str) -> list[list[list[str]]]:
+    """Таблицы Word в том же формате, что pdfplumber — для table-first направлений."""
+    from docx import Document
+
+    path = Path(docx_path)
+    doc = Document(str(path))
+    tables: list[list[list[str]]] = []
+    for table in doc.tables:
+        cleaned = [
+            [cell.text.strip() for cell in row.cells]
+            for row in table.rows
+        ]
+        if any(any(cell for cell in row) for row in cleaned):
+            tables.append(cleaned)
+    return tables
+
+
 def _build_extraction_result(
     *,
     source_path: Path,
@@ -795,9 +804,11 @@ def extract_from_document(
         )
     if suffix == ".docx":
         text = extract_text_from_docx(file_path)
+        tables = extract_tables_from_docx(file_path)
         return _build_extraction_result(
             source_path=file_path,
             source_type="docx",
             text=text,
+            tables=tables,
         )
     raise ValueError(f"Неподдерживаемый формат: {suffix}. Используйте PDF или .docx")

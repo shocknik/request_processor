@@ -30,6 +30,8 @@ env/
 data/
 !data/templates/
 !data/templates/**
+!data/families/
+!data/families/**
 output/
 *.db
 *.sqlite

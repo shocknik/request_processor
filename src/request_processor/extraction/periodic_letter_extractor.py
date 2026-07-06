@@ -35,7 +35,17 @@ def is_periodic_letter(text: str) -> bool:
     if not text:
         return False
     head = text[:4000]
-    return bool(_PERIODIC_MARKER.search(head) or _KALUGA_TABLE_HINT.search(head))
+    if _PERIODIC_MARKER.search(head) or _KALUGA_TABLE_HINT.search(head):
+        return True
+    try:
+        from .families.registry import get_family_registry
+
+        family = get_family_registry().get("kaluga_periodic_v1")
+        if family and family.is_confident_match(text):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _clean_periodic_mark(raw: str) -> str:

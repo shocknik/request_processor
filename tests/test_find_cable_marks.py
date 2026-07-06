@@ -7,6 +7,7 @@ import re
 import pytest
 
 from request_processor.extraction.pdf_extractor import _resolve_cable_marks, find_cable_marks
+from request_processor.parsing.cable_mark_parser import _safe_float, parse_cable_mark
 
 from tests.fixture_loader import EXTRACTED_DIR, load_extraction_fixture
 
@@ -93,3 +94,14 @@ def test_all_fixture_json_files_parseable() -> None:
         result = load_extraction_fixture(path.name)
         marks = _marks_from_result(result)
         assert isinstance(marks, list)
+
+
+def test_safe_float_trailing_dot() -> None:
+    assert _safe_float("1.5.") == 1.5
+    assert _safe_float("2,5") == 2.5
+
+
+def test_parse_cable_mark_lan_size_with_trailing_dot() -> None:
+    parsed = parse_cable_mark("КМВЭВнг(А)-LS 1х2x1,5")
+    assert parsed.size == 1.5
+    assert parsed.groups == 1

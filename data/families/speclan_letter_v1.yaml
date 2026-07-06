@@ -1,0 +1,34 @@
+id: speclan_letter_v1
+display_name: Гарантийное письмо Спецкабель (LAN Cat5e)
+document_type: letter_list
+priority: 20
+enabled: true
+min_marks_threshold: 2
+confidence_threshold: 0.70
+
+sender_patterns:
+  - "спецкабель"
+  - "Cneukabel"
+  - "spetskabel"
+
+detection:
+  markers:
+    - "гарантийн"
+    - "TapaHTuiHoe\\s+nucbmMo"
+    - "Mapkax?\\s+Kabena?"
+  brand_hints:
+    - "СПЕЦЛАН"
+    - "CMELVIAH"
+    - "SPECLAN"
+
+mark_patterns:
+  - kind: lan_list
+    pattern: "(?:\\d+\\.\\s*)?(?:СПЕЦЛАН|CMELVIAH|SPECLAN)\\s+(?:SF?/)?UTP\\s+Cat\\s+5\\w\\s+ZH\\s+(?:нг|ur|Hr)\\s*\\(\\s*A\\s*\\)-HF\\s+\\d+\\s*x\\s*\\d+(?:\\s*x\\s*[\\d.,]+)?"
+
+ocr_phrase_fixes:
+  - pattern: "\\b(?:CMELVIAH|CMELAN|SPECLAN)\\b"
+    replacement: "СПЕЦЛАН"
+  - pattern: "\\bMapkax?\\s+Kabena?\\b"
+    replacement: "Марках кабеля"
+  - pattern: "TapaHTuiHoe\\s+nucbmMo"
+    replacement: "Гарантийное письмо"

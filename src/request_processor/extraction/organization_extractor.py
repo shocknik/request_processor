@@ -142,17 +142,9 @@ def normalize_org_name(name: str) -> str:
 
 def fix_ocr_address_text(raw: str) -> str:
     """Латиница→кириллица и типовые подмены OCR в адресе (шапка письма)."""
-    text = raw.replace("\n", " ")
-    text = re.sub(r"Poccumickaa\s+Peaepauna,?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"KaAyKCKaA\s+OOACCTE", "Калужская область", text, flags=re.IGNORECASE)
-    text = re.sub(r"A3@PXXUHCKMM\s+PANOH", "Дзержинский район", text, flags=re.IGNORECASE)
-    text = re.sub(r"A\.\s*Kuaetoso", "д. Жилетово", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bKuaetoso\b", "Жилетово", text, flags=re.IGNORECASE)
-    text = re.sub(r"YA\.\s*MpOMbiLuAeHHas", "ул. Промышленная", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bYA\.\s*", "ул. ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bA\.\s*(\d+)\b", r"д. \1", text)
-    text = re.sub(r"\bCTP\.\s*(\d+)\b", r"стр. \1", text, flags=re.IGNORECASE)
-    return text
+    from .ocr_text_normalizer import normalize_ocr_text
+
+    return normalize_ocr_text(raw.replace("\n", " "))
 
 
 def _fix_kaluga_settlement_errors(text: str) -> str:

@@ -14,6 +14,7 @@ $dirs = @(
     "data/training/rag_corpus/protocols",
     "data/training/rag_corpus/gost",
     "data/training/rag_corpus/internal",
+    "data/training/rag_corpus/pmi",
     "data/training/exports/jsonl",
     "data/training/exports/reports",
     "data/families"

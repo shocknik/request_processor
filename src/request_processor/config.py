@@ -13,8 +13,17 @@ TEMPLATES_DIR = DATA_DIR / "templates"
 GENERATED_DIR = DATA_DIR / "generated"
 EXTRACTED_DIR = DATA_DIR / "extracted"
 OCR_CACHE_DIR = DATA_DIR / "ocr_cache"
+TRAINING_DIR = DATA_DIR / "training"
+FAMILIES_DIR = DATA_DIR / "families"
+RAG_CORPUS_DIR = TRAINING_DIR / "rag_corpus"
+TRAINING_INBOX = TRAINING_DIR / "documents" / "inbox"
+TRAINING_REGISTERED = TRAINING_DIR / "documents" / "registered"
+TRAINING_CORRECTIONS_DIR = TRAINING_DIR / "corrections"
 DB_PATH_DEFAULT = DATA_DIR / "app.db"
 TOOLS_DIR = PROJECT_ROOT / "tools"
+
+# Шаблоны документов (заявка, протокол испытаний)
+PROTOCOL_TEMPLATE_NAME = "Форма Протокола испытаний (2025).docx"
 
 # Алиасы для обратной совместимости (sqlite_repo, cli, gui)
 GENERATED_DIR_DEFAULT = GENERATED_DIR

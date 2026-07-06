@@ -386,9 +386,120 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
         )
     _migrate_orders_columns(db_path)
     _migrate_organizations_columns(db_path)
+    _migrate_training_tables(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
     sync_default_test_mappings(db_path)
+
+
+def _migrate_training_tables(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """Таблицы обучения и RAG (мастер-план 35c, Фаза 1)."""
+    with get_connection(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS training_documents (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path       TEXT NOT NULL UNIQUE,
+                file_hash       TEXT NOT NULL,
+                file_name       TEXT NOT NULL,
+                mime_type       TEXT,
+                page_count      INTEGER,
+                document_type   TEXT,
+                document_family TEXT,
+                source          TEXT DEFAULT 'operator',
+                label_status    TEXT DEFAULT 'unlabeled',
+                notes           TEXT,
+                registered_at   TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_training_docs_type ON training_documents(document_type);
+            CREATE INDEX IF NOT EXISTS idx_training_docs_label ON training_documents(label_status);
+            CREATE INDEX IF NOT EXISTS idx_training_docs_hash ON training_documents(file_hash);
+
+            CREATE TABLE IF NOT EXISTS training_labels (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id     INTEGER NOT NULL REFERENCES training_documents(id),
+                label_type      TEXT NOT NULL,
+                label_version   INTEGER DEFAULT 1,
+                payload_json    TEXT NOT NULL,
+                labeled_by      TEXT DEFAULT 'operator',
+                created_at      TEXT NOT NULL,
+                is_active       INTEGER DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_training_labels_doc
+                ON training_labels(document_id, label_type);
+
+            CREATE TABLE IF NOT EXISTS document_families (
+                id              TEXT PRIMARY KEY,
+                display_name    TEXT NOT NULL,
+                document_type   TEXT NOT NULL,
+                config_path     TEXT NOT NULL,
+                sender_patterns TEXT,
+                enabled         INTEGER DEFAULT 1,
+                priority        INTEGER DEFAULT 100,
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ocr_runs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id     INTEGER REFERENCES training_documents(id),
+                source_path     TEXT NOT NULL,
+                engine          TEXT NOT NULL,
+                dpi             INTEGER,
+                preprocess      TEXT,
+                page_count      INTEGER,
+                mean_confidence REAL,
+                duration_ms     INTEGER,
+                cache_path      TEXT,
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS training_corrections (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id     INTEGER REFERENCES training_documents(id),
+                field_name      TEXT NOT NULL,
+                original_value  TEXT,
+                corrected_value TEXT,
+                mark_context    TEXT,
+                exported_from   TEXT,
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_documents (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                title           TEXT NOT NULL,
+                doc_kind        TEXT NOT NULL,
+                file_path       TEXT,
+                text_length     INTEGER,
+                chunk_count     INTEGER DEFAULT 0,
+                indexed_at      TEXT,
+                metadata_json   TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_path
+                ON rag_documents(file_path);
+
+            CREATE TABLE IF NOT EXISTS rag_chunks (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                rag_document_id INTEGER NOT NULL REFERENCES rag_documents(id),
+                chunk_index     INTEGER NOT NULL,
+                chunk_text      TEXT NOT NULL,
+                embedding_blob  BLOB,
+                UNIQUE(rag_document_id, chunk_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS assistant_sessions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id        INTEGER,
+                document_id     INTEGER,
+                role            TEXT,
+                message         TEXT NOT NULL,
+                response        TEXT,
+                model           TEXT,
+                feedback        TEXT,
+                created_at      TEXT NOT NULL
+            );
+            """
+        )
 
 
 def _migrate_orders_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:

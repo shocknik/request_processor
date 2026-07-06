@@ -38,6 +38,12 @@ _DOC_PATTERN = re.compile(
 )
 
 
+def _safe_float(value: str) -> float:
+    """Парсит число из фрагмента марки; «1.5.» и «2,5» — типичные OCR-хвосты."""
+    cleaned = value.strip().rstrip(".").replace(",", ".")
+    return float(cleaned)
+
+
 def _detect_fire_class(mark: str) -> str | None:
     for pattern in _FIRE_PATTERNS:
         if match := re.search(pattern, mark, re.IGNORECASE):
@@ -67,7 +73,7 @@ def _extract_numbers(mark: str) -> dict[str, Any]:
     if m := re.search(r"(\d+)\s*[зЗ]\s*х\s*(\d+)\s*х\s*([\d.]+)", s):
         groups = int(m.group(1))
         per_group = int(m.group(2))
-        size = float(m.group(3))
+        size = _safe_float(m.group(3))
         result.update(
             {
                 "groups": groups,
@@ -82,7 +88,7 @@ def _extract_numbers(mark: str) -> dict[str, Any]:
     if m := re.search(r"(\d+)\s*х\s*\(\s*(\d+)\s*х\s*([\d.]+)\s*\)", s):
         groups = int(m.group(1))
         per_group = int(m.group(2))
-        size = float(m.group(3))
+        size = _safe_float(m.group(3))
         result.update(
             {
                 "groups": groups,
@@ -97,7 +103,7 @@ def _extract_numbers(mark: str) -> dict[str, Any]:
     if m := re.search(r"(\d+)\s*х\s*(\d+)\s*х\s*([\d.]+)", s):
         groups = int(m.group(1))
         per_group = int(m.group(2))
-        size = float(m.group(3))
+        size = _safe_float(m.group(3))
         result.update(
             {
                 "groups": groups,
@@ -113,7 +119,7 @@ def _extract_numbers(mark: str) -> dict[str, Any]:
 
     if m := re.search(r"(\d+)\s*[зЗ]?\s*х\s*([\d.]+)", s):
         cores = int(m.group(1))
-        size = float(m.group(2))
+        size = _safe_float(m.group(2))
         result.update(
             {
                 "cores": cores,
@@ -176,7 +182,7 @@ def parse_cable_mark(mark: str) -> CableMark:
     voltage = None
     if m := re.search(r"[-–]?\s*(\d[.,]?\d*)\s*(кВ)?", original):
         try:
-            voltage = float(m.group(1).replace(",", "."))
+            voltage = _safe_float(m.group(1))
             if voltage > 100:
                 voltage /= 1000
         except ValueError:

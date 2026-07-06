@@ -882,6 +882,180 @@ def list_orders_cmd(limit: int, db: str) -> None:
         )
 
 
+@cli.command("ingest-training-doc")
+@click.option("--file", "file_path", required=True, type=click.Path(exists=True))
+@click.option("--type", "document_type", default=None, help="letter_periodic, direction_il, …")
+@click.option("--family", "document_family", default=None, help="kaluga_periodic_v1, speclan_letter_v1, …")
+@click.option("--keep-in-place", is_flag=True, help="Не переносить из inbox в registered/")
+@click.option("--skip-extract", is_flag=True, help="Только регистрация в БД, без extract_from_document")
+@click.option("--db", default="data/app.db", show_default=True)
+def ingest_training_doc_cmd(
+    file_path: str,
+    document_type: Optional[str],
+    document_family: Optional[str],
+    keep_in_place: bool,
+    skip_extract: bool,
+    db: str,
+) -> None:
+    """Регистрирует документ в training_documents (Фаза 1)."""
+    from .persistence.training_repo import ingest_training_document
+
+    migrate_db(db)
+    doc = ingest_training_document(
+        Path(file_path),
+        document_type=document_type,
+        document_family=document_family,
+        move_to_registered=not keep_in_place,
+        run_extract=not skip_extract,
+        db_path=db,
+    )
+    click.echo(
+        f"✓ training_documents id={doc['id']}  {doc['file_name']}  "
+        f"type={doc.get('document_type') or '—'}  family={doc.get('document_family') or '—'}"
+    )
+
+
+@cli.command("ingest-training-inbox")
+@click.option("--keep-in-place", is_flag=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def ingest_training_inbox_cmd(keep_in_place: bool, db: str) -> None:
+    """Пакетный ingest всех PDF/DOCX из data/training/documents/inbox/."""
+    from .persistence.training_repo import ingest_inbox_batch, seed_document_families
+
+    migrate_db(db)
+    seed_document_families(db_path=db)
+    stats = ingest_inbox_batch(move_to_registered=not keep_in_place, db_path=db)
+    click.echo(f"OK: {stats['ok']}  FAIL: {stats['fail']}")
+
+
+@cli.command("import-label")
+@click.option("--document-id", required=True, type=int)
+@click.option("--file", "label_file", required=True, type=click.Path(exists=True))
+@click.option(
+    "--type",
+    "label_type",
+    default=None,
+    type=click.Choice(["marks", "organizations", "requirements", "ocr_page", "full_json"]),
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def import_label_cmd(
+    document_id: int,
+    label_file: str,
+    label_type: Optional[str],
+    db: str,
+) -> None:
+    """Импортирует JSON-разметку в training_labels."""
+    from .persistence.training_repo import import_label_file
+
+    migrate_db(db)
+    label_id = import_label_file(
+        document_id,
+        Path(label_file),
+        label_type=label_type,  # type: ignore[arg-type]
+        db_path=db,
+    )
+    click.echo(f"✓ training_labels id={label_id} для document_id={document_id}")
+
+
+@cli.command("sync-corrections")
+@click.option("--dir", "corrections_dir", default=None, type=click.Path())
+@click.option("--db", default="data/app.db", show_default=True)
+def sync_corrections_cmd(corrections_dir: Optional[str], db: str) -> None:
+    """Синхронизирует data/training/corrections/*.jsonl → training_corrections."""
+    from .persistence.training_repo import sync_corrections_from_dir
+
+    migrate_db(db)
+    stats = sync_corrections_from_dir(
+        Path(corrections_dir) if corrections_dir else None,
+        db_path=db,
+    )
+    click.echo(f"Файлов: {stats['files']}  строк: {stats['rows']}  пропущено: {stats['skipped']}")
+
+
+@cli.command("index-rag")
+@click.option(
+    "--folder",
+    required=True,
+    type=click.Path(exists=True),
+    help="Папка корпуса (tu, protocols, pmi, gost, templates)",
+)
+@click.option(
+    "--kind",
+    "doc_kind",
+    default=None,
+    type=click.Choice(["tu", "protocol", "gost", "method", "pmi", "internal", "template"]),
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def index_rag_cmd(folder: str, doc_kind: Optional[str], db: str) -> None:
+    """Регистрирует файлы корпуса в rag_documents (без embeddings — Фаза 4)."""
+    from .persistence.training_repo import index_rag_folder
+
+    migrate_db(db)
+    stats = index_rag_folder(
+        Path(folder),
+        doc_kind=doc_kind,  # type: ignore[arg-type]
+        db_path=db,
+    )
+    click.echo(f"Проиндексировано: {stats['indexed']}  пропущено: {stats['skipped']}")
+
+
+@cli.command("seed-training")
+@click.option("--db", default="data/app.db", show_default=True)
+def seed_training_cmd(db: str) -> None:
+    """Семейства YAML → document_families; эталоны data/extracted → training."""
+    from .persistence.training_repo import import_extracted_fixtures, seed_document_families
+
+    migrate_db(db)
+    families = seed_document_families(db_path=db)
+    fixture_ids = import_extracted_fixtures(db_path=db)
+    click.echo(f"Семейств: {families}  эталонов JSON: {len(fixture_ids)}")
+
+
+@cli.command("list-training-docs")
+@click.option("--status", "label_status", default=None)
+@click.option("--limit", default=30, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_training_docs_cmd(label_status: Optional[str], limit: int, db: str) -> None:
+    """Список training_documents."""
+    from .persistence.training_repo import list_training_documents
+
+    migrate_db(db)
+    rows = list_training_documents(label_status=label_status, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Нет документов.")
+        return
+    for row in rows:
+        click.echo(
+            f"{row['id']:>4}  {row['label_status']:10}  "
+            f"{(row.get('document_type') or '—'):12}  {row['file_name']}"
+        )
+
+
+@cli.command("list-rag")
+@click.option(
+    "--kind",
+    "doc_kind",
+    default=None,
+    type=click.Choice(["tu", "protocol", "gost", "pmi", "internal", "template"]),
+)
+@click.option("--limit", default=40, show_default=True)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_rag_cmd(doc_kind: Optional[str], limit: int, db: str) -> None:
+    """Список rag_documents (корпус ТУ/ГОСТ/ПМИ/протоколы)."""
+    from .persistence.training_repo import list_rag_documents
+
+    migrate_db(db)
+    rows = list_rag_documents(doc_kind=doc_kind, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Корпус пуст. Запустите: index-rag --folder data/training/rag_corpus")
+        return
+    for row in rows:
+        click.echo(
+            f"{row['id']:>4}  {row['doc_kind']:10}  "
+            f"{(row.get('title') or '—')[:45]:45}  {row.get('file_path') or ''}"
+        )
+
+
 @cli.command("gui")
 def gui_cmd() -> None:
     """Запускает графический интерфейс (tkinter)."""
