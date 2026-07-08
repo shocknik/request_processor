@@ -11,7 +11,12 @@ from request_processor.ui.gui import RequestProcessorApp
 
 @pytest.fixture
 def gui_app(tmp_path):
-    app = RequestProcessorApp(db_path=tmp_path / "smoke.db")
+    try:
+        app = RequestProcessorApp(db_path=tmp_path / "smoke.db")
+    except Exception as exc:
+        if exc.__class__.__name__ == "TclError":
+            pytest.skip(f"tkinter недоступен: {exc}")
+        raise
     app.withdraw()
     yield app
     app.destroy()

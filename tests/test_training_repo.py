@@ -10,10 +10,12 @@ import pytest
 from request_processor.persistence.sqlite_repo import init_db
 from request_processor.persistence.training_repo import (
     add_training_label,
+    import_label_file,
     index_rag_folder,
     list_training_documents,
     register_rag_document,
     register_training_document,
+    resolve_document_id_for_label,
     seed_document_families,
     sync_corrections_from_dir,
 )
@@ -78,3 +80,35 @@ def test_register_rag_pmi_kind(training_db: Path, tmp_path: Path) -> None:
     doc.write_bytes(b"docx")
     row = register_rag_document(doc, doc_kind="pmi", title="ПМИ ВВГ", db_path=training_db)
     assert row["doc_kind"] == "pmi"
+
+
+def test_resolve_document_id_by_source_file(training_db: Path, tmp_path: Path) -> None:
+    sample = tmp_path / "исх 163.PDF"
+    sample.write_bytes(b"%PDF-1.4")
+    doc = register_training_document(sample, db_path=training_db)
+    payload = {"source_file": sample.name, "marks_expected": [{"mark": "ВВГ 3х2,5"}]}
+    resolved = resolve_document_id_for_label(payload, tmp_path / "исх 163.json", db_path=training_db)
+    assert resolved == int(doc["id"])
+
+
+def test_import_label_auto_document_id(training_db: Path, tmp_path: Path) -> None:
+    sample = tmp_path / "letter.pdf"
+    sample.write_bytes(b"%PDF-1.4")
+    doc = register_training_document(sample, db_path=training_db)
+    label_path = tmp_path / "labels" / "marks" / "letter.json"
+    label_path.parent.mkdir(parents=True)
+    label_path.write_text(
+        json.dumps(
+            {
+                "source_file": sample.name,
+                "marks_expected": [{"mark": "ВВГнг(А) 3х2,5"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    label_id = import_label_file(None, label_path, db_path=training_db)
+    assert label_id >= 1
+    rows = list_training_documents(db_path=training_db)
+    assert rows[0]["label_status"] == "partial"
+    assert int(rows[0]["id"]) == int(doc["id"])

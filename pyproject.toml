@@ -29,6 +29,9 @@ dependencies = [
 ocr = [
     "easyocr>=1.7,<2.0",         # запасной OCR без установки Tesseract (PyTorch)
 ]
+cv = [
+    "opencv-python-headless>=4.8,<5.0",  # препроцессинг сканов (Фаза 2)
+]
 nlp = [
     "torch>=2.0,<3.0",           # PyTorch: EasyOCR + NER
     "transformers>=4.40,<5.0",   # NER для уточнения организаций

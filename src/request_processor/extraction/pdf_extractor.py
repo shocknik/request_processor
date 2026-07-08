@@ -92,6 +92,49 @@ _MARK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# КГРвЭСТ 3*35+16/3в+3*2,5 - 1140 (направления СЕРК, звёздочная запись жил)
+_STAR_CORE_MARK_PATTERN = re.compile(
+    r"(КГ[А-ЯЁа-яёA-Za-z]+\s+"
+    r"\d+\*[\d.,]+"
+    r"(?:\+[\d\*\/вВa-zA-Z.,]+)*"
+    r"(?:\s*-\s*1140)?)",
+    re.IGNORECASE,
+)
+
+# FLEXICORE (заявка Флексикор, таблица приложения)
+_FLEXICORE_FIRE = r"нг\([AaАа]\)"
+_FLEXICORE_MARK_PATTERN = re.compile(
+    r"(FLEXICORE(?:®)?\s+"
+    r"(?:"
+    rf"FLAT\s+{_FLEXICORE_FIRE}-LS"
+    r"|Li(?:YY|YCY)"
+    r"|(?:\d+\s+)?(?:H|CH|CY)(?:\s+{_FLEXICORE_FIRE}-(?:LS|HF))?"
+    r"(?:\s+\d+[.,]?\d*\s*/\s*\d+\s*кВ)?"
+    r"|100(?:\s+0,6/1\s*кВ)?(?:\s+{_FLEXICORE_FIRE}-LS(?:\s+0,6/1\s*кВ)?)?"
+    r"|110(?:\s+{_FLEXICORE_FIRE}-LS)?"
+    r"))",
+    re.IGNORECASE,
+)
+_FLEXICORE_TABLE_LINE = re.compile(
+    r"(FLEXICORE(?:®)?\s+[^\n|]{2,90}?)(?=\s*\||\s*ТУ|\n|$)",
+    re.IGNORECASE,
+)
+_H07RN_MARK_PATTERN = re.compile(r"(H07RN-F\s+RU)", re.IGNORECASE)
+
+# VicabFLEX (латиница, направления в ИЛ)
+_VICABFLEX_FIRE = r"нг\([AaАа]\)"
+_VICABFLEX_MARK_PATTERN = re.compile(
+    r"(VicabFLEX\s+"
+    r"\d+\s+"
+    r"(?:CY|СУ)\s+"
+    r"(?:"
+    rf"{_VICABFLEX_FIRE}-LS\s+\d+\s*[xх]\s*[\d.,]+(?:\s*\d+/\d+\s*В)?"
+    r"|"
+    r"\d+[.,]?\d*\s*/\s*\d+\s*кВ\s+\d+\s*[xх]\s*[\d.,]+(?:\s*\d+/\d+\s*В)?"
+    r"))",
+    re.IGNORECASE,
+)
+
 # Контекстный поиск после «марки:» / «марка»
 _AFTER_MARKI_PATTERN = re.compile(
     rf"(?:кабел[ья]\s+)?(?:силовой\s+)?марк[аи]\s*:?\s*"
@@ -113,6 +156,7 @@ _REJECT_PREFIXES = re.compile(
 )
 
 DEFAULT_OCR_DPI = 200
+SCAN_OCR_DPI = 300
 
 _EASYOCR_READER = None
 
@@ -207,17 +251,72 @@ def _fix_periodic_letter_ocr(text: str) -> str:
     )
     text = re.sub(r"\bBBI-MHr\(A\)", "ВВГнг(А)", text, flags=re.IGNORECASE)
     text = re.sub(r"\bBBI-", "ВВГ-", text, flags=re.IGNORECASE)
+    text = re.sub(r"ББР-Мнг\(А\)", "ВВГ-Пнг(А)", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bББР-", "ВВГ-П", text, flags=re.IGNORECASE)
+    text = re.sub(r"3[хx]2,50К", "3х2,5ок", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(N,\s*РЕ\)", "(N, PE)", text, flags=re.IGNORECASE)
+    text = re.sub(r"--0,66", "-0,66", text)
     text = re.sub(r"NBCur\(A\)-LS", "ПВСнг(А)-LS", text, flags=re.IGNORECASE)
+    text = re.sub(r"МБСнг\(А\)\}", "ПВСнг(А)", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bМБСнг", "ПВСнг", text, flags=re.IGNORECASE)
     text = re.sub(r"\bAllyB\b", "АПуВ", text, flags=re.IGNORECASE)
+    text = re.sub(r"FIБББ", "ПБГВВ", text, flags=re.IGNORECASE)
     text = re.sub(r"\bNBIBB\b", "ПБГВВ", text, flags=re.IGNORECASE)
+    text = re.sub(r"Мул\s+Бгат\s*\(А\)", "ПуПВнг(А)", text, flags=re.IGNORECASE)
+    text = re.sub(r"LSLТ[хx]", "LSLTx", text)
+    text = re.sub(r"3[хx]1\.5", "3х1,5", text, flags=re.IGNORECASE)
     text = re.sub(r"3x40K", "3х4ок", text, flags=re.IGNORECASE)
     text = re.sub(r"Nposoa\s+Mapkn\w*", "Провод марки", text, flags=re.IGNORECASE)
     text = re.sub(r"Ka6eAb\s+CHACBON\s+MAPK:", "Кабель силовой марки:", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"Nроснм\s+Бас\s+нросестн",
+        "Просим Вас провести",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"нерноануескн\w*", "периодические", text, flags=re.IGNORECASE)
     return text
+
+
+def _fix_flexicore_ocr(text: str) -> str:
+    """Правки OCR в заявках FLEXICORE."""
+    text = re.sub(r"FL[Ee3][XХx][I1l]CORE", "FLEXICORE", text, flags=re.IGNORECASE)
+    text = re.sub(r"FLEX1CORE", "FLEXICORE", text, flags=re.IGNORECASE)
+    text = re.sub(r"нг\s*\(\s*A\s*\)", "нг(A)", text, flags=re.IGNORECASE)
+    return text
+
+
+def _fix_vicab_direction_ocr(text: str) -> str:
+    """Правки OCR в направлениях СЕРК (VicabFLEX, CY, кВ)."""
+    text = re.sub(
+        r"V[иiI][сc]аб[A-Za-zА-Яа-яЁё]{0,10}",
+        "VicabFLEX",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"VicabFLEx", "VicabFLEX", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(VicabFLEX\s+\d+)\s+СУ\b",
+        r"\1 CY",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"0,6/1\s+КБ\s+", "0,6/1 кВ ", text, flags=re.IGNORECASE)
+    text = re.sub(r"600/1000\s+Б\b", "600/1000В", text, flags=re.IGNORECASE)
+    text = re.sub(r"300/500\s+Б\b", "300/500 В", text, flags=re.IGNORECASE)
+    text = re.sub(r"нг\s*\(\s*A\s*\)", "нг(A)", text, flags=re.IGNORECASE)
+    return text
+
+
+def _fix_latin_brand_ocr(text: str) -> str:
+    return _fix_flexicore_ocr(_fix_vicab_direction_ocr(text))
 
 
 def _fix_ocr_confusables(text: str) -> str:
     """Исправляет типичные OCR-ошибки перед поиском марок и ТУ."""
+    text = _fix_latin_brand_ocr(text)
+    text = _fix_speclan_letter_ocr(text)
+    text = _fix_periodic_letter_ocr(text)
     return normalize_ocr_text(text)
 
 
@@ -233,16 +332,26 @@ def is_plausible_mark(mark: str) -> bool:
         return False
     if re.match(r"^нг\(", mark, re.IGNORECASE):
         return False
-    if not re.match(r"^(?:ККЗ\s+МК\s+|СПЕЦЛАН\s+)?[А-ЯЁA-Z]", mark, re.IGNORECASE):
+    if re.match(r"^кВ\s*\d", mark, re.IGNORECASE):
+        return False
+    if not re.match(r"^[А-ЯЁA-Z]", mark):
+        return False
+    if not re.match(
+        r"^(?:ККЗ\s+МК\s+|СПЕЦЛАН\s+|VicabFLEX\s+|КГ[А-ЯЁа-яё]|[А-ЯЁA-Z])",
+        mark,
+        re.IGNORECASE,
+    ):
         return False
     has_cyr_size = re.search(
         r"\d+\s*[зЗпП]?\s*[хx]\s*(?:[\d.,]|[а-яёa-zA-Z])", mark, re.IGNORECASE
     )
     has_lan_size = re.search(_SIZE_PART_LATIN, mark, re.IGNORECASE)
-    if not has_cyr_size and not has_lan_size:
+    has_star_size = re.search(r"\d+\*[\d.,]", mark)
+    is_latin_brand = re.match(r"^(?:FLEXICORE|VicabFLEX|H07RN-F)", mark, re.IGNORECASE)
+    if not has_cyr_size and not has_lan_size and not has_star_size and not is_latin_brand:
         return False
     name = re.split(r"\s+\d", mark, maxsplit=1)[0]
-    if len(name) > 100 or len(name) < 2:
+    if len(name) > 100 or len(name) < 3:
         return False
     return True
 
@@ -265,6 +374,18 @@ def _clean_mark(raw: str) -> str:
     )
     if mark.upper().startswith("СПЕЦЛАН"):
         mark = re.sub(r"\s+В\s+количестве.*$", "", mark, flags=re.IGNORECASE)
+    if mark.upper().startswith("VICABFLEX"):
+        mark = re.sub(r"нг\([Аа]\)", "нг(A)", mark, flags=re.IGNORECASE)
+        mark = re.sub(r"\bСУ\b", "CY", mark, flags=re.IGNORECASE)
+        mark = re.sub(r"(\d)кВ", r"\1 кВ", mark, flags=re.IGNORECASE)
+        return mark.strip()
+    if mark.upper().startswith("FLEXICORE") or mark.upper().startswith("H07RN"):
+        mark = mark.replace("®", "")
+        mark = re.sub(r"нг\([Аа]\)", "нг(A)", mark, flags=re.IGNORECASE)
+        mark = re.sub(r"\s+", " ", mark).strip()
+        return mark
+    if re.match(r"^КГ[А-ЯЁа-яё]", mark):
+        return mark.strip()
     suggestion = suggest_mark_correction(mark.strip())
     return suggestion.suggested
 
@@ -332,46 +453,105 @@ def _find_letter_list_marks(text: str) -> list[tuple[str, int, int, str | None]]
     return found
 
 
+def _dedupe_cable_matches(items: list[CableMarkMatch]) -> list[CableMarkMatch]:
+    seen: set[str] = set()
+    out: list[CableMarkMatch] = []
+    for m in items:
+        fixed = _clean_mark(m.mark)
+        key = fixed.lower()
+        if fixed and key not in seen:
+            seen.add(key)
+            out.append(
+                CableMarkMatch(
+                    mark=fixed,
+                    context=m.context,
+                    document=m.document,
+                    requirements_raw=m.requirements_raw,
+                )
+            )
+    return out
+
+
+def _extract_marks_from_family(text: str, family_id: str) -> list[CableMarkMatch]:
+    """Извлекает марки через YAML-семейство, только при уверенном совпадении."""
+    from .families.registry import DocumentFamily, get_family_registry
+
+    registry = get_family_registry()
+    family: DocumentFamily | None = registry.get(family_id)
+    if family is None or not family.is_confident_match(text):
+        return []
+
+    if family_id == "kaluga_periodic_v1":
+        from .periodic_letter_extractor import extract_marks_from_periodic_letter
+
+        periodic = extract_marks_from_periodic_letter(text)
+        cleaned = _dedupe_cable_matches(periodic)
+        if len(cleaned) >= family.min_marks_threshold:
+            return cleaned
+        return []
+
+    matches: list[CableMarkMatch] = []
+    seen: set[str] = set()
+    for _kind, pattern in family.mark_patterns:
+        for m in pattern.finditer(text):
+            raw = m.group(1) if m.lastindex else m.group(0)
+            _add_match(matches, seen, raw, text, m.start(), m.end())
+
+    if family_id == "speclan_letter_v1" and len(matches) < family.min_marks_threshold:
+        for mark, start, end, doc in _find_letter_list_marks(text):
+            _add_match(matches, seen, mark, text, start, end, document=doc)
+
+    if len(matches) >= family.min_marks_threshold:
+        return matches
+    return []
+
+
 def find_cable_marks(text: str) -> list[CableMarkMatch]:
     """
     Ищет марки кабелей по структурному паттерну «название + NхM».
 
     Не использует список брендов — любая строка нужной формы.
-    Поддерживает LAN (СПЕЦЛАН F/UTP 2x2x0,52) и нумерованные списки в письмах.
+    Семейства YAML (Калуга, Спецкабель) — только при score ≥ confidence_threshold.
     """
-    normalized = _fix_ocr_confusables(_normalize_text_for_marks(text))
-    if not normalized:
+    base = _normalize_text_for_marks(text)
+    if not base:
         return []
-
-    from .periodic_letter_extractor import extract_marks_from_periodic_letter
-
-    periodic = extract_marks_from_periodic_letter(normalized)
-    if len(periodic) >= 3:
-        seen_p: set[str] = set()
-        cleaned_periodic: list[CableMarkMatch] = []
-        for m in periodic:
-            fixed = _clean_mark(m.mark)
-            key = fixed.lower()
-            if fixed and key not in seen_p:
-                seen_p.add(key)
-                cleaned_periodic.append(
-                    CableMarkMatch(
-                        mark=fixed,
-                        context=m.context,
-                        document=m.document,
-                        requirements_raw=m.requirements_raw,
-                    )
-                )
-        if len(cleaned_periodic) >= 3:
-            return cleaned_periodic
 
     seen: set[str] = set()
     matches: list[CableMarkMatch] = []
 
+    # Латиница и КГ* — до normalize_ocr_text (он портит FLEXICORE/VicabFLEX)
+    latin_safe = _fix_latin_brand_ocr(base)
+    for pattern in (
+        _FLEXICORE_MARK_PATTERN,
+        _FLEXICORE_TABLE_LINE,
+        _H07RN_MARK_PATTERN,
+        _VICABFLEX_MARK_PATTERN,
+        _STAR_CORE_MARK_PATTERN,
+    ):
+        for m in pattern.finditer(latin_safe):
+            raw = m.group(1) if m.lastindex else m.group(0)
+            _add_match(matches, seen, raw, latin_safe, m.start(), m.end())
+
+    normalized = _fix_ocr_confusables(base)
+
+    from .families.registry import get_family_registry
+
+    family = get_family_registry().detect_best(normalized)
+    if family is not None:
+        family_marks = _extract_marks_from_family(normalized, family.id)
+        if family_marks:
+            return _dedupe_cable_matches(matches + family_marks)
+
     for mark, start, end, doc in _find_letter_list_marks(normalized):
         _add_match(matches, seen, mark, normalized, start, end, document=doc)
 
-    for pattern in (_SPECLAN_MARK_PATTERN, _AFTER_MARKI_PATTERN, _PRODUCT_MARK_PATTERN, _MARK_PATTERN):
+    for pattern in (
+        _SPECLAN_MARK_PATTERN,
+        _AFTER_MARKI_PATTERN,
+        _PRODUCT_MARK_PATTERN,
+        _MARK_PATTERN,
+    ):
         for m in pattern.finditer(normalized):
             raw = m.group(1) if m.lastindex else m.group(0)
             _add_match(matches, seen, raw, normalized, m.start(), m.end())
@@ -396,24 +576,27 @@ def _pdf_cache_fingerprint(path: Path) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:24]
 
 
-def _ocr_cache_path(path: Path, dpi: int, engine: str) -> Path:
+def _ocr_cache_path(path: Path, dpi: int, engine: str, *, preprocess: str | None = None) -> Path:
     fingerprint = _pdf_cache_fingerprint(path)
     safe_stem = re.sub(r"[^\w\-.]+", "_", path.stem)[:48]
-    return OCR_CACHE_DIR / f"{safe_stem}_{fingerprint}_dpi{dpi}_{engine}.txt"
+    pre_tag = f"_pre{preprocess}" if preprocess else ""
+    return OCR_CACHE_DIR / f"{safe_stem}_{fingerprint}_dpi{dpi}_{engine}{pre_tag}.txt"
 
 
-def _read_ocr_cache(path: Path, dpi: int, engine: str) -> str | None:
-    cache_path = _ocr_cache_path(path, dpi, engine)
+def _read_ocr_cache(path: Path, dpi: int, engine: str, *, preprocess: str | None = None) -> str | None:
+    cache_path = _ocr_cache_path(path, dpi, engine, preprocess=preprocess)
     if not cache_path.is_file():
         return None
     text = cache_path.read_text(encoding="utf-8")
     return text if text.strip() else None
 
 
-def _write_ocr_cache(path: Path, dpi: int, engine: str, text: str) -> None:
+def _write_ocr_cache(
+    path: Path, dpi: int, engine: str, text: str, *, preprocess: str | None = None
+) -> None:
     if not text.strip():
         return
-    cache_path = _ocr_cache_path(path, dpi, engine)
+    cache_path = _ocr_cache_path(path, dpi, engine, preprocess=preprocess)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(text, encoding="utf-8")
 
@@ -471,13 +654,28 @@ def _render_pages(pdf_path: Path, dpi: int = DEFAULT_OCR_DPI) -> list:
     return images
 
 
-def _ocr_image_tesseract(image, pytesseract) -> str:
+def _resolve_preprocess_tag(use_preprocess: bool) -> str | None:
+    if not use_preprocess:
+        return None
+    from .ocr.preprocess import PREPROCESS_VERSION, is_cv_available
+
+    return PREPROCESS_VERSION if is_cv_available() else None
+
+
+def _ocr_image_tesseract(image, pytesseract, *, use_preprocess: bool = True) -> str:
     # rus первичен — кириллица в марках; eng для Cat/UTP в LAN-кабеле
+    if use_preprocess:
+        from .ocr.preprocess import is_cv_available, preprocess_for_ocr
+
+        if is_cv_available():
+            image = preprocess_for_ocr(image)
     config = "--psm 6 --oem 1"
     return pytesseract.image_to_string(image, lang="rus+eng", config=config)
 
 
-def _ocr_with_tesseract(pdf_path: Path, dpi: int = DEFAULT_OCR_DPI) -> str:
+def _ocr_with_tesseract(
+    pdf_path: Path, dpi: int = DEFAULT_OCR_DPI, *, use_preprocess: bool = True
+) -> str:
     import pytesseract
 
     tesseract_cmd = _find_tesseract()
@@ -491,13 +689,13 @@ def _ocr_with_tesseract(pdf_path: Path, dpi: int = DEFAULT_OCR_DPI) -> str:
 
     images = _render_pages(pdf_path, dpi=dpi)
     if len(images) == 1:
-        text = _ocr_image_tesseract(images[0], pytesseract)
+        text = _ocr_image_tesseract(images[0], pytesseract, use_preprocess=use_preprocess)
         return text.strip()
 
     parts: list[str] = [""] * len(images)
     with ThreadPoolExecutor(max_workers=min(4, len(images))) as pool:
         futures = {
-            pool.submit(_ocr_image_tesseract, img, pytesseract): idx
+            pool.submit(_ocr_image_tesseract, img, pytesseract, use_preprocess=use_preprocess): idx
             for idx, img in enumerate(images)
         }
         for future in as_completed(futures):
@@ -524,28 +722,38 @@ def ocr_pdf(
     dpi: int = DEFAULT_OCR_DPI,
     *,
     use_cache: bool = True,
+    use_preprocess: bool = True,
 ) -> str:
     """
     Распознаёт текст со скана. Сначала tesseract, при недоступности — easyocr.
 
-    Результат кэшируется в ``data/ocr_cache/`` по отпечатку файла, DPI и движку.
+    Результат кэшируется в ``data/ocr_cache/`` по отпечатку файла, DPI, движку
+    и версии препроцессинга (OpenCV v1 для сканов).
     """
     path = Path(pdf_path)
     engine = resolve_ocr_engine()
+    preprocess_tag = _resolve_preprocess_tag(use_preprocess) if engine == "tesseract" else None
 
     if use_cache and engine != "none":
-        cached = _read_ocr_cache(path, dpi, engine)
+        cached = _read_ocr_cache(path, dpi, engine, preprocess=preprocess_tag)
         if cached is not None:
-            logger.debug("OCR cache hit: %s (%s, dpi=%d)", path.name, engine, dpi)
+            logger.debug(
+                "OCR cache hit: %s (%s, dpi=%d, pre=%s)",
+                path.name,
+                engine,
+                dpi,
+                preprocess_tag,
+            )
             return normalize_ocr_text(cached)
 
     text = ""
     if engine == "tesseract":
         try:
-            text = _ocr_with_tesseract(path, dpi=dpi)
+            text = _ocr_with_tesseract(path, dpi=dpi, use_preprocess=use_preprocess)
         except Exception as exc:
             logger.warning("Tesseract OCR failed: %s", exc)
             engine = "easyocr"
+            preprocess_tag = None
             if use_cache:
                 cached = _read_ocr_cache(path, dpi, engine)
                 if cached is not None:
@@ -555,6 +763,7 @@ def ocr_pdf(
         try:
             text = _ocr_with_easyocr(path, dpi=dpi)
             engine = "easyocr"
+            preprocess_tag = None
         except ImportError as exc:
             raise RuntimeError(
                 "Для сканов нужен OCR. Установи Tesseract (rus) или: pip install easyocr"
@@ -564,7 +773,7 @@ def ocr_pdf(
         text = normalize_ocr_text(text)
 
     if use_cache and text.strip():
-        _write_ocr_cache(path, dpi, engine, text)
+        _write_ocr_cache(path, dpi, engine, text, preprocess=preprocess_tag)
     return text
 
 
@@ -631,15 +840,40 @@ def _resolve_cable_marks(
     return find_cable_marks(search_text)
 
 
-def _detect_scanned(pdf_path: Path) -> tuple[bool, int]:
-    """True, если PDF похож на скан (есть изображения, но нет текста)."""
+def _cyrillic_letter_ratio(text: str) -> float:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    cyrillic = sum(1 for c in letters if "\u0400" <= c <= "\u04FF")
+    return cyrillic / len(letters)
+
+
+def _pdf_page_stats(pdf_path: Path) -> tuple[int, bool, str]:
+    """page_count, has_images, joined pdfplumber text."""
     _require_pdfplumber()
     with pdfplumber.open(pdf_path) as doc:
         page_count = len(doc.pages)
         has_images = any(page.images for page in doc.pages)
-        text_len = sum(len(page.extract_text() or "") for page in doc.pages)
-        is_scanned = page_count > 0 and text_len == 0 and has_images
-        return is_scanned, page_count
+        parts = [page.extract_text() or "" for page in doc.pages]
+        return page_count, has_images, "\n\n".join(parts).strip()
+
+
+def _needs_ocr_fallback(text: str, *, has_images: bool) -> bool:
+    """
+    Текстовый слой есть, но нечитаем (латиница вместо кириллицы) — нужен OCR.
+
+    Типично для PDF со сканом-вложением и мусорным pseudo-text layer.
+    """
+    if not has_images or not text.strip():
+        return False
+    return _cyrillic_letter_ratio(text) < 0.2
+
+
+def _detect_scanned(pdf_path: Path) -> tuple[bool, int]:
+    """True, если PDF похож на скан (есть изображения, но нет текста)."""
+    page_count, has_images, text = _pdf_page_stats(pdf_path)
+    is_scanned = page_count > 0 and not text and has_images
+    return is_scanned, page_count
 
 
 def build_search_text(text: str, tables: list[list[list[str]]] | None = None) -> str:
@@ -666,17 +900,45 @@ def extract_from_pdf(
         raise FileNotFoundError(f"PDF не найден: {path}")
 
     is_scanned, page_count = _detect_scanned(path)
+    _page_count, has_images, plumber_text = _pdf_page_stats(path)
     ocr_used = False
     tables: list[list[list[str]]] = []
 
-    if is_scanned:
-        if use_ocr:
-            text = ocr_pdf(path, dpi=ocr_dpi, use_cache=use_ocr_cache)
-            ocr_used = True
-        else:
-            text = ocr_pdf(path, dpi=ocr_dpi, use_cache=use_ocr_cache)
-            ocr_used = True
+    table_ocr_text = ""
+    use_ocr_path = is_scanned or (
+        use_ocr and has_images and _needs_ocr_fallback(plumber_text, has_images=has_images)
+    )
+
+    if use_ocr_path:
+        # True scans — 300 DPI; garbled pseudo-text layer — default DPI (200 часто лучше).
+        scan_dpi = max(ocr_dpi, SCAN_OCR_DPI) if is_scanned else ocr_dpi
+        text = ocr_pdf(path, dpi=scan_dpi, use_cache=use_ocr_cache, use_preprocess=use_ocr)
+        ocr_used = True
+        if not is_scanned:
+            logger.info(
+                "PDF %s: pseudo-text layer (cyr=%.0f%%) — OCR fallback",
+                path.name,
+                _cyrillic_letter_ratio(plumber_text) * 100,
+            )
+        if not use_ocr:
             logger.warning("PDF %s: скан — OCR включён принудительно", path.name)
+        if is_scanned:
+            try:
+                from .ocr.table import ocr_tables_from_pdf, tables_text_from_results
+
+                table_results = ocr_tables_from_pdf(path, dpi=scan_dpi)
+                table_ocr_text = tables_text_from_results(table_results)
+                if table_ocr_text:
+                    tables = [result.rows for result in table_results if result.rows]
+                    text = f"{text}\n\n{table_ocr_text}".strip()
+                    logger.info(
+                        "PDF %s: table OCR added %d chars from %d page(s)",
+                        path.name,
+                        len(table_ocr_text),
+                        len(table_results),
+                    )
+            except Exception as exc:
+                logger.debug("Table OCR skipped for %s: %s", path.name, exc)
     else:
         text = extract_text(path)
         tables = extract_tables(path)

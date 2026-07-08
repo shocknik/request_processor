@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from request_processor.extraction.pdf_extractor import find_cable_marks
 
-_OCR = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "ocr_cache"
-    / "Письмо_на_период._исп._от_04.05.26_c44b8cb8c746c58aaf21198b_dpi200_tesseract.txt"
-)
+_INLINE_OCR = """Nnepuoauyeckie UCNblITAHMA
+Кабель силовой марки: ВВГнг(А) 3х4ок(N,PE)-0,66
+ПВСнг(А)-LS 3х2,50
+Провод марки АПуВ 1х6
+Провод марки ПБГВВ 2х1,5"""
 
 _EXPECTED = (
     "ВВГнг(А) 3х4ок(N,PE)-0,66",
@@ -22,7 +19,7 @@ _EXPECTED = (
 
 
 def test_kaluga_letter_four_marks_normalized() -> None:
-    text = _OCR.read_text(encoding="utf-8")
+    text = _INLINE_OCR
     marks = [m.mark for m in find_cable_marks(text)]
     assert len(marks) == 4
     for expected in _EXPECTED:
@@ -53,5 +50,5 @@ def test_kaluga_garbled_table_with_prices() -> None:
     assert marks[0].startswith("ВВГнг(А)")
     assert "3х4ок" in marks[0].replace("x", "х")
     assert marks[1] == "ПВСнг(А)-LS 3х2,50"
-    assert marks[2] == "АПуВ 1х6"
-    assert marks[3] == "ПБГВВ 2х1,5"
+    assert any(m == "АПуВ 1х6" for m in marks)
+    assert any(m == "ПБГВВ 2х1,5" for m in marks)

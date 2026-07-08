@@ -58,6 +58,12 @@ class DocumentFamily:
         if total:
             score = hits / total
 
+        if self.detection_table_hints:
+            table_hits = sum(1 for pattern in self.detection_table_hints if pattern.search(head))
+            if table_hits:
+                table_ratio = table_hits / len(self.detection_table_hints)
+                score = max(score, 0.25 + table_ratio * 0.65)
+
         brand_hints = self.raw.get("detection", {}).get("brand_hints") or []
         for hint in brand_hints:
             if hint.lower() in head.lower():

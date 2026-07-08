@@ -929,7 +929,12 @@ def ingest_training_inbox_cmd(keep_in_place: bool, db: str) -> None:
 
 
 @cli.command("import-label")
-@click.option("--document-id", required=True, type=int)
+@click.option(
+    "--document-id",
+    default=None,
+    type=int,
+    help="ID в training_documents; если не указан — ищется по source_file в JSON",
+)
 @click.option("--file", "label_file", required=True, type=click.Path(exists=True))
 @click.option(
     "--type",
@@ -939,22 +944,142 @@ def ingest_training_inbox_cmd(keep_in_place: bool, db: str) -> None:
 )
 @click.option("--db", default="data/app.db", show_default=True)
 def import_label_cmd(
-    document_id: int,
+    document_id: Optional[int],
     label_file: str,
     label_type: Optional[str],
     db: str,
 ) -> None:
     """Импортирует JSON-разметку в training_labels."""
-    from .persistence.training_repo import import_label_file
+    from .persistence.training_repo import import_label_file, resolve_document_id_for_label
 
     migrate_db(db)
+    payload = json.loads(Path(label_file).read_text(encoding="utf-8"))
+    resolved_id = document_id or resolve_document_id_for_label(payload, label_file, db_path=db)
     label_id = import_label_file(
         document_id,
         Path(label_file),
         label_type=label_type,  # type: ignore[arg-type]
         db_path=db,
     )
-    click.echo(f"✓ training_labels id={label_id} для document_id={document_id}")
+    click.echo(f"✓ training_labels id={label_id} для document_id={resolved_id}")
+
+
+@cli.command("eval-extraction")
+@click.option(
+    "--labels-dir",
+    default="data/training/labels/marks",
+    show_default=True,
+    type=click.Path(),
+)
+@click.option(
+    "--output",
+    "output_path",
+    default=None,
+    type=click.Path(),
+    help="JSON-отчёт (по умолчанию data/training/exports/reports/eval_marks_<дата>.json)",
+)
+@click.option("--no-ocr-cache", is_flag=True, help="Свежий OCR при сравнении")
+@click.option("--db", default="data/app.db", show_default=True)
+def eval_extraction_cmd(
+    labels_dir: str,
+    output_path: Optional[str],
+    no_ocr_cache: bool,
+    db: str,
+) -> None:
+    """Сравнивает извлечённые марки с эталонами в labels/marks/."""
+    from datetime import date
+
+    from .config import TRAINING_EXPORTS_REPORTS_DIR
+    from .validation.eval_extraction import eval_marks_labels_dir
+
+    migrate_db(db)
+    report = eval_marks_labels_dir(
+        Path(labels_dir),
+        use_ocr_cache=not no_ocr_cache,
+        db_path=db,
+    )
+    out = (
+        Path(output_path)
+        if output_path
+        else TRAINING_EXPORTS_REPORTS_DIR / f"eval_marks_{date.today().isoformat()}.json"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    click.echo(
+        f"Файлов: {report['files_evaluated']}/{report['files_total']}  "
+        f"recall (micro): {report['micro_recall']:.0%}  "
+        f"recall (macro): {report['macro_recall']:.0%}"
+    )
+    click.echo(f"Отчёт: {out}")
+
+
+@cli.command("ocr-benchmark")
+@click.option("--pdf", "pdf_path", required=True, type=click.Path(exists=True))
+@click.option("--page", default=1, show_default=True, type=int, help="Номер страницы (1-based)")
+@click.option("--dpi", default=200, show_default=True, type=int)
+@click.option(
+    "--output",
+    "output_path",
+    default=None,
+    type=click.Path(),
+    help="JSON-отчёт (по умолчанию data/training/exports/reports/ocr_benchmark_<stem>_p<N>_<дата>.json)",
+)
+@click.option(
+    "--batch",
+    "batch_paths",
+    multiple=True,
+    type=click.Path(exists=True),
+    help="Дополнительные PDF для пакетного отчёта (вместе с --pdf)",
+)
+def ocr_benchmark_cmd(
+    pdf_path: str,
+    page: int,
+    dpi: int,
+    output_path: Optional[str],
+    batch_paths: tuple[str, ...],
+) -> None:
+    """Сравнивает OCR raw vs preprocess v1 на странице скана."""
+    from datetime import date
+
+    from .config import TRAINING_EXPORTS_REPORTS_DIR
+    from .extraction.ocr.benchmark import (
+        benchmark_pdf_page,
+        benchmark_scans_batch,
+        save_benchmark_report,
+    )
+
+    paths = [Path(pdf_path), *[Path(p) for p in batch_paths]]
+    if len(paths) == 1:
+        report = benchmark_pdf_page(paths[0], page=page, dpi=dpi)
+        out = save_benchmark_report(
+            report,
+            Path(output_path) if output_path else None,
+        )
+        raw = report["variants"]["raw"]
+        pre = report["variants"]["preprocessed"]
+        click.echo(
+            f"Страница {page}/{report['page_count']}  "
+            f"raw: conf={raw['mean_confidence']:.0%} chars={raw['text_chars']}  "
+            f"pre: conf={pre['mean_confidence']:.0%} chars={pre['text_chars']}"
+        )
+        if report.get("cer_delta") is not None:
+            click.echo(f"CER delta (pre - raw): {report['cer_delta']:+.2%}")
+        click.echo(f"Отчёт: {out}")
+        return
+
+    batch_report = benchmark_scans_batch(paths, page=page, dpi=dpi)
+    out = (
+        Path(output_path)
+        if output_path
+        else TRAINING_EXPORTS_REPORTS_DIR / f"ocr_benchmark_batch_{date.today().isoformat()}.json"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(batch_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    click.echo(
+        f"Файлов: {batch_report['files_ok']}/{batch_report['files_total']}  "
+        f"улучшено preprocess: {batch_report['preprocess_improved_count']}"
+    )
+    click.echo(f"Отчёт: {out}")
 
 
 @cli.command("sync-corrections")

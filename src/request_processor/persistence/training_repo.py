@@ -233,8 +233,53 @@ def add_training_label(
         return int(cur.lastrowid)
 
 
+def resolve_document_id_for_label(
+    payload: dict[str, Any],
+    label_file: Path | str,
+    *,
+    db_path: str | Path = "data/app.db",
+) -> int | None:
+    """Находит training_documents.id по полям JSON или имени файла разметки."""
+    raw_id = payload.get("document_id")
+    if isinstance(raw_id, int):
+        row = get_training_document(raw_id, db_path=db_path)
+        if row:
+            return raw_id
+    if isinstance(raw_id, str) and raw_id.isdigit():
+        doc_id = int(raw_id)
+        if get_training_document(doc_id, db_path=db_path):
+            return doc_id
+
+    candidates: list[str] = []
+    source = payload.get("source_file")
+    if source:
+        candidates.append(Path(str(source)).name)
+        candidates.append(_rel_path(PROJECT_ROOT / source if not Path(str(source)).is_absolute() else source))
+    path = Path(label_file)
+    candidates.append(path.stem)
+    candidates.append(path.name)
+
+    with get_connection(db_path) as conn:
+        for name in candidates:
+            if not name:
+                continue
+            found = conn.execute(
+                "SELECT id FROM training_documents WHERE file_name = ? ORDER BY id DESC LIMIT 1",
+                (Path(name).name,),
+            ).fetchone()
+            if found:
+                return int(found[0])
+            found = conn.execute(
+                "SELECT id FROM training_documents WHERE file_path LIKE ? ORDER BY id DESC LIMIT 1",
+                (f"%{Path(name).name}",),
+            ).fetchone()
+            if found:
+                return int(found[0])
+    return None
+
+
 def import_label_file(
-    document_id: int,
+    document_id: int | None,
     label_file: Path | str,
     *,
     label_type: LabelType | None = None,
@@ -242,6 +287,14 @@ def import_label_file(
 ) -> int:
     path = Path(label_file)
     payload = json.loads(path.read_text(encoding="utf-8"))
+    doc_id = document_id
+    if doc_id is None:
+        doc_id = resolve_document_id_for_label(payload, path, db_path=db_path)
+    if doc_id is None:
+        raise ValueError(
+            "Не найден training_documents.id: укажите --document-id или поле source_file в JSON"
+        )
+
     inferred = label_type
     if inferred is None:
         parent = path.parent.name
@@ -249,11 +302,13 @@ def import_label_file(
             inferred = "ocr_page" if parent == "ocr_pages" else parent  # type: ignore[assignment]
         else:
             inferred = "full_json"
-    label_id = add_training_label(document_id, inferred, payload, db_path=db_path)
+    label_id = add_training_label(doc_id, inferred, payload, db_path=db_path)
+    marks = payload.get("marks_expected") or payload.get("marks") or []
+    new_status = "complete" if marks else "partial"
     with get_connection(db_path) as conn:
         conn.execute(
-            "UPDATE training_documents SET label_status = 'partial', updated_at = ? WHERE id = ?",
-            (_now(), document_id),
+            "UPDATE training_documents SET label_status = ?, updated_at = ? WHERE id = ?",
+            (new_status, _now(), doc_id),
         )
     return label_id
 

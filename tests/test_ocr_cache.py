@@ -28,7 +28,7 @@ def test_ocr_cache_hit_skips_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     calls = {"count": 0}
 
-    def fake_tesseract(path: Path, dpi: int = 200) -> str:
+    def fake_tesseract(path: Path, dpi: int = 200, **kwargs: object) -> str:
         calls["count"] += 1
         return "распознанный текст"
 
@@ -58,7 +58,7 @@ def test_ocr_cache_disabled_always_calls_engine(
 
     calls = {"count": 0}
 
-    def fake_tesseract(path: Path, dpi: int = 200) -> str:
+    def fake_tesseract(path: Path, dpi: int = 200, **kwargs: object) -> str:
         calls["count"] += 1
         return "текст"
 

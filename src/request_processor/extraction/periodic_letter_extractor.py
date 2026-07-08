@@ -13,7 +13,8 @@ from ..parsing.cable_mark_parser import extract_document_from_text
 from .ocr_mark_normalizer import normalize_mark_after_ocr
 
 _PERIODIC_MARKER = re.compile(
-    r"периодическ|Nnepuoauyeckie|NMpocum\s+Bac\s+nprovectm",
+    r"периодическ|нерноануескн|Nnepuoauyeckie|NMpocum\s+Bac\s+nprovectm|"
+    r"Nроснм\s+Бас\s+нросестн",
     re.IGNORECASE,
 )
 
@@ -21,8 +22,8 @@ _SIZE_X = r"[xх×]"
 
 # Таблица Калужа без слова «периодические» (скопирована из PDF / OCR таблицы)
 _KALUGA_TABLE_HINT = re.compile(
-    rf"(?:^|\s)(?:13{_SIZE_X}4ок\s*\(N|"
-    rf"[1-4]\s+(?:ПВСнг|NBCur|АПуВ|AllyB|ПБГВВ|NBIBB))",
+    rf"(?:^|\s)(?:13{_SIZE_X}4ок\s*\(N|3{_SIZE_X}2,5ок\s*\(N|"
+    rf"[1-4]\s+(?:ПВСнг|NBCur|МБСнг|АПуВ|AllyB|ПуПВ|ПБГВВ|NBIBB|FIБББ|ББР-Мнг|ВВГ-Пнг))",
     re.IGNORECASE,
 )
 
@@ -64,13 +65,13 @@ def _canonical_periodic_mark(mark: str) -> str:
 
 def _row_sort_key(mark: str) -> int:
     low = mark.lower()
-    if "4ок" in low and "(n" in low.replace(" ", ""):
+    if ("4ок" in low or "2,5ок" in low) and "(n" in low.replace(" ", ""):
         return 1
     if "пвс" in low:
         return 2
-    if "апув" in low:
-        return 3
     if "пбгвв" in low:
+        return 3
+    if "пупв" in low or "апув" in low:
         return 4
     return 99
 
@@ -84,27 +85,54 @@ def extract_marks_from_periodic_letter(text: str) -> list[CableMarkMatch]:
 
     found: list[tuple[str, int, int, str | None]] = []
 
+    _cable_size = (
+        rf"3{_SIZE_X}?2,5ок\s*\(N,?\s*PE\)-0,66|"
+        rf"3{_SIZE_X}?4ок\s*\(N,?\s*PE\)-0,66"
+    )
     patterns: tuple[tuple[str, re.Pattern[str]], ...] = (
         (
             "cable",
             re.compile(
-                rf"(?:Кабель\s+силовой\s+марк[аи]:|BBI-MHr\(A\)|ВВГнг\(А\))\s*"
-                rf"((?:ВВГнг\(А\)\s*)?3{_SIZE_X}?4ок\s*\(N,?\s*PE\)-0,66)",
+                rf"(?:Кабель\s+силовой\s+марк[аи]:|BBI-MHr\(A\)|ВВГнг\(А\)|ВВГ-Пнг\(А\))\s*"
+                rf"((?:ВВГ[-]?(?:П|нг)\(А\)\s*)?{_cable_size})",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "cable_bare",
+            re.compile(
+                rf"((?:ВВГ-Пнг\(А\)|ВВГнг\(А\)|ББР-Мнг\(А\))\s*{_cable_size})",
                 re.IGNORECASE,
             ),
         ),
         (
             "wire",
             re.compile(
-                rf"(ПВСнг\(А\)-LS\s*3{_SIZE_X}?2,50|NBCur\(A\)-LS\s*3x2,50)",
+                rf"((?:ПВСнг|МБСнг)\(А\)-LS\s*3{_SIZE_X}?2,50|NBCur\(A\)-LS\s*3x2,50)",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "pbgbv",
+            re.compile(
+                rf"((?:ПБГВВ|FIББВ|FIБББ)\s*3{_SIZE_X}?1,5|NBIBB\s*2{_SIZE_X}?1,5)",
+                re.IGNORECASE,
+            ),
+        ),
+        (
+            "pupv",
+            re.compile(
+                rf"((?:ПуПВнг\(А\)|Мул\s+Бгат\s*\(А\))-LSL[TТ]x\s*1{_SIZE_X}?6|"
+                rf"АПуВ\s*1{_SIZE_X}?6|AllyB\s*1x6)",
                 re.IGNORECASE,
             ),
         ),
         (
             "product",
             re.compile(
-                rf"Провод\s+марк[аи]\s+"
-                rf"(АПуВ\s*1{_SIZE_X}?6|AllyB\s*1x6|ПБГВВ\s*2{_SIZE_X}?1,5|NBIBB\s*2x1,5)",
+                rf"Провод\w*\s+марк[аи]\s*"
+                rf"(ПБГВВ\s*3{_SIZE_X}?1,5|ПБГВВ\s*2{_SIZE_X}?1,5|"
+                rf"АПуВ\s*1{_SIZE_X}?6|AllyB\s*1x6)",
                 re.IGNORECASE,
             ),
         ),
