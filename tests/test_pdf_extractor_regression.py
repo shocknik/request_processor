@@ -41,7 +41,11 @@ def test_extract_from_pdf_does_not_raise_search_text(
                 "request_processor.extraction.pdf_extractor._detect_scanned",
                 return_value=(False, direction_result.page_count),
             ):
-                result = extract_from_document(pdf, use_ocr=False)
+                with patch(
+                    "request_processor.extraction.pdf_extractor._pdf_page_stats",
+                    return_value=(direction_result.page_count, False, direction_result.text),
+                ):
+                    result = extract_from_document(pdf, use_ocr=False)
 
     assert len(result.cable_marks) == 3
     assert result.organizations

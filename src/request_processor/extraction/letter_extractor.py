@@ -31,9 +31,11 @@ _LETTER_MARKERS = re.compile(
     r"Гарантийное\s+письмо|Просим\s+(?:Вас\s+)?провести|"
     r"периодическ\w+\s+испытан|"
     r"Генеральному\s+директору|Уважаемому\s+директору|"
-    r"TapaHTuiHoe\s+nucbmMo|Mpocum\s+(?:Bac\s+)?nprovectu|TeHepanbHomy|"
+    r"TapaHTuiHoe\s+nucbmMo|ТараНТ\w+ое\s+ннсбМо|"
+    r"Mpocum\s+(?:Bac\s+)?nprovectu|Мроснм\s+Бас\s+нроБестн|"
+    r"TeHepanbHomy|мз\s+ТеНеранбНому\s+АннрекТору|"
     r"TeEHEPAAbHOMY|Nnepuoauyeckie\s+UCNblITAHMA|NMpocum\s+Bac\s+nprovectm|"
-    r"KAGEABHOM\s+NPOAYKLIMM",
+    r"KAGEABHOM\s+NPOAYKLIMM|spetskabel\.ru",
     re.IGNORECASE,
 )
 
@@ -137,7 +139,7 @@ def _extract_sender_name(header: str) -> str | None:
         if m:
             candidates.append(_trim_org_name(m.group(1)))
 
-    if re.search(r"Спецкабель|Cneukabel|spetskabel", header, re.I):
+    if re.search(r"Спецкабель|Cneukabel|spetskabel|Сненка6", header, re.I):
         for c in candidates:
             if "спецкабель" in c.lower():
                 return f'ООО НПП «{_trim_org_name(c)}»'

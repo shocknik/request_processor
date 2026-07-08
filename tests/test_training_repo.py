@@ -110,5 +110,5 @@ def test_import_label_auto_document_id(training_db: Path, tmp_path: Path) -> Non
     label_id = import_label_file(None, label_path, db_path=training_db)
     assert label_id >= 1
     rows = list_training_documents(db_path=training_db)
-    assert rows[0]["label_status"] == "partial"
+    assert rows[0]["label_status"] == "complete"
     assert int(rows[0]["id"]) == int(doc["id"])

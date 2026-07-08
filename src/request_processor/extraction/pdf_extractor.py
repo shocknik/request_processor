@@ -61,7 +61,7 @@ _SIZE_PART_LATIN = (
 )
 
 # СПЕЦЛАН / SPECLAN / CMELVIAH (OCR) F/UTP … 2x2x0,52
-_SPECLAN_BRAND = r"(?:СПЕЦЛАН|SPECLAN|CMELVIAH|CMELAN)"
+_SPECLAN_BRAND = r"(?:СПЕЦЛАН|SPECLAN|CMELVIAH|CMELAN|СNЕ[UW][АA]{1,2}Н|СNЕLWIАН)"
 _SPECLAN_FIRE = r"(?:нг|ur|Hr|hr|ng|Нг)\s*\(\s*A\s*\)"
 _SPECLAN_MARK_PATTERN = re.compile(
     r"(?:\d+\.\s*)?"
@@ -190,11 +190,19 @@ def _normalize_text_for_marks(text: str) -> str:
 def _fix_speclan_letter_ocr(text: str) -> str:
     """Правки OCR в гарантийных письмах (латиница вместо кириллицы)."""
     text = re.sub(
-        r"\b(?:CMELVIAH|CMELAN|SPECLAN|Cneu\w*lan|Sneu\w*lan)\b",
+        r"\b(?:CMELVIAH|CMELAN|SPECLAN|Cneu\w*lan|Sneu\w*lan|СNЕ[UW][АA]{1,2}Н|СNЕLWIАН)\b",
         "СПЕЦЛАН",
         text,
         flags=re.IGNORECASE,
     )
+    text = re.sub(r"Сненка6[бе]/1?б", "Спецкабель", text, flags=re.IGNORECASE)
+    text = re.sub(r"Сненка6бенб", "Спецкабель", text, flags=re.IGNORECASE)
+    text = re.sub(r"ТараНТ\w+ое\s+ннсбМо", "Гарантийное письмо", text, flags=re.IGNORECASE)
+    text = re.sub(r"Мроснм\s+Бас\s+нроБестн", "Просим Вас провести", text, flags=re.IGNORECASE)
+    text = re.sub(r"МаркКах\s+Ка6ена", "Марках кабеля", text, flags=re.IGNORECASE)
+    text = re.sub(r"мз\s+ТеНеранбНому\s+АннрекТору", "Генеральному директору", text, flags=re.IGNORECASE)
+    text = re.sub(r"Ка6енб-ТесТ", "Кабель-Тест", text, flags=re.IGNORECASE)
+    text = re.sub(r"МНН/КNN", "ИНН/КПП", text, flags=re.IGNORECASE)
     text = re.sub(
         r"\bMapkax?\s+Kabena?\b",
         "Марках кабеля",

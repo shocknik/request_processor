@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from request_processor.extraction.letter_extractor import organizations_from_letter
 from request_processor.extraction.organization_extractor import (
     extract_kaluga_factory_address,
     sanitize_address,
 )
 
-_OCR = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "ocr_cache"
-    / "Письмо_на_период._исп._от_04.05.26_c44b8cb8c746c58aaf21198b_dpi200_tesseract.txt"
-)
+from tests.fixture_loader import load_extraction_fixture
+
+
+def _kaluga_letter_text() -> str:
+    return load_extraction_fixture("Письмо на период. исп. от 04.05.26.json").text
 
 _EXPECTED_PARTS = (
     "249841",
@@ -29,7 +26,7 @@ _EXPECTED_PARTS = (
 
 
 def test_kaluga_factory_address_from_ocr_header() -> None:
-    text = _OCR.read_text(encoding="utf-8")
+    text = _kaluga_letter_text()
     addr = extract_kaluga_factory_address(text)
     assert addr
     for part in _EXPECTED_PARTS:
@@ -37,7 +34,7 @@ def test_kaluga_factory_address_from_ocr_header() -> None:
 
 
 def test_kaluga_customer_org_has_normalized_address() -> None:
-    text = _OCR.read_text(encoding="utf-8")
+    text = _kaluga_letter_text()
     orgs = organizations_from_letter(text)
     customer = next(o for o in orgs if o.role == "customer")
     assert customer.address
@@ -80,7 +77,7 @@ def test_wrong_kievsky_kaluga_address_is_corrected() -> None:
         address=wrong,
         role="customer",
     )
-    fixed = finalize_organization_address(org, _OCR.read_text(encoding="utf-8"))
+    fixed = finalize_organization_address(org, _kaluga_letter_text())
     assert fixed.address
     assert "Жилетово" in fixed.address
     assert "Киевск" not in fixed.address

@@ -4,7 +4,7 @@ document_type: letter_list
 priority: 20
 enabled: true
 min_marks_threshold: 2
-confidence_threshold: 0.70
+confidence_threshold: 0.50
 
 sender_patterns:
   - "спецкабель"
@@ -15,7 +15,11 @@ detection:
   markers:
     - "гарантийн"
     - "TapaHTuiHoe\\s+nucbmMo"
+    - "ТараНТ"
     - "Mapkax?\\s+Kabena?"
+    - "МаркКах\\s+Ка6ена"
+    - "spetskabel\\.ru"
+    - "Мроснм\\s+Бас"
   brand_hints:
     - "СПЕЦЛАН"
     - "CMELVIAH"
