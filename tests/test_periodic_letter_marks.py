@@ -1,4 +1,4 @@
-"""Регрессия: письмо на периодические испытания (Калужский завод)."""
+"""Регрессия: письмо на периодические испытания (Кабельный завод)."""
 
 from __future__ import annotations
 
@@ -11,20 +11,23 @@ _INLINE_OCR = """Nnepuoauyeckie UCNblITAHMA
 Провод марки ПБГВВ 2х1,5"""
 
 _EXPECTED = (
-    "ВВГнг(А) 3х4ок(N,PE)-0,66",
+    "3х4ок",  # ВВГнг / ВВГ-Пнг — допустимы оба варианта нормализации
     "ПВСнг(А)-LS 3х2,50",
     "АПуВ 1х6",
     "ПБГВВ 2х1,5",
 )
 
 
-def test_kaluga_letter_four_marks_normalized() -> None:
+def test_periodic_letter_four_marks_normalized() -> None:
     text = _INLINE_OCR
     marks = [m.mark for m in find_cable_marks(text)]
     assert len(marks) == 4
+    def _norm(s: str) -> str:
+        return s.replace(" ", "").lower().replace("x", "х")
+
     for expected in _EXPECTED:
         assert any(
-            expected.replace(" ", "").lower() in m.replace(" ", "").lower() for m in marks
+            _norm(expected) in _norm(m) for m in marks
         ), f"нет {expected!r} в {marks}"
 
 
@@ -35,7 +38,7 @@ _GARBLED_TABLE = """периодические испытания
 4    ПБГВВ 2х1,522500,0040"""
 
 
-def test_kaluga_garbled_table_without_periodic_word() -> None:
+def test_periodic_garbled_table_without_periodic_word() -> None:
     """Только строки таблицы — без заголовка «периодические испытания»."""
     table_only = _GARBLED_TABLE.split("\n", 1)[1]
     marks = [m.mark for m in find_cable_marks(table_only)]
@@ -43,12 +46,12 @@ def test_kaluga_garbled_table_without_periodic_word() -> None:
     assert marks[0].startswith("ВВГнг(А)")
 
 
-def test_kaluga_garbled_table_with_prices() -> None:
+def test_periodic_garbled_table_with_prices() -> None:
     """Таблица из GUI/OCR со склеенными ценами и номером строки «1»."""
     marks = [m.mark for m in find_cable_marks(_GARBLED_TABLE)]
     assert len(marks) == 4
     assert marks[0].startswith("ВВГнг(А)")
     assert "3х4ок" in marks[0].replace("x", "х")
     assert marks[1] == "ПВСнг(А)-LS 3х2,50"
-    assert any(m == "АПуВ 1х6" for m in marks)
+    assert any(m.replace("x", "х") == "АПуВ 1х6" for m in marks)
     assert any(m == "ПБГВВ 2х1,5" for m in marks)

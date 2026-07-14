@@ -2,7 +2,7 @@
 
 Автоматизация расчёта стоимости испытаний кабельной продукции, извлечения данных из заявок (PDF/Word), валидации парсинга оператором и формирования документов (коммерческое предложение и заявка на испытания).
 
-**Версия:** 0.8.2  
+**Версия:** 0.9.1  
 **Репозиторий:** https://github.com/shocknik/request_processor  
 **Python:** ≥ 3.10
 
@@ -35,15 +35,16 @@
 
 ### Бизнес-цикл
 
-- **Извлечение** из **PDF** и **Word (.docx)**: марки кабелей, заказчик, производитель, организации, таблицы
+- **Извлечение** из **PDF**, **Word (.docx)** и **свободного текста** (речь/письмо заказчика): марки, заказчик, производитель, организации
 - **Валидация парсинга** — отчёт уверенности (правила P0–P2), human-in-the-loop в GUI, экспорт правок оператора
 - **Маппинг требований** — справочник `test_mappings` (25+ фраз), подсказки «Испытания из заявки» на вкладке «Расчёт»
 - **Расчёт испытаний** — правила `fixed`, `per_core`, `per_group`, `time_based`; климатические часы выдержки
 - **КП в Word** по нескольким маркам; автоматическое создание заказа в БД
 - **Заявка на испытания в Word** — форма + приложение с объёмом испытаний
+- **Макет протокола** + **пакет документов** (заявка + КП + протокол + summary) по заказу
 - **Заказы** — заявка + расчёты + КП = один заказ; история сгенерированных документов
 - Справочники: испытания, марки, организации
-- **GUI** (tkinter) и **CLI** (Click) — полный паритет ключевых операций
+- **GUI-first** (tkinter) + **CLI** (Click) для eval/migrate/агента
 
 ### OCR и распознавание сканов
 
@@ -57,8 +58,8 @@
 ### Нормализация и семейства документов
 
 - **Нормализация OCR-марок** — латиница → кириллица (`KCBur(A)` → `КСБнг(А)`), подсказка по `cable_marks`
-- **Семейства документов (YAML)** — `kaluga_periodic_v1`, `speclan_letter_v1` с детекцией по маркерам отправителя и таблицы
-- **Специализированные экстракторы** — письма Калуга (таблица периодических), Спецкабель (LAN Cat5e), направления СЕРК, FLEXICORE, VicabFLEX
+- **Семейства документов (YAML)** — `periodic_letter_v1`, `lan_letter_v1` с детекцией по маркерам типа документа и таблицы
+- **Специализированные экстракторы** — письма с таблицей периодических испытаний, гарантийные письма (LAN), направления в ИЛ, таблицы серийных марок
 - **Вид испытаний** — автоопределение из письма/заявки (вкладка «КП»)
 
 ### Обучение и оценка (Фаза 1)
@@ -70,34 +71,43 @@
 - **RAG-корпус** — индексация ТУ/ГОСТ/ПМИ/протоколов в `rag_documents` (без embeddings — задел Фазы 4)
 - **document_families** — YAML-семейства в БД
 
-### Задел ИИ-ассистента
+### Ассистент (спринт B)
 
-- Пакет `assistant/` — `MarkCorrector`, `BrandKnowledgeBase` (детерминированная коррекция марок; подключение LLM — в планах)
+- `MarkCorrector` + fuzzy snap по `cable_marks` + `BrandKnowledgeBase`
+- Вкладка «Заявка»: колонка **💡**, кнопки **Принять/Отклонить**, диалог **Ассистент**
+- Журнал решений → `data/training/corrections/assistant_*.jsonl` + `assistant_sessions`
+- Подсказки испытаний в панели марки; LLM — позже, opt-in
 
 ### Тестирование
 
-- **pytest** — **116** тестов: валидатор, CLI, марки (Калуга, Speclan, FLEXICORE, исх. 163, СЕРК), OCR, организации, training repo, eval extraction, table OCR, preprocess, GUI smoke
+- **pytest** — **116** тестов: валидатор, CLI, марки (периодические письма, LAN, серийные кабели, направления), OCR, организации, training repo, eval extraction, table OCR, preprocess, GUI smoke
 
 ---
 
 ## Быстрый старт
 
+**На рабочий ПК (рекомендуется):** см. **[INSTALL.md](INSTALL.md)** — один скрипт `scripts/install.ps1`.
+
+**Разработка:**
+
 ```powershell
 git clone https://github.com/shocknik/request_processor.git
 cd request_processor
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+# или вручную:
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e ".[dev,ocr,cv]"
+pip install -e ".[dev,cv]"
 request-processor migrate-db
 request-processor gui
 ```
 
-Или двойной клик: `start_gui.bat` (см. [Ярлык на рабочем столе](#скрипты)).
+Запуск: `start_gui.bat` или ярлык на рабочем столе.
 
-Минимальная установка без OCR-fallback и препроцессинга:
+Для dev-тестов OCR-fallback (тяжёлый torch, **не default**):
 
 ```powershell
-pip install -e ".[dev]"
+pip install -e ".[dev,ocr,cv]"
 ```
 
 ---
@@ -154,7 +164,7 @@ src/request_processor/
 │
 ├── extraction/              # Извлечение из документов
 │   ├── pdf_extractor.py     # PDF/DOCX, OCR, find_cable_marks, кэш
-│   ├── periodic_letter_extractor.py   # Таблица Калуга
+│   ├── periodic_letter_extractor.py   # Таблица периодических испытаний
 │   ├── letter_extractor.py            # Деловые письма
 │   ├── direction_table_extractor.py   # Направления в ИЛ
 │   ├── organization_extractor.py
@@ -235,7 +245,8 @@ docs/                        # История итераций
 | `data/extracted/` | JSON после `extract-pdf` / GUI |
 | `data/generated/` | Сгенерированные КП и заявки |
 | `data/ocr_cache/` | Кэш OCR (ключ: hash + dpi + engine + preprocess) |
-| `data/families/*.yaml` | Конфигурации семейств документов |
+| `data/families/*.yaml` | Конфигурации семейств документов (типы: письмо, направление, …) |
+| `data/client_profiles.local.yaml` | Локальные адреса/профили клиентов (**не в git**, см. `docs/client_profiles.example.yaml`) |
 
 ### Обучающий контур (`data/training/`)
 
@@ -309,9 +320,9 @@ docs/                        # История итераций
 ### Поиск марок
 
 1. Классификация семейства (`families/registry.py`, YAML)
-2. Специализированные паттерны (Калуга, Speclan, FLEXICORE, КГ*, VicabFLEX, …)
+2. Специализированные паттерны (периодические письма, LAN, серийные/гибкие марки, направления, …)
 3. Общий `find_cable_marks()` по тексту и таблицам
-4. OCR-фиксы: `_fix_periodic_letter_ocr`, `_fix_speclan_letter_ocr`, `_fix_flexicore_ocr`, `_fix_vicab_direction_ocr`
+4. OCR-фиксы по семействам документов (периодические, LAN, направления, …)
 5. `ocr_mark_normalizer` — нормализация бренда и латиницы
 6. Дедупликация и `is_plausible_mark()` — отсев мусора
 
@@ -372,7 +383,7 @@ grayscale → deskew (до ±5°) → denoise → upscale (min 1500px, target 20
 
 ```powershell
 # Один файл
-request-processor ingest-training-doc --file "path/to/letter.pdf" --family kaluga_periodic_v1
+request-processor ingest-training-doc --file "path/to/letter.pdf" --family periodic_letter_v1
 
 # Пакет из inbox
 request-processor ingest-training-inbox
@@ -385,7 +396,7 @@ request-processor seed-training
 
 ```powershell
 # Импорт эталона
-request-processor import-label --file data/training/labels/marks/исх_163.json
+request-processor import-label --file data/training/labels/marks/example_letter.json
 
 # Сравнение с ground truth
 request-processor eval-extraction
@@ -417,16 +428,16 @@ request-processor list-rag
 
 | ID | Файл | Тип | Описание |
 |----|------|-----|----------|
-| `kaluga_periodic_v1` | `periodic_table_v1.yaml` | `letter_periodic` | Письмо Калуга — таблица периодических испытаний (ВВГ, ПВС, ПБГВВ, ПуПВ, …) |
-| `speclan_letter_v1` | `speclan_letter_v1.yaml` | `letter_list` | Гарантийное письмо Спецкабель — марки СПЕЦЛАН LAN Cat5e |
+| `periodic_letter_v1` | `periodic_table_v1.yaml` | `letter_periodic` | Письмо производителя — таблица периодических испытаний |
+| `lan_letter_v1` | `lan_letter_v1.yaml` | `letter_list` | Гарантийное письмо / список LAN-марок |
 
 Каждое семейство задаёт:
 
 - `sender_patterns` — паттерны отправителя
 - `detection.markers` / `table_hints` — детекция по тексту
 - `mark_patterns` — regex марок с kind
-- `ocr_phrase_fixes` — замены OCR-ошибок (Speclan)
-- `row_sort` — приоритет строк таблицы (Калуга)
+- `ocr_phrase_fixes` — замены OCR-ошибок по семейству
+- `row_sort` — приоритет строк таблицы (периодические)
 
 `match_score(text)` → 0..1; `is_confident_match()` — порог `confidence_threshold`.
 
@@ -466,7 +477,7 @@ request-processor import-tests --file tests.xlsx
 request-processor list-tests
 request-processor add-test-item --code ... --name ... --base-cost ... --category ...
 request-processor list-cable-marks --search "ВВГ"
-request-processor list-organizations --search "Калуга"
+request-processor list-organizations --search "производитель"
 request-processor set-climatic-hours --temp-low 48 --humidity 120
 ```
 
@@ -508,10 +519,10 @@ request-processor delete-test-mapping --id 1
 
 ```powershell
 request-processor seed-training
-request-processor ingest-training-doc --file doc.pdf --family kaluga_periodic_v1
+request-processor ingest-training-doc --file doc.pdf --family periodic_letter_v1
 request-processor ingest-training-inbox
 request-processor list-training-docs
-request-processor import-label --file data/training/labels/marks/исх_163.json
+request-processor import-label --file data/training/labels/marks/example_letter.json
 request-processor eval-extraction
 request-processor eval-extraction --no-ocr-cache
 request-processor ocr-benchmark --pdf scan.pdf --page 1 --dpi 200
@@ -532,7 +543,7 @@ request-processor gui
 
 ```powershell
 pytest tests/ -q
-pytest tests/test_kaluga_letter_marks.py -v
+pytest tests/test_periodic_letter_marks.py -v
 pytest tests/test_eval_extraction.py -v
 ```
 
@@ -541,12 +552,12 @@ pytest tests/test_eval_extraction.py -v
 | `test_extraction_validator.py` | Правила P0–P2, ValidationReport |
 | `test_cli_extract_pdf.py` | CLI extract-pdf, --validate, --dry-run |
 | `test_find_cable_marks.py` | Общий поиск марок |
-| `test_kaluga_letter_marks.py` | Письма Калуга |
-| `test_kaluga_letter_address.py` | Адреса в письмах |
-| `test_speclan_letter_ocr.py` | Speclan + OCR-кэш |
-| `test_ish_163_marks.py` | Регрессия исх. 163 (4 марки из OCR-шума) |
-| `test_flexicore_marks.py` | FLEXICORE, H07RN-F |
-| `test_serk_marks.py` | СЕРК: КГ*, VicabFLEX |
+| `test_periodic_letter_marks.py` | Письма с таблицей периодических испытаний |
+| `test_periodic_letter_address.py` | Адреса производителя в письмах |
+| `test_lan_letter_ocr.py` | LAN-письмо + OCR-кэш |
+| `test_letter_marks_regression.py` | Регрессия марок из OCR-шума |
+| `test_series_cable_marks.py` | Серийные/гибкие марки |
+| `test_direction_marks.py` | Направления в ИЛ: типовые марки |
 | `test_ocr_cache.py` | Кэш OCR |
 | `test_ocr_preprocess.py` | Препроцессинг v2 |
 | `test_table_ocr.py` | Table OCR v0 |
@@ -576,6 +587,8 @@ pytest tests/test_eval_extraction.py -v
 |--------|------------|
 | `start_gui.bat` | Запуск GUI |
 | `start_gui_debug.bat` | GUI с логом в `data/gui_launch.log` |
+| `scripts/install.ps1` | Установка на ПК (venv, deps, БД, ярлык) |
+| `scripts/build_release_zip.ps1` | Zip-релиз для другого компьютера |
 | `scripts/create_desktop_shortcut.ps1` | Ярлык на рабочем столе |
 | `scripts/init_training_folders.ps1` | Создание структуры `data/training/` |
 | `scripts/batch_extract_inbox.ps1` | Пакетное извлечение из inbox |
@@ -600,7 +613,8 @@ powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1
 | **2 OCR** | ✅ | preprocess v2, table OCR v0, confidence, benchmark, расширенные марки |
 | **3** | 🔜 | Улучшение recall на реальных сканах, больше семейств |
 | **4 RAG** | 🔜 | Embeddings, поиск по ТУ/ГОСТ |
-| **5 Assistant** | 🔜 | LLM-коррекция марок (`assistant/`) |
+| **5 Assistant** | 🟡 | MarkCorrector в GUI (детерминированный слой); LLM — позже |
+| **6 Production** | 🟡 | v0.9: installer, пакет документов, текст/речь, DPI 400, torch opt-in |
 
 Подробные отчёты и планы — в Obsidian (`Python/Проект request-processor/`) и `docs/README.md`.
 

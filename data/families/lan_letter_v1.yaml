@@ -1,15 +1,12 @@
-id: speclan_letter_v1
-display_name: Гарантийное письмо Спецкабель (LAN Cat5e)
+id: lan_letter_v1
+display_name: Гарантийное письмо / список LAN-марок
 document_type: letter_list
 priority: 20
 enabled: true
 min_marks_threshold: 2
 confidence_threshold: 0.50
 
-sender_patterns:
-  - "спецкабель"
-  - "Cneukabel"
-  - "spetskabel"
+sender_patterns: []
 
 detection:
   markers:
@@ -18,8 +15,9 @@ detection:
     - "ТараНТ"
     - "Mapkax?\\s+Kabena?"
     - "МаркКах\\s+Ка6ена"
-    - "spetskabel\\.ru"
     - "Мроснм\\s+Бас"
+    - "LAN"
+    - "Cat\\s*5"
   brand_hints:
     - "СПЕЦЛАН"
     - "CMELVIAH"

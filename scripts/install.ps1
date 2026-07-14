@@ -1,0 +1,159 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Установка request-processor на рабочий ПК (Windows).
+
+.DESCRIPTION
+  Создаёт .venv, ставит зависимости (без тяжёлого PyTorch по умолчанию),
+  проверяет Tesseract, инициализирует data/, ярлык на рабочем столе.
+
+.PARAMETER ProjectRoot
+  Корень проекта. По умолчанию — родитель папки scripts/.
+
+.PARAMETER WithOcrExtra
+  Установить easyocr/torch (экспериментально, ~1+ ГБ). Не рекомендуется как default.
+
+.PARAMETER SkipShortcut
+  Не создавать ярлык на рабочем столе.
+
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+#>
+param(
+    [string]$ProjectRoot = "",
+    [switch]$WithOcrExtra,
+    [switch]$SkipShortcut
+)
+
+$ErrorActionPreference = "Stop"
+
+if (-not $ProjectRoot) {
+    $ProjectRoot = Split-Path -Parent $PSScriptRoot
+}
+$ProjectRoot = (Resolve-Path $ProjectRoot).Path
+Set-Location $ProjectRoot
+
+Write-Host "=== request-processor: установка ===" -ForegroundColor Cyan
+Write-Host "Корень: $ProjectRoot"
+
+function Find-Python {
+    $candidates = @(
+        @{ Cmd = "py"; Args = @("-3.12") },
+        @{ Cmd = "py"; Args = @("-3.11") },
+        @{ Cmd = "py"; Args = @("-3.10") },
+        @{ Cmd = "py"; Args = @("-3") },
+        @{ Cmd = "python"; Args = @() }
+    )
+    foreach ($c in $candidates) {
+        try {
+            $out = & $c.Cmd @($c.Args + @("-c", "import sys; print(sys.executable); print(f'{sys.version_info.major}.{sys.version_info.minor}')")) 2>$null
+            if ($LASTEXITCODE -eq 0 -and $out) {
+                $lines = @($out)
+                $exe = $lines[0].Trim()
+                $ver = $lines[1].Trim()
+                $parts = $ver.Split(".")
+                $major = [int]$parts[0]; $minor = [int]$parts[1]
+                if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 10)) {
+                    return @{ Exe = $exe; Ver = $ver; Launcher = $c.Cmd; LauncherArgs = $c.Args }
+                }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+$py = Find-Python
+if (-not $py) {
+    Write-Host "ERROR: Нужен Python 3.10+ (рекомендуется 3.11/3.12)." -ForegroundColor Red
+    Write-Host "Скачайте: https://www.python.org/downloads/  (отметьте Add to PATH)"
+    exit 1
+}
+Write-Host "Python $($py.Ver): $($py.Exe)"
+
+$venvDir = Join-Path $ProjectRoot ".venv"
+$venvPy = Join-Path $venvDir "Scripts\python.exe"
+if (-not (Test-Path $venvPy)) {
+    Write-Host "Создаю venv..."
+    & $py.Exe -m venv $venvDir
+    if (-not (Test-Path $venvPy)) {
+        Write-Error "Не удалось создать .venv"
+        exit 1
+    }
+} else {
+    Write-Host "venv уже есть: $venvDir"
+}
+
+Write-Host "Обновляю pip..."
+& $venvPy -m pip install --upgrade pip setuptools wheel | Out-Host
+
+$extras = @()
+# OpenCV для препроцессинга сканов — лёгкий и полезный
+$extras += "cv"
+if ($WithOcrExtra) {
+    Write-Host "WithOcrExtra: ставлю easyocr (тяжёлый torch)..." -ForegroundColor Yellow
+    $extras += "ocr"
+}
+$extraSpec = if ($extras.Count -gt 0) { ".[" + ($extras -join ",") + "]" } else { "." }
+
+Write-Host "Устанавливаю пакет: pip install -e `"$extraSpec`""
+& $venvPy -m pip install -e $extraSpec
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "pip install завершился с ошибкой"
+    exit 1
+}
+
+# data/
+$dataDirs = @(
+    "data", "data\generated", "data\extracted", "data\ocr_cache",
+    "data\logs", "data\parse_snapshots", "data\templates", "data\families",
+    "data\training\corrections"
+)
+foreach ($d in $dataDirs) {
+    $p = Join-Path $ProjectRoot $d
+    if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+}
+
+# Tesseract
+$tessCandidates = @(
+    (Join-Path $ProjectRoot "tools\Tesseract-OCR\tesseract.exe"),
+    "C:\Program Files\Tesseract-OCR\tesseract.exe",
+    "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
+)
+$tess = $tessCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($tess) {
+    Write-Host "Tesseract: $tess" -ForegroundColor Green
+} else {
+    Write-Host ""
+    Write-Host "WARNING: Tesseract OCR не найден." -ForegroundColor Yellow
+    Write-Host "  Для сканов PDF установите Tesseract (rus+eng) и/или положите portable в:"
+    Write-Host "  $ProjectRoot\tools\Tesseract-OCR\tesseract.exe"
+    Write-Host "  https://github.com/UB-Mannheim/tesseract/wiki"
+    Write-Host ""
+}
+
+# DB init
+Write-Host "Инициализация БД..."
+& $venvPy -c "from request_processor.persistence.sqlite_repo import init_db; init_db(); print('DB OK')"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARNING: init_db не прошёл (можно запустить GUI — создаст сама)" -ForegroundColor Yellow
+}
+
+if (-not $SkipShortcut) {
+    $shortcutScript = Join-Path $PSScriptRoot "create_desktop_shortcut.ps1"
+    if (Test-Path $shortcutScript) {
+        & powershell -ExecutionPolicy Bypass -File $shortcutScript
+    }
+}
+
+Write-Host ""
+Write-Host "=== Готово ===" -ForegroundColor Green
+Write-Host "Запуск GUI:"
+Write-Host "  $ProjectRoot\start_gui.bat"
+Write-Host "или:"
+Write-Host "  .\.venv\Scripts\request-processor-gui.exe"
+Write-Host ""
+Write-Host "Рекомендации оператора:"
+Write-Host "  • DPI для сканов: 400 (по умолчанию в GUI)"
+Write-Host "  • torch-CV / EasyOCR: только эксперимент (хуже Tesseract на текущих сканах)"
+Write-Host "  • После правок марок — «Подтвердить заявку» (идёт в обучение)"
+Write-Host ""

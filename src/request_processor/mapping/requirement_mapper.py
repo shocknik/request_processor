@@ -26,7 +26,9 @@ class _MappingRule:
     is_regex: bool = False
 
 
-# Устаревшие slug → коды из прайса (test_items), если climatic-код не найден в БД.
+from ..calculation.climatic_tests import CLIMATE_ITEM_ALIASES
+
+# Устаревшие slug → коды из прайса (test_items).
 _CODE_ALIASES: dict[str, str] = {
     "resistance_core": "электрическое_сопротивление_тпж",
     "insulation_resistance": "электрическое_сопротивление_изоляции_тпж",
@@ -34,24 +36,25 @@ _CODE_ALIASES: dict[str, str] = {
     "capacitance": "измерение_емкостииндуктивности",
     "inductance": "измерение_емкостииндуктивности",
     "attenuation": "измерение_затухания_экранирования",
+    **CLIMATE_ITEM_ALIASES,
 }
 
 # Порядок: более специфичные фразы выше. Проверка — по вхождению в нижний регистр.
 _BUILTIN_RULES: tuple[_MappingRule, ...] = (
-    _MappingRule("воздействию солнечного", "solar_radiation", 0.93, "Направления в ИЛ"),
-    _MappingRule("солнечного излучения", "solar_radiation", 0.92, "ГОСТ 20.57.406"),
-    _MappingRule("солнечной радиации", "solar_radiation", 0.92),
-    _MappingRule("20.57.406", "solar_radiation", 0.88, "ГОСТ солнечного излучения"),
-    _MappingRule("метод 211-1", "solar_radiation", 0.86),
-    _MappingRule("ультрафиолет", "solar_radiation", 0.78, "УФ"),
-    _MappingRule("повышенной влажности", "humidity", 0.90),
-    _MappingRule("влажности воздуха", "humidity", 0.88),
-    _MappingRule("влажност", "humidity", 0.75),
-    _MappingRule("пониженной температур", "temp_low", 0.90),
-    _MappingRule("отрицательной температур", "temp_low", 0.85),
-    _MappingRule("повышенной температур", "temp_high", 0.90),
-    _MappingRule("изменению температур", "temp_cycling", 0.88),
-    _MappingRule("циклическ", "temp_cycling", 0.70),
+    _MappingRule("воздействию солнечного", "стойкость_к_солнечной_радиации", 0.93, "Направления в ИЛ"),
+    _MappingRule("солнечного излучения", "стойкость_к_солнечной_радиации", 0.92, "ГОСТ 20.57.406"),
+    _MappingRule("солнечной радиации", "стойкость_к_солнечной_радиации", 0.92),
+    _MappingRule("20.57.406", "стойкость_к_солнечной_радиации", 0.88, "ГОСТ солнечного излучения"),
+    _MappingRule("метод 211-1", "стойкость_к_солнечной_радиации", 0.86),
+    _MappingRule("ультрафиолет", "стойкость_к_солнечной_радиации", 0.78, "УФ"),
+    _MappingRule("повышенной влажности", "стойкость_к_повышенной_влажности_воздуха", 0.90),
+    _MappingRule("влажности воздуха", "стойкость_к_повышенной_влажности_воздуха", 0.88),
+    _MappingRule("влажност", "стойкость_к_повышенной_влажности_воздуха", 0.75),
+    _MappingRule("пониженной температур", "стойкость_к_пониженной_температуре", 0.90),
+    _MappingRule("отрицательной температур", "стойкость_к_пониженной_температуре", 0.85),
+    _MappingRule("повышенной температур", "стойкость_к_повышенной_температуре", 0.90),
+    _MappingRule("изменению температур", "стойкость_к_изменению_температуррезкоеплавное", 0.88),
+    _MappingRule("циклическ", "стойкость_к_изменению_температуррезкоеплавное", 0.70),
     _MappingRule("простому изгибу", "стойкость_к_простому_изгибу_100_циклов", 0.82),
     _MappingRule("огнестойк", "огнестойкость", 0.85),
     _MappingRule(
@@ -173,6 +176,24 @@ def map_requirements_to_tests(
         return []
 
     merged: dict[str, TestSuggestion] = {}
+
+    # Knowledge base synonyms (data/knowledge/…/test_synonyms.yaml)
+    try:
+        from ..knowledge.synonyms import resolve_test_phrase
+
+        kb_code, kb_conf = resolve_test_phrase(text)
+        if kb_code and kb_conf >= 0.75:
+            resolved = resolve_test_code(kb_code, db_path)
+            merged[resolved] = TestSuggestion(
+                code=resolved,
+                name=_resolve_test_name(resolved, db_path),
+                confidence=kb_conf,
+                source="knowledge_synonym",
+                matched_pattern=text[:120],
+                note="KB test_synonyms",
+            )
+    except Exception:
+        pass
 
     for code, conf, note, pattern in _match_builtin(text):
         resolved = resolve_test_code(code, db_path)

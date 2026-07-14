@@ -16,7 +16,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 from ..models import CommercialProposal, KPMarkLine
 
-LAB_NAME = "ООО «НИЦ Кабель-Тест»"
+LAB_NAME = "ООО «Испытательный центр»"
 LAB_TAGLINE = "Испытательный центр кабельной продукции"
 DEFAULT_VALIDITY_DAYS = 30
 VAT_PERCENT = 22

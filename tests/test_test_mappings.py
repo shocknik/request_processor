@@ -35,7 +35,7 @@ def test_map_direction_phrase_solar(db) -> None:
     text = "Стойкость к воздействию солнечного излучения (ГОСТ 20.57.406 метод 211-1)"
     suggestions = map_requirements_to_tests(text, db_path=db)
     codes = [s.code for s in suggestions]
-    assert "solar_radiation" in codes
+    assert "стойкость_к_солнечной_радиации" in codes
 
 
 def test_map_voltage_phrase_uses_price_code(db) -> None:
@@ -49,9 +49,11 @@ def test_map_voltage_phrase_uses_price_code(db) -> None:
 
 
 def test_resolve_test_code_alias(db) -> None:
-    from request_processor.persistence.sqlite_repo import add_test_item
+    from request_processor.persistence.sqlite_repo import add_test_item, get_connection
     from request_processor.models import TestItem
 
+    with get_connection(db) as conn:
+        conn.execute("DELETE FROM test_items WHERE code = 'resistance_core'")
     add_test_item(
         TestItem(
             code="электрическое_сопротивление_тпж",

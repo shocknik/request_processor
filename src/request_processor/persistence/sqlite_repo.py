@@ -31,10 +31,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..models import (
+    AssistantLlmSettings,
     Calculation,
     CalculationLine,
     CableMarkRecord,
     ClimaticTestSettings,
+    DocumentPackSettings,
     OrganizationExtract,
     TestItem,
     TestItemUpdate,
@@ -42,7 +44,13 @@ from ..models import (
 )
 from ..extraction.organization_extractor import normalize_org_name
 from ..parsing.cable_mark_parser import parse_cable_mark_record
-from ..calculation.climatic_tests import CLIMATIC_TESTS, climatic_settings_fields
+from ..calculation.climatic_tests import (
+    CLIMATE_ITEM_ALIASES,
+    CLIMATE_SLUG_BY_HOURS_KEY,
+    CLIMATIC_TESTS,
+    DEPRECATED_CLIMATE_ITEM_CODES,
+    climatic_settings_fields,
+)
 from ..calculation.test_rules import DEFAULT_PRICE_XLSX, infer_rule_type
 
 # Корень проекта (не зависит от текущей рабочей директории при запуске GUI/CLI)
@@ -387,6 +395,8 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     _migrate_orders_columns(db_path)
     _migrate_organizations_columns(db_path)
     _migrate_training_tables(db_path)
+    _migrate_calculation_lines_quantity(db_path)
+    apply_price_catalog_fixes(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
     sync_default_test_mappings(db_path)
@@ -567,7 +577,7 @@ def get_calculation_lines(
     with get_connection(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT test_name, base_cost, multiplier, hours, final_cost, note
+            SELECT test_name, base_cost, multiplier, quantity, hours, final_cost, note
             FROM calculation_lines
             WHERE calculation_id = ?
             ORDER BY id
@@ -713,41 +723,96 @@ def sync_test_rule_types(db_path: str | Path = DB_PATH_DEFAULT) -> int:
     return updated
 
 
+def _migrate_calculation_lines_quantity(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    with get_connection(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(calculation_lines)").fetchall()}
+        if "quantity" not in cols:
+            conn.execute(
+                "ALTER TABLE calculation_lines ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1"
+            )
+
+
+_PRICE_NAME_FIXES: dict[str, str] = {
+    "измерение_толщины_облочкишланга": "Измерение толщины оболочки/шланга",
+    "измерение_шагакратности_скртки": "Измерение шага/кратности скрутки",
+    "водопоглащение": "Водопоглощение",
+    "прочность_и_относительное_удлинение_элемента_конструкци": (
+        "Прочность и относительное удлинение элемента конструкции"
+    ),
+    "хромотография_определние_фтора_в_тч": "Хроматография (определение фтора в т.ч.)",
+    "установка_соединителейпод_vna_aesa": "Установка соединителей (под VNA, AESA)",
+}
+
+_OPTICAL_PER_CORE_CODES = (
+    "измерение_затухания_оптического_волокнаодного",
+    "определение_целостности_оптического_волокнаодного",
+)
+
+
+def apply_price_catalog_fixes(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """
+    Синхронизация прайса по шаблону Obsidian §39:
+    убрать EN-дубли климатики, исправить опечатки, оптика → per_core.
+    """
+    with get_connection(db_path) as conn:
+        for en_code, slug in CLIMATE_ITEM_ALIASES.items():
+            conn.execute(
+                "UPDATE test_mappings SET test_code = ? WHERE test_code = ?",
+                (slug, en_code),
+            )
+        for code in DEPRECATED_CLIMATE_ITEM_CODES:
+            conn.execute("DELETE FROM test_items WHERE code = ?", (code,))
+
+    for code, name in _PRICE_NAME_FIXES.items():
+        if get_test_item_by_code(code, db_path):
+            update_test_item(code, TestItemUpdate(name=name), db_path)
+
+    for code in _OPTICAL_PER_CORE_CODES:
+        if get_test_item_by_code(code, db_path):
+            update_test_item(
+                code,
+                TestItemUpdate(rule_type="per_core", rule_params={}),
+                db_path,
+            )
+
+
 def sync_climatic_tests(db_path: str | Path = DB_PATH_DEFAULT) -> None:
-    """Приводит климатические испытания к time_based с актуальными названиями."""
+    """Обновляет slug-коды климатики: time_based + rule_params (без EN-дублей)."""
     for spec in CLIMATIC_TESTS:
-        item = TestItem(
-            code=spec["code"],
-            name=spec["name"],
-            base_cost=spec["base_cost"],
-            category="Внешние воздействующие факторы",
-            rule_type="time_based",
-            rule_params={
-                "hours_key": spec["hours_key"],
-                "default_hours": spec["default_hours"],
-                "cost_per_hour": spec["cost_per_hour"],
-            },
+        slug = CLIMATE_SLUG_BY_HOURS_KEY.get(spec["hours_key"])
+        if not slug or not get_test_item_by_code(slug, db_path):
+            continue
+        update_test_item(
+            slug,
+            TestItemUpdate(
+                rule_type="time_based",
+                rule_params={
+                    "hours_key": spec["hours_key"],
+                    "default_hours": spec["default_hours"],
+                    "cost_per_hour": spec["cost_per_hour"],
+                },
+            ),
+            db_path,
         )
-        insert_test_item(item, db_path)
 
 
 _DEFAULT_TEST_MAPPINGS: list[tuple[str, str, str | None]] = [
-    # Климатика (направления в ИЛ, ТУ, прайс)
-    ("воздействию солнечного", "solar_radiation", "Направления в ИЛ"),
-    ("солнечного излучения", "solar_radiation", "ГОСТ 20.57.406"),
-    ("солнечной радиации", "solar_radiation", "Климатика"),
-    ("20.57.406", "solar_radiation", "ГОСТ солнечного излучения"),
-    ("метод 211-1", "solar_radiation", "ГОСТ 20.57.406 метод 211-1"),
-    ("повышенной влажности", "humidity", "Климатика"),
-    ("влажности воздуха", "humidity", "Климатика"),
-    ("пониженной температуры", "temp_low", "Климатика"),
-    ("пониженной температуре", "temp_low", "Климатика"),
-    ("повышенной температуры", "temp_high", "Климатика"),
-    ("повышенной температуре", "temp_high", "Климатика"),
-    ("изменению температур", "temp_cycling", "Климатика"),
-    ("изменению температуры", "temp_cycling", "Климатика"),
-    ("циклическ", "temp_cycling", "Климатика"),
-    ("отрицательной температур", "temp_low", "Морозостойкость"),
+    # Климатика (slug-коды прайса)
+    ("воздействию солнечного", "стойкость_к_солнечной_радиации", "Направления в ИЛ"),
+    ("солнечного излучения", "стойкость_к_солнечной_радиации", "ГОСТ 20.57.406"),
+    ("солнечной радиации", "стойкость_к_солнечной_радиации", "Климатика"),
+    ("20.57.406", "стойкость_к_солнечной_радиации", "ГОСТ солнечного излучения"),
+    ("метод 211-1", "стойкость_к_солнечной_радиации", "ГОСТ 20.57.406 метод 211-1"),
+    ("повышенной влажности", "стойкость_к_повышенной_влажности_воздуха", "Климатика"),
+    ("влажности воздуха", "стойкость_к_повышенной_влажности_воздуха", "Климатика"),
+    ("пониженной температуры", "стойкость_к_пониженной_температуре", "Климатика"),
+    ("пониженной температуре", "стойкость_к_пониженной_температуре", "Климатика"),
+    ("повышенной температуры", "стойкость_к_повышенной_температуре", "Климатика"),
+    ("повышенной температуре", "стойкость_к_повышенной_температуре", "Климатика"),
+    ("изменению температур", "стойкость_к_изменению_температуррезкоеплавное", "Климатика"),
+    ("изменению температуры", "стойкость_к_изменению_температуррезкоеплавное", "Климатика"),
+    ("циклическ", "стойкость_к_изменению_температуррезкоеплавное", "Климатика"),
+    ("отрицательной температур", "стойкость_к_пониженной_температуре", "Морозостойкость"),
     ("простому изгибу", "стойкость_к_простому_изгибу_100_циклов", "Механика"),
     # Электрические (коды из прайса)
     ("электрическое сопротивление тпж", "электрическое_сопротивление_тпж", "Прайс НЧ"),
@@ -760,7 +825,7 @@ _DEFAULT_TEST_MAPPINGS: list[tuple[str, str, str | None]] = [
     ("затухания экранирования", "измерение_затухания_экранирования", "ВЧ"),
     ("затухания излучения", "измерение_затухания_излучения", "ВЧ"),
     ("огнестойкость", "огнестойкость", "Пожарная безопасность"),
-    ("ультрафиолет", "solar_radiation", "УФ → солнечная радиация"),
+    ("ультрафиолет", "стойкость_к_солнечной_радиации", "УФ → солнечная радиация"),
 ]
 
 
@@ -945,6 +1010,8 @@ def record_mapping_usage(
 
 
 CLIMATIC_SETTINGS_KEY = "climatic_test_hours"
+DOCUMENT_PACK_SETTINGS_KEY = "document_pack_settings"
+ASSISTANT_LLM_SETTINGS_KEY = "assistant_llm_settings"
 
 
 def _seed_default_settings(db_path: str | Path) -> None:
@@ -975,6 +1042,75 @@ def save_climatic_settings(
             """,
             (CLIMATIC_SETTINGS_KEY, settings.model_dump_json()),
         )
+
+
+def get_document_pack_settings(
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> DocumentPackSettings:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (DOCUMENT_PACK_SETTINGS_KEY,)
+        ).fetchone()
+        if not row:
+            return DocumentPackSettings()
+        return DocumentPackSettings(**json.loads(row["value"]))
+
+
+def save_document_pack_settings(
+    settings: DocumentPackSettings,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (DOCUMENT_PACK_SETTINGS_KEY, settings.model_dump_json()),
+        )
+
+
+def get_assistant_llm_settings(
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> AssistantLlmSettings:
+    from ..assistant.llm_provider import default_llm_settings, resolve_llm_settings
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (ASSISTANT_LLM_SETTINGS_KEY,)
+        ).fetchone()
+        if not row:
+            return resolve_llm_settings(default_llm_settings())
+        return resolve_llm_settings(AssistantLlmSettings(**json.loads(row["value"])))
+
+
+def save_assistant_llm_settings(
+    settings: AssistantLlmSettings,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (ASSISTANT_LLM_SETTINGS_KEY, settings.model_dump_json()),
+        )
+
+
+def push_recent_pack_path(
+    pack_dir: str | Path,
+    db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    limit: int = 5,
+) -> None:
+    """Добавляет путь пакета в историю (последние limit уникальных)."""
+    path = str(Path(pack_dir).resolve())
+    settings = get_document_pack_settings(db_path)
+    recent = [p for p in settings.recent_paths if p != path]
+    recent.insert(0, path)
+    settings.recent_paths = recent[:limit]
+    save_document_pack_settings(settings, db_path)
 
 
 def build_default_hours_map(db_path: str | Path = DB_PATH_DEFAULT) -> dict[str, float]:
@@ -1644,9 +1780,10 @@ def insert_test_item(item: TestItem, db_path: str | Path = DB_PATH_DEFAULT) -> i
 
 
 def get_test_item_by_code(code: str, db_path: str | Path = DB_PATH_DEFAULT) -> TestItem | None:
-    """Получает TestItem по короткому коду (используется в калькуляторе)."""
+    """Получает TestItem по коду (с алиасом EN-климатики → slug)."""
+    resolved = CLIMATE_ITEM_ALIASES.get(code, code)
     with get_connection(db_path) as conn:
-        row = conn.execute("SELECT * FROM test_items WHERE code = ?", (code,)).fetchone()
+        row = conn.execute("SELECT * FROM test_items WHERE code = ?", (resolved,)).fetchone()
         if not row:
             return None
         data = dict(row)
@@ -1692,8 +1829,8 @@ def save_calculation(calc: Calculation, db_path: str | Path = DB_PATH_DEFAULT) -
                 """
                 INSERT INTO calculation_lines
                     (calculation_id, test_item_id, test_name, base_cost,
-                     multiplier, hours, final_cost, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     multiplier, quantity, hours, final_cost, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     calc_id,
@@ -1701,6 +1838,7 @@ def save_calculation(calc: Calculation, db_path: str | Path = DB_PATH_DEFAULT) -
                     line.test_name,
                     line.base_cost,
                     line.multiplier,
+                    line.quantity,
                     line.hours,
                     line.final_cost,
                     line.note,

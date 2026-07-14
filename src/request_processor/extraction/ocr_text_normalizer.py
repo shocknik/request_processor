@@ -10,12 +10,16 @@ from __future__ import annotations
 import re
 
 from ..parsing.cable_mark_parser import fix_ocr_document_text
+from .client_profiles import apply_org_ocr_aliases
 from .ocr_mark_normalizer import _LATIN_TO_CYR
 
-# Не трогаем email, URL, LAN-обозначения, англ. подписи
+# Не трогаем email, URL, LAN-обозначения, лат. бренды марок, англ. подписи
 _PROTECTED_SPAN = re.compile(
     r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|"
     r"https?://\S+|"
+    r"\bFLEXICORE(?:®)?(?:\s+[^\n|]{0,60})?|"
+    r"\bH07RN-F(?:\s+RU)?\b|"
+    r"\bVicabFLEX\b|"
     r"\b(?:Cat\s*5\w|UTP|SF/?UTP|F/?UTP|Prepared\s+by|Phone:|/Phone:|ext\.)\b",
     re.IGNORECASE,
 )
@@ -29,17 +33,17 @@ def _apply_regex_fixes(text: str, pairs: tuple[tuple[str, str], ...]) -> str:
 
 _ADDRESS_FIXES: tuple[tuple[str, str], ...] = (
     (r"Poccumickaa\s+Peaepauna,?\s*", "Российская Федерация, "),
-    (r"KaAyKCKaA\s+OOACCTE", "Калужская область"),
-    (r"A3@PXXUHCKMM\s+PANOH", "Дзержинский район"),
-    (r"A\.\s*Kuaetoso", "д. Жилетово"),
-    (r"\bKuaetoso\b", "Жилетово"),
+    (r"KaAyKCKaA\s+OOACCTE", "область"),
+    (r"A3@PXXUHCKMM\s+PANOH", "район"),
+    (r"A\.\s*Kuaetoso", "д. н.п."),
+    (r"\bKuaetoso\b", "н.п."),
     (r"YA\.\s*MpOMbiLuAeHHas", "ул. Промышленная"),
     (r"\bYA\.\s*", "ул. "),
     (r"\bA\.\s*(\d+)\b", r"д. \1"),
     (r"\bCTP\.\s*(\d+)\b", r"стр. \1"),
 )
 
-_SPECLAN_FIXES: tuple[tuple[str, str], ...] = (
+_LAN_FIXES: tuple[tuple[str, str], ...] = (
     (r"\b(?:CMELVIAH|CMELAN|SPECLAN|Cneu\w*lan|Sneu\w*lan)\b", "СПЕЦЛАН"),
     (r"\b(?:СNЕ[UW][АA]{1,2}Н|СNЕLWIАН|СNЕUWААН)\b", "СПЕЦЛАН"),
     (r"\bMapkax?\s+Kabena?\b", "Марках кабеля"),
@@ -54,14 +58,10 @@ _SPECLAN_FIXES: tuple[tuple[str, str], ...] = (
     (r"мз\s+ТеНеранбНому\s+АннрекТору", "Генеральному директору"),
     (r"TeHepanbHbIl\s+AUpeKTOp", "Генеральный директор"),
     (r"\bOOO\s+HNN\b", "ООО НПП"),
-    (r"Cneu\w*abel\w*", "Спецкабель"),
-    (r"Cneukabenl?", "Спецкабель"),
-    (r"Сненка6[бе]/1?б", "Спецкабель"),
-    (r"Сненка6бенб", "Спецкабель"),
     (r"МНН/КNN", "ИНН/КПП"),
     (r"Мосхса", "Москва"),
-    (r"Ка6енб-ТесТ", "Кабель-Тест"),
-    (r"Kabenb-TecT", "Кабель-Тест"),
+    (r"Испытательный центр", "Испытательный центр"),
+    (r"Ispytatelnyj centr", "Испытательный центр"),
     (r"\bYa\.\s+", "ул. "),
     (r"\bBuptocuuka\b", "Бутырская"),
     (r"\bMocksa\b", "Москва"),
@@ -83,7 +83,11 @@ _SPECLAN_FIXES: tuple[tuple[str, str], ...] = (
 _PERIODIC_FIXES: tuple[tuple[str, str], ...] = (
     (r"N?Mpocum\s+Bac\s+nprovectm?", "Просим Вас провести"),
     (r"TeEHEPAAbHOMY\s+ANPeKTOPy", "Генеральному директору"),
-    (r"KaayxKckni\s+KaGeAbHbIN\s+3GB0A", "Калужский кабельный завод"),
+    (
+        r"O6GLL\w+\s+С\s+ОфРАН\w+.*?[«\"]?\s*Кабельный\s+завод\)?",
+        "ООО «Кабельный завод»",
+    ),
+    (r"KaayxKckni\s+KaGeAbHbIN\s+3GB0A", "Кабельный завод"),
     (r"Nnepuoauyeckie\s+UCNblITAHMA", "периодические испытания"),
     (r"\bBBI-MHr\(A\)", "ВВГнг(А)"),
     (r"\bBBI-", "ВВГ-"),
@@ -149,7 +153,7 @@ def normalize_ocr_text(text: str) -> str:
         return text
 
     text = fix_ocr_document_text(text)
-    for fixes in (_ADDRESS_FIXES, _SPECLAN_FIXES, _PERIODIC_FIXES, _MISC_FIXES):
+    for fixes in (_ADDRESS_FIXES, _LAN_FIXES, _PERIODIC_FIXES, _MISC_FIXES):
         text = _apply_regex_fixes(text, fixes)
 
     lines = []
@@ -164,4 +168,6 @@ def normalize_ocr_text(text: str) -> str:
             line = _homoglyph_line(line)
         lines.append(line)
     text = "\n".join(lines)
+    # Локальные OCR→канон для имён на бланке (Спецкабель и т.д.) — не шаблоны
+    text = apply_org_ocr_aliases(text)
     return re.sub(r"  +", " ", text)

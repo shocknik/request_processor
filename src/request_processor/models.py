@@ -56,6 +56,7 @@ class CalculationLine(BaseModel):
     test_name: str
     base_cost: float
     multiplier: float = 1.0
+    quantity: int = Field(1, ge=1, description="Количество однотипных испытаний")
     hours: float | None = None
     final_cost: float
     note: str | None = None
@@ -67,6 +68,13 @@ class Calculation(BaseModel):
     id: int | None = None
     mark: str
     parsed_mark: CableMark
+    subtotal_before_adjustments: float = Field(
+        0.0, description="Сумма строк до минимума/скидки/наценки"
+    )
+    minimum_adjustment: float = Field(0.0, ge=0, description="Доплата до минимального заказа")
+    discount_percent: float = Field(0.0, ge=0, le=100)
+    markup_percent: float = Field(0.0, ge=0)
+    sample_complexity: float = Field(1.0, gt=0)
     total_cost_without_vat: float
     vat_rate: float = 0.22
     total_cost_with_vat: float
@@ -193,6 +201,40 @@ class CommercialProposal(BaseModel):
         return round(sum(m.total_with_vat for m in self.marks), 2)
 
 
+class DocumentPackSettings(BaseModel):
+    """Куда сохранять пакеты документов (GUI / North Star)."""
+
+    base_dir: str = Field("", description="Базовая папка; пусто — data/generated")
+    recent_paths: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Последние 3–5 папок пакетов",
+    )
+
+
+class AssistantLlmSettings(BaseModel):
+    """Настройки LLM-ассистента (Ollama локально, opt-in)."""
+
+    enabled: bool = Field(False, description="Включить LLM поверх детерминированного слоя")
+    provider: Literal["ollama", "off"] = Field("ollama", description="Провайдер LLM")
+    model: str = Field("llama3.2", min_length=1, description="Имя модели Ollama")
+    base_url: str = Field(
+        "http://127.0.0.1:11434",
+        description="URL Ollama API (OLLAMA_HOST)",
+    )
+    ollama_models_dir: str = Field(
+        "D:/ollama/models",
+        description="Каталог моделей (OLLAMA_MODELS), предпочтительно диск D",
+    )
+    timeout_seconds: float = Field(60.0, gt=0, le=300, description="Таймаут запроса, с")
+    skip_if_confidence_above: float = Field(
+        0.92,
+        ge=0.0,
+        le=1.0,
+        description="Не вызывать LLM, если детерминированный слой уверен выше порога",
+    )
+
+
 class ClimaticTestSettings(BaseModel):
     """Время выдержки по умолчанию для климатических испытаний (часы)."""
 
@@ -288,7 +330,7 @@ class PdfExtractionResult(BaseModel):
     """Результат извлечения из заявки (PDF, Word .docx)."""
 
     source_path: str
-    source_type: Literal["pdf", "docx", "unknown"] = "pdf"
+    source_type: Literal["pdf", "docx", "text", "unknown"] = "pdf"
     page_count: int
     text: str
     tables: list[list[list[str]]] = Field(default_factory=list)
@@ -298,6 +340,8 @@ class PdfExtractionResult(BaseModel):
     manufacturer_name: str = ""
     is_scanned: bool = False
     ocr_used: bool = False
+    # tesseract | easyocr (pytorch_cv) | none — фактический движок OCR
+    ocr_engine: str | None = None
     extracted_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -320,7 +364,7 @@ class TestSuggestion(BaseModel):
     code: str
     name: str
     confidence: float = Field(ge=0, le=1)
-    source: Literal["builtin", "database"] = "builtin"
+    source: Literal["builtin", "database", "knowledge_synonym"] = "builtin"
     matched_pattern: str | None = None
     note: str | None = None
     mapping_id: int | None = None

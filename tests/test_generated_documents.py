@@ -17,7 +17,7 @@ from request_processor.calculation.cost_calculator import calculate_cost
 
 def _save_demo_calc(db: Path, mark: str = "ВВГ 3х2,5") -> int:
     hours = build_default_hours_map(db)
-    calc = calculate_cost(mark, ["solar_radiation"], hours, db)
+    calc = calculate_cost(mark, ["стойкость_к_солнечной_радиации"], hours, db)
     return save_calculation(calc, db)
 
 

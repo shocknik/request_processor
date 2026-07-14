@@ -13,7 +13,7 @@ import tkinter as tk
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from ..calculation.climatic_tests import climatic_settings_fields, is_climatic_code
 from ..calculation.test_rules import (
@@ -22,11 +22,20 @@ from ..calculation.test_rules import (
     category_sort_key,
     rule_type_label,
 )
+from ..logging_setup import get_logger, setup_logging
+from ..parse_compare import (
+    compare_snapshots,
+    list_snapshots,
+    load_snapshot,
+    save_snapshot_from_extraction,
+)
 from ..parsing.cable_mark_parser import parse_cable_mark_record
 from ..calculation.cost_calculator import calculate_cost, format_breakdown
 from ..validation.extraction_validator import apply_operator_edits, validate_extraction
 from ..mapping.requirement_mapper import map_requirements_to_tests
 from ..models import (
+    AssistantLlmSettings,
+    DocumentPackSettings,
     CableMarkMatch,
     ClimaticTestSettings,
     FieldStatus,
@@ -41,16 +50,39 @@ from ..extraction.test_type_extractor import (
     detect_test_type,
     format_test_type_label,
 )
-from ..extraction.pdf_extractor import DEFAULT_OCR_DPI, extract_from_document
+from ..assistant.feedback import AssistantFeedbackEvent, append_assistant_feedback
+from ..assistant.llm_provider import check_ollama_health
+from ..assistant.mark_corrector import get_mark_corrector, suggest_mark_correction
+from ..assistant.models import AssistantContext
+from ..extraction.pdf_extractor import (
+    DEFAULT_OCR_DPI,
+    EASYOCR_OCR_DPI,
+    SCAN_OCR_DPI,
+    extract_from_document,
+    extract_from_text,
+)
+from .theme import (
+    COLORS,
+    apply_fluent_theme,
+    fit_window_to_screen,
+    make_primary_button,
+    make_secondary_button,
+)
+
+_log = get_logger("ui.gui")
 from ..generation.application_generator import generate_application_from_order
+from ..generation.document_pack import build_document_pack
 from ..generation.kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
+from ..generation.protocol_generator import generate_protocol_draft_from_order
 from ..persistence.sqlite_repo import (
     DB_PATH_DEFAULT,
     GENERATED_DIR_DEFAULT,
     add_test_item,
     build_default_hours_map,
     get_calculations_for_kp,
+    get_assistant_llm_settings,
     get_climatic_settings,
+    get_document_pack_settings,
     get_last_document_extraction,
     get_organization_by_id,
     get_recent_calculations,
@@ -61,7 +93,10 @@ from ..persistence.sqlite_repo import (
     save_calculation,
     save_cable_marks_from_matches,
     save_cable_marks_from_validations,
+    save_assistant_llm_settings,
     save_climatic_settings,
+    save_document_pack_settings,
+    push_recent_pack_path,
     save_document_extraction,
     save_organizations_from_extraction,
     update_organization,
@@ -76,32 +111,7 @@ from ..persistence.sqlite_repo import (
     record_mapping_usage,
 )
 
-# Цветовая схема (современный flat UI)
-COLORS = {
-    "bg": "#eef1f8",
-    "card": "#ffffff",
-    "accent": "#4f46e5",
-    "accent_hover": "#4338ca",
-    "accent_light": "#e0e7ff",
-    "text": "#111827",
-    "muted": "#64748b",
-    "border": "#d8dee9",
-    "success": "#059669",
-    "header_bg": "#1a1f36",
-    "header_text": "#f8fafc",
-    "header_muted": "#94a3b8",
-    "header_accent": "#6366f1",
-    "climatic_bg": "#eef2ff",
-    "row_alt": "#f8fafc",
-    "parse_bg": "#f5f7ff",
-    "status_bg": "#e8ecf4",
-    "tab_inactive": "#dce3f0",
-    "shadow": "#c5cee0",
-    "warn_bg": "#fffbeb",
-    "error_bg": "#fef2f2",
-    "draft_accent": "#f59e0b",
-    "confirmed_accent": "#059669",
-}
+# COLORS импортируются из theme (Fluent Design 2 light)
 
 ORG_TYPE_LABELS: dict[str, str] = {
     "manufacturer": "Производитель",
@@ -120,6 +130,7 @@ class CalcTestEntry:
     rule_type: str
     hours_key: str | None
     hours_var: tk.StringVar | None = None
+    quantity_var: tk.StringVar | None = None
     row_frame: ttk.Frame | None = field(default=None, repr=False)
 
 
@@ -134,16 +145,19 @@ class ExtractionDraft:
     marks: list[MarkValidation] = field(default_factory=list)
     original_marks: list[MarkValidation] = field(default_factory=list)
     original_customer: str = ""
+    # Журнал решений ассистента в рамках этой заявки (→ corrections)
+    assistant_events: list[AssistantFeedbackEvent] = field(default_factory=list)
+    assistant_session_id: str = ""
 
 
 class RequestProcessorApp(tk.Tk):
     def __init__(self, db_path: Path = DB_PATH_DEFAULT) -> None:
         super().__init__()
+        setup_logging(level="INFO")
         self.db_path = Path(db_path)
         self.generated_dir = GENERATED_DIR_DEFAULT
         self.title("Обработка заявок на испытания кабелей")
-        self.geometry("1200x860")
-        self.minsize(1020, 740)
+        fit_window_to_screen(self, prefer_w=1200, prefer_h=860)
         self.configure(bg=COLORS["bg"])
 
         self._tests_by_code: dict[str, dict] = {}
@@ -155,6 +169,9 @@ class RequestProcessorApp(tk.Tk):
         self._last_manufacturer_name: str = ""
         self._extraction_draft: ExtractionDraft | None = None
         self._extraction_confirmed: bool = False
+        self._compare_snapshots_cache: list[dict] = []
+        # кэш подсказок ассистента: index → suggested text (для колонки 💡)
+        self._assistant_hints: dict[int, str] = {}
 
         self._ensure_db()
         self._setup_theme()
@@ -167,7 +184,9 @@ class RequestProcessorApp(tk.Tk):
         self._load_organizations()
         self._refresh_parse_info_panel()
         self._load_orders_table()
+        self._refresh_compare_list()
         self._install_clipboard_support()
+        _log.info("GUI started db=%s screen=%sx%s", self.db_path, self.winfo_screenwidth(), self.winfo_screenheight())
 
     def _install_clipboard_support(self) -> None:
         """Ctrl+C / Ctrl+A и контекстное меню «Копировать» во всех полях ввода."""
@@ -272,44 +291,37 @@ class RequestProcessorApp(tk.Tk):
             menu.grab_release()
 
     def _accent_button(self, parent: tk.Misc, text: str, command) -> tk.Button:
-        """Основная кнопка действия — полный текст, контрастный фон."""
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=COLORS["accent"],
-            fg="white",
-            activebackground=COLORS["accent_hover"],
-            activeforeground="white",
-            font=("Segoe UI", 10, "bold"),
-            relief="flat",
-            padx=18,
-            pady=9,
-            cursor="hand2",
-            bd=0,
-            highlightthickness=0,
+        """Primary — синий фон, белый текст (всегда читается)."""
+        btn = make_primary_button(parent, text, command)
+        # disabled: светло-синий + белый (не серый-на-сером)
+        btn.configure(
+            disabledforeground=COLORS.get("text_on_accent", "#ffffff"),
         )
+        return btn
 
     def _secondary_button(self, parent: tk.Misc, text: str, command) -> tk.Button:
-        """Вторичная кнопка — контур, без заливки."""
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=COLORS["card"],
-            fg=COLORS["text"],
-            activebackground=COLORS["accent_light"],
-            activeforeground=COLORS["accent"],
-            font=("Segoe UI", 10),
-            relief="flat",
-            padx=14,
-            pady=8,
-            cursor="hand2",
-            bd=0,
-            highlightthickness=1,
-            highlightbackground=COLORS["border"],
-            highlightcolor=COLORS["accent"],
-        )
+        """Secondary — белый + тёмный текст + обводка."""
+        return make_secondary_button(parent, text, command)
+
+    def _set_button_enabled(self, btn: tk.Button | None, enabled: bool) -> None:
+        """Вкл/выкл с сохранением Fluent-цветов (tk иначе серит фон)."""
+        if btn is None:
+            return
+        if enabled:
+            btn.configure(
+                state="normal",
+                bg=COLORS["accent"],
+                fg=COLORS.get("text_on_accent", "#ffffff"),
+                cursor="hand2",
+            )
+        else:
+            btn.configure(
+                state="disabled",
+                bg=COLORS.get("accent_disabled", "#a9d0ef"),
+                fg=COLORS.get("text_on_accent", "#ffffff"),
+                disabledforeground=COLORS.get("text_on_accent", "#ffffff"),
+                cursor="arrow",
+            )
 
     def _ensure_db(self) -> None:
         if not self.db_path.exists():
@@ -322,84 +334,32 @@ class RequestProcessorApp(tk.Tk):
             _seed_default_settings(self.db_path)
 
     def _setup_theme(self) -> None:
-        style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-
-        style.configure(".", background=COLORS["bg"], foreground=COLORS["text"])
-        style.configure("TFrame", background=COLORS["bg"])
-        style.configure("Card.TFrame", background=COLORS["card"])
-        style.configure("TLabel", background=COLORS["bg"], foreground=COLORS["text"], font=("Segoe UI", 10))
-        style.configure("Card.TLabel", background=COLORS["card"], font=("Segoe UI", 10))
-        style.configure("Muted.TLabel", background=COLORS["bg"], foreground=COLORS["muted"], font=("Segoe UI", 9))
-        style.configure("CardMuted.TLabel", background=COLORS["card"], foreground=COLORS["muted"], font=("Segoe UI", 9))
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 17, "bold"), foreground=COLORS["header_text"])
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 10), foreground=COLORS["header_muted"])
-        style.configure("Header.TFrame", background=COLORS["header_bg"])
-        style.configure(
-            "TButton",
-            font=("Segoe UI", 10),
-            padding=(12, 7),
-            background=COLORS["card"],
-            borderwidth=1,
-            relief="flat",
-        )
-        style.map(
-            "TButton",
-            background=[("active", COLORS["accent_light"]), ("pressed", COLORS["border"])],
-            foreground=[("active", COLORS["accent"])],
-        )
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 8))
-        style.configure("TLabelframe", background=COLORS["bg"])
-        style.configure("TLabelframe.Label", background=COLORS["bg"], font=("Segoe UI", 10, "bold"))
-        style.configure("Card.TLabelframe", background=COLORS["card"])
-        style.configure("Card.TLabelframe.Label", background=COLORS["card"], font=("Segoe UI", 10, "bold"))
-        style.configure("Treeview", font=("Segoe UI", 9), rowheight=30, background=COLORS["card"])
-        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background="#e2e8f0")
-        style.map("Treeview", background=[("selected", COLORS["accent"])], foreground=[("selected", "white")])
-        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0, tabmargins=(4, 4, 4, 0))
-        style.configure(
-            "TNotebook.Tab",
-            font=("Segoe UI", 10),
-            padding=(14, 9),
-            background=COLORS["tab_inactive"],
-            borderwidth=0,
-        )
-        style.map(
-            "TNotebook.Tab",
-            background=[("selected", COLORS["card"]), ("!selected", COLORS["tab_inactive"])],
-            foreground=[("selected", COLORS["accent"]), ("!selected", COLORS["muted"])],
-            font=[("selected", ("Segoe UI", 10, "bold")), ("!selected", ("Segoe UI", 10))],
-            expand=[("selected", [1, 1, 1, 0])],
-        )
-        style.configure("Status.TLabel", background=COLORS["status_bg"], font=("Segoe UI", 9))
-        style.configure("TEntry", font=("Segoe UI", 10))
-        style.configure("TSpinbox", font=("Segoe UI", 10))
+        apply_fluent_theme(self)
 
     def _build_ui(self) -> None:
+        # Fluent 2: brand strip + white title bar
+        tk.Frame(self, bg=COLORS.get("header_bar", COLORS["accent"]), height=3).pack(fill="x")
+
         header_wrap = tk.Frame(self, bg=COLORS["header_bg"])
         header_wrap.pack(fill="x")
-
-        header = tk.Frame(header_wrap, bg=COLORS["header_bg"], padx=22, pady=16)
+        header = tk.Frame(header_wrap, bg=COLORS["header_bg"], padx=20, pady=14)
         header.pack(fill="x")
         tk.Label(
             header,
             text="Испытания кабельной продукции",
             bg=COLORS["header_bg"],
             fg=COLORS["header_text"],
-            font=("Segoe UI Semibold", 19, "bold"),
+            font=("Segoe UI Semibold", 18, "bold"),
         ).pack(side="left")
+        chip = tk.Frame(header, bg=COLORS["accent_light"], padx=10, pady=4)
+        chip.pack(side="left", padx=(16, 0))
         tk.Label(
-            header,
+            chip,
             text="1 → 2 → 3 → 4",
-            bg=COLORS["header_accent"],
-            fg="white",
-            font=("Segoe UI", 9, "bold"),
-            padx=10,
-            pady=3,
-        ).pack(side="left", padx=(14, 0))
+            bg=COLORS["accent_light"],
+            fg=COLORS["accent"],
+            font=("Segoe UI Semibold", 9),
+        ).pack()
         tk.Label(
             header,
             text="заявка  →  расчёт  →  КП  →  заказ",
@@ -407,12 +367,11 @@ class RequestProcessorApp(tk.Tk):
             fg=COLORS["header_muted"],
             font=("Segoe UI", 10),
         ).pack(side="left", padx=(12, 0))
-
-        tk.Frame(header_wrap, bg=COLORS["header_accent"], height=3).pack(fill="x")
+        tk.Frame(header_wrap, bg=COLORS["border"], height=1).pack(fill="x")
 
         parse_bar = tk.Frame(self, bg=COLORS["parse_bg"], padx=20, pady=10)
         parse_bar.pack(fill="x")
-        tk.Frame(parse_bar, bg=COLORS["accent"], width=4).pack(side="left", fill="y", padx=(0, 12))
+        tk.Frame(parse_bar, bg=COLORS["accent"], width=3).pack(side="left", fill="y", padx=(0, 12))
         parse_inner = tk.Frame(parse_bar, bg=COLORS["parse_bg"])
         parse_inner.pack(side="left", fill="x", expand=True)
         self.parse_info_var = tk.StringVar(value="Документ не обработан — начните с вкладки «1. Заявка»")
@@ -421,10 +380,11 @@ class RequestProcessorApp(tk.Tk):
             textvariable=self.parse_info_var,
             bg=COLORS["parse_bg"],
             fg=COLORS["text"],
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 10),
             wraplength=1080,
             justify="left",
-        ).pack(anchor="w")
+            anchor="w",
+        ).pack(fill="x")
 
         self.status = tk.StringVar(value="Готово")
         status_wrap = tk.Frame(self, bg=COLORS["status_bg"], height=32)
@@ -448,6 +408,7 @@ class RequestProcessorApp(tk.Tk):
         self.tab_calc = ttk.Frame(self.notebook, padding=10)
         self.tab_kp = ttk.Frame(self.notebook, padding=10)
         self.tab_orders = ttk.Frame(self.notebook, padding=10)
+        self.tab_compare = ttk.Frame(self.notebook, padding=10)
         self.tab_marks = ttk.Frame(self.notebook, padding=10)
         self.tab_orgs = ttk.Frame(self.notebook, padding=10)
         self.tab_tests = ttk.Frame(self.notebook, padding=10)
@@ -458,16 +419,18 @@ class RequestProcessorApp(tk.Tk):
         self.notebook.add(self.tab_calc, text="  2. Расчёт  ")
         self.notebook.add(self.tab_kp, text="  3. КП  ")
         self.notebook.add(self.tab_orders, text="  4. Заказы  ")
-        self.notebook.add(self.tab_marks, text="  5. Марки  ")
-        self.notebook.add(self.tab_orgs, text="  6. Организации  ")
-        self.notebook.add(self.tab_tests, text="  7. Справочник  ")
-        self.notebook.add(self.tab_history, text="  8. История  ")
-        self.notebook.add(self.tab_settings, text="  9. Настройки  ")
+        self.notebook.add(self.tab_compare, text="  5. Сравнение  ")
+        self.notebook.add(self.tab_marks, text="  6. Марки  ")
+        self.notebook.add(self.tab_orgs, text="  7. Организации  ")
+        self.notebook.add(self.tab_tests, text="  8. Справочник  ")
+        self.notebook.add(self.tab_history, text="  9. История  ")
+        self.notebook.add(self.tab_settings, text="  10. Настройки  ")
 
         self._build_pdf_tab()
         self._build_calc_tab()
         self._build_kp_tab()
         self._build_orders_tab()
+        self._build_compare_tab()
         self._build_marks_tab()
         self._build_orgs_tab()
         self._build_tests_tab()
@@ -485,6 +448,8 @@ class RequestProcessorApp(tk.Tk):
             self._load_orgs_table()
         elif selected == self.notebook.index(self.tab_orders):
             self._load_orders_table()
+        elif selected == self.notebook.index(self.tab_compare):
+            self._refresh_compare_list()
         elif selected == self.notebook.index(self.tab_settings):
             self._load_mappings_table()
 
@@ -542,6 +507,36 @@ class RequestProcessorApp(tk.Tk):
             ),
         )
 
+        opts = ttk.Frame(top, style="Card.TFrame")
+        opts.pack(fill="x", pady=(8, 0))
+        self.calc_armor_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts,
+            text="Бронированный кабель (+0.5 к сложности образца)",
+            variable=self.calc_armor_var,
+            style="Card.TCheckbutton",
+        ).pack(side="left")
+        ttk.Label(opts, text="Скидка, %", style="CardMuted.TLabel").pack(side="left", padx=(16, 4))
+        self.calc_discount_var = tk.StringVar(value="0")
+        ttk.Spinbox(
+            opts,
+            textvariable=self.calc_discount_var,
+            from_=0,
+            to=100,
+            increment=1,
+            width=5,
+        ).pack(side="left")
+        ttk.Label(opts, text="Наценка, %", style="CardMuted.TLabel").pack(side="left", padx=(12, 4))
+        self.calc_markup_var = tk.StringVar(value="0")
+        ttk.Spinbox(
+            opts,
+            textvariable=self.calc_markup_var,
+            from_=0,
+            to=100,
+            increment=1,
+            width=5,
+        ).pack(side="left")
+
         mid = ttk.PanedWindow(self.tab_calc, orient="horizontal")
         mid.pack(fill="both", expand=True)
 
@@ -550,8 +545,9 @@ class RequestProcessorApp(tk.Tk):
 
         list_header = ttk.Frame(left, style="Card.TFrame")
         list_header.pack(fill="x", pady=(0, 6))
-        ttk.Label(list_header, text="Испытание", style="Card.TLabel", width=36).pack(side="left")
+        ttk.Label(list_header, text="Испытание", style="Card.TLabel", width=30).pack(side="left")
         ttk.Label(list_header, text="Правило", style="Card.TLabel", width=10).pack(side="left")
+        ttk.Label(list_header, text="Кол-во", style="Card.TLabel", width=6).pack(side="left")
         ttk.Label(list_header, text="Часы", style="Card.TLabel", width=8).pack(side="left")
         ttk.Label(
             left,
@@ -688,6 +684,9 @@ class RequestProcessorApp(tk.Tk):
         btn_row.pack(fill="x", pady=(6, 0))
         self._secondary_button(btn_row, "Перепарсить", self._run_extract_pdf).pack(side="left")
         self._secondary_button(btn_row, "Отменить", self._cancel_extraction_draft).pack(side="left", padx=8)
+        self._secondary_button(btn_row, "Сохранить снимок", self._save_parse_snapshot).pack(
+            side="left", padx=(8, 0)
+        )
         self.confirm_btn = self._accent_button(
             btn_row, "Подтвердить заявку", self._confirm_extraction
         )
@@ -700,17 +699,42 @@ class RequestProcessorApp(tk.Tk):
         ttk.Entry(top, textvariable=self.pdf_path_var).pack(side="left", fill="x", expand=True, ipady=3)
         ttk.Button(top, text="Обзор…", command=self._browse_pdf).pack(side="left", padx=6)
         self._accent_button(top, "Извлечь", self._run_extract_pdf).pack(side="left", padx=(0, 4))
+        self._secondary_button(top, "Текст…", self._run_extract_free_text).pack(side="left", padx=(0, 4))
         self.confirm_btn_top = self._accent_button(
             top, "Подтвердить заявку", self._confirm_extraction
         )
         self.confirm_btn_top.pack(side="left", padx=(4, 0))
+        self._secondary_button(top, "Снимок", self._save_parse_snapshot).pack(side="left", padx=(6, 0))
 
         self.pdf_opts_frame = ttk.Frame(self.tab_pdf)
         self.pdf_opts_frame.pack(fill="x", pady=8)
         opts = self.pdf_opts_frame
         self.ocr_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="OCR для сканов", variable=self.ocr_var).pack(side="left")
-        ttk.Label(opts, text=f"DPI: {DEFAULT_OCR_DPI}", style="Muted.TLabel").pack(side="left", padx=12)
+        # A/B spike 35v: EasyOCR = PyTorch CV backend (opt-in, not default)
+        self.ocr_pytorch_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts,
+            text="torch-CV эксперимент (хуже default)",
+            variable=self.ocr_pytorch_var,
+            command=self._on_ocr_engine_toggle,
+        ).pack(side="left", padx=(10, 0))
+        ttk.Label(opts, text="DPI:", style="Muted.TLabel").pack(side="left", padx=(12, 2))
+        # DPI = пикселей на дюйм при растеризации PDF → OCR (выше = чётче, медленнее)
+        self.ocr_dpi_var = tk.IntVar(value=SCAN_OCR_DPI)  # default 400
+        self.ocr_dpi_combo = ttk.Combobox(
+            opts,
+            textvariable=self.ocr_dpi_var,
+            values=(300, 400, 450, 500),
+            width=5,
+            state="readonly",
+        )
+        self.ocr_dpi_combo.pack(side="left")
+        ttk.Label(
+            opts,
+            text="(выше → чётче, дольше)",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=(4, 0))
         self.confirm_only_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opts,
@@ -727,60 +751,121 @@ class RequestProcessorApp(tk.Tk):
             side="left", padx=(8, 0)
         )
 
-        self.validation_warn_frame = tk.Frame(self.tab_pdf, bg=COLORS["warn_bg"], padx=12, pady=8)
-        self.validation_warn_var = tk.StringVar(value="")
+        # Предупреждения: компактная полоса (не выталкивает марки/организации вниз).
+        # Полный список — в ScrolledText по кнопке «Подробнее».
+        self._warn_expanded = False
+        self._warn_lines: list[str] = []
+        self.validation_warn_frame = tk.Frame(self.tab_pdf, bg=COLORS["warn_bg"], padx=8, pady=4)
+        warn_header = tk.Frame(self.validation_warn_frame, bg=COLORS["warn_bg"])
+        warn_header.pack(fill="x")
+        self.validation_warn_summary_var = tk.StringVar(value="")
         tk.Label(
-            self.validation_warn_frame,
-            textvariable=self.validation_warn_var,
+            warn_header,
+            textvariable=self.validation_warn_summary_var,
             bg=COLORS["warn_bg"],
             fg="#92400e",
             font=("Segoe UI", 9),
             justify="left",
             anchor="w",
-            wraplength=1100,
-        ).pack(fill="x")
+        ).pack(side="left", fill="x", expand=True)
+        self._warn_toggle_btn = tk.Button(
+            warn_header,
+            text="Подробнее",
+            command=self._toggle_validation_warnings,
+            bg=COLORS["warn_bg"],
+            fg="#92400e",
+            activebackground="#fde68a",
+            activeforeground="#78350f",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=2,
+            font=("Segoe UI", 9, "underline"),
+            cursor="hand2",
+        )
+        self._warn_toggle_btn.pack(side="right")
+        self.validation_warn_detail = scrolledtext.ScrolledText(
+            self.validation_warn_frame,
+            height=4,
+            wrap="word",
+            font=("Segoe UI", 9),
+            bg=COLORS["warn_bg"],
+            fg="#92400e",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            state="disabled",
+        )
+        # detail показывается только при expand
+        self.validation_warn_var = self.validation_warn_summary_var  # back-compat alias
 
+        # mid pack first among expandables so оно всегда забирает остаток высоты
         mid = ttk.PanedWindow(self.tab_pdf, orient="horizontal")
         mid.pack(fill="both", expand=True, pady=(4, 4))
+        self._pdf_mid_pane = mid
 
         left = ttk.LabelFrame(mid, text="Марки — проверьте и отметьте", padding=8, style="Card.TLabelframe")
         mid.add(left, weight=3)
-        mark_toolbar = ttk.Frame(left, style="Card.TFrame")
-        mark_toolbar.pack(fill="x", pady=(0, 6))
-        ttk.Button(mark_toolbar, text="+ Добавить", command=self._add_draft_mark).pack(side="left")
-        ttk.Button(mark_toolbar, text="Удалить", command=self._remove_draft_mark).pack(side="left", padx=6)
-        ttk.Button(mark_toolbar, text="✓/—", command=self._toggle_draft_mark).pack(side="left")
-        ttk.Button(mark_toolbar, text="Изменить", command=self._edit_draft_mark).pack(side="left", padx=6)
-        self._accent_button(
-            mark_toolbar,
-            "→ В расчёт",
-            self._use_mark_in_calc,
-        ).pack(side="left", padx=(12, 0))
+        # Две короткие строки кнопок — не вылезают за край на узком экране
+        mark_tb1 = ttk.Frame(left, style="Card.TFrame")
+        mark_tb1.pack(fill="x", pady=(0, 2))
+        ttk.Button(mark_tb1, text="+", width=3, command=self._add_draft_mark).pack(side="left")
+        ttk.Button(mark_tb1, text="Изменить", command=self._edit_draft_mark).pack(side="left", padx=(4, 0))
+        ttk.Button(mark_tb1, text="Удалить", command=self._remove_draft_mark).pack(side="left", padx=(4, 0))
+        ttk.Button(mark_tb1, text="✓/—", width=4, command=self._toggle_draft_mark).pack(
+            side="left", padx=(4, 0)
+        )
+        self._accent_button(mark_tb1, "→ В расчёт", self._use_mark_in_calc).pack(
+            side="left", padx=(10, 0)
+        )
+        mark_tb2 = ttk.Frame(left, style="Card.TFrame")
+        mark_tb2.pack(fill="x", pady=(0, 6))
+        self._secondary_button(
+            mark_tb2, "Ассистент 💡", self._open_assistant_review_dialog
+        ).pack(side="left")
+        ttk.Button(
+            mark_tb2, text="Принять", command=self._accept_assistant_for_selected
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            mark_tb2, text="Отклонить", command=self._reject_assistant_for_selected
+        ).pack(side="left", padx=(4, 0))
         ttk.Label(
-            mark_toolbar,
-            text="двойной клик по строке",
+            mark_tb2,
+            text="двойной клик — изменить · 💡 в таблице — есть подсказка",
             style="CardMuted.TLabel",
-        ).pack(side="left", padx=(8, 0))
+        ).pack(side="left", padx=(10, 0))
 
-        cols = ("accepted", "mark", "brand", "cores", "size", "document", "status", "confidence")
+        cols = (
+            "accepted",
+            "hint",
+            "mark",
+            "brand",
+            "cores",
+            "size",
+            "document",
+            "status",
+            "confidence",
+        )
         self.marks_tree = ttk.Treeview(left, columns=cols, show="headings", height=7)
         for col, title, width in (
-            ("accepted", "✓", 32),
-            ("mark", "Усл. обозначение", 200),
-            ("brand", "Марка", 64),
+            ("accepted", "✓", 28),
+            ("hint", "💡", 28),
+            ("mark", "Усл. обозначение", 190),
+            ("brand", "Марка", 60),
             ("cores", "ТПЖ", 36),
             ("size", "Размер", 52),
-            ("document", "ТУ/ГОСТ", 110),
+            ("document", "ТУ/ГОСТ", 100),
             ("status", "!", 28),
-            ("confidence", "%", 40),
+            ("confidence", "%", 36),
         ):
             self.marks_tree.heading(col, text=title)
-            anchor = "center" if col in ("accepted", "status", "confidence") else "w"
+            anchor = "center" if col in ("accepted", "hint", "status", "confidence") else "w"
             self.marks_tree.column(col, width=width, anchor=anchor)
         self.marks_tree.tag_configure("ok", background=COLORS["card"])
         self.marks_tree.tag_configure("warning", background=COLORS["warn_bg"])
         self.marks_tree.tag_configure("error", background=COLORS["error_bg"])
         self.marks_tree.tag_configure("rejected", background="#f1f5f9", foreground=COLORS["muted"])
+        self.marks_tree.tag_configure("assist", background="#e8f4fc")
         self.marks_tree.pack(fill="both", expand=True)
         self.marks_tree.bind("<<TreeviewSelect>>", self._on_draft_mark_select)
         self.marks_tree.bind("<Double-Button-1>", self._on_draft_mark_double_click)
@@ -970,6 +1055,12 @@ class RequestProcessorApp(tk.Tk):
         self._accent_button(toolbar, "Сформировать заявку", self._generate_order_application).pack(
             side="left"
         )
+        self._accent_button(toolbar, "Пакет документов", self._build_order_document_pack).pack(
+            side="left", padx=(8, 0)
+        )
+        self._secondary_button(toolbar, "Макет протокола", self._generate_order_protocol).pack(
+            side="left", padx=(8, 0)
+        )
         self._secondary_button(toolbar, "Открыть КП", self._open_selected_order_kp).pack(
             side="left", padx=(8, 0)
         )
@@ -1013,6 +1104,10 @@ class RequestProcessorApp(tk.Tk):
         self.orders_tree.pack(fill="both", expand=True)
         self.orders_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_order_details())
         self.orders_tree.bind("<Double-Button-1>", lambda _e: self._open_selected_order_kp())
+        self.orders_tree.bind(
+            "<Button-3>",
+            lambda e: self._show_orders_context_menu(e),
+        )
 
         right = ttk.LabelFrame(paned, text="Информация о заказе", padding=8, style="Card.TLabelframe")
         paned.add(right, weight=1)
@@ -1142,9 +1237,249 @@ class RequestProcessorApp(tk.Tk):
 
         self.tests_tree.bind("<Double-1>", self._on_test_double_click)
 
+    def _build_compare_tab(self) -> None:
+        """Снимки парсинга: список, сохранение, сравнение A/B."""
+        hint = ttk.Label(
+            self.tab_compare,
+            text="Сохраняйте прогоны (разный OCR/DPI) и сравнивайте марки, организации и quality-score.",
+            style="Muted.TLabel",
+            wraplength=900,
+        )
+        hint.pack(anchor="w", pady=(0, 8))
+
+        paned = ttk.PanedWindow(self.tab_compare, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        left = ttk.LabelFrame(paned, text="Снимки", padding=8, style="Card.TLabelframe")
+        paned.add(left, weight=2)
+        toolbar = ttk.Frame(left, style="Card.TFrame")
+        toolbar.pack(fill="x", pady=(0, 6))
+        self._secondary_button(toolbar, "Обновить", self._refresh_compare_list).pack(side="left")
+        self._secondary_button(toolbar, "Сохранить текущий", self._save_parse_snapshot).pack(
+            side="left", padx=6
+        )
+        self._accent_button(toolbar, "Сравнить A/B", self._run_compare_selected).pack(side="left", padx=6)
+
+        cols = ("id", "created", "label", "engine", "dpi", "marks", "quality")
+        self.compare_tree = ttk.Treeview(
+            left, columns=cols, show="headings", height=14, selectmode="extended"
+        )
+        headings = {
+            "id": ("ID", 140),
+            "created": ("Создан", 130),
+            "label": ("Подпись", 200),
+            "engine": ("OCR", 80),
+            "dpi": ("DPI", 50),
+            "marks": ("Марки", 55),
+            "quality": ("Quality", 60),
+        }
+        for key, (title, width) in headings.items():
+            self.compare_tree.heading(key, text=title)
+            self.compare_tree.column(key, width=width, stretch=key in ("label", "id"))
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.compare_tree.yview)
+        self.compare_tree.configure(yscrollcommand=scroll.set)
+        self.compare_tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        right = ttk.LabelFrame(paned, text="Сравнение / метрики", padding=8, style="Card.TLabelframe")
+        paned.add(right, weight=2)
+        ttk.Label(
+            right,
+            text="Выберите 2 снимка (Ctrl+клик) → «Сравнить A/B».",
+            style="CardMuted.TLabel",
+        ).pack(anchor="w")
+        self.compare_report = scrolledtext.ScrolledText(
+            right, height=22, wrap="word", font=("Consolas", 9), bg=COLORS["card"]
+        )
+        self.compare_report.pack(fill="both", expand=True, pady=(6, 0))
+        self._bind_clipboard(self.compare_report)
+
+    def _refresh_compare_list(self) -> None:
+        if not hasattr(self, "compare_tree"):
+            return
+        self._compare_snapshots_cache = list_snapshots(limit=100)
+        for item in self.compare_tree.get_children():
+            self.compare_tree.delete(item)
+        for row in self._compare_snapshots_cache:
+            self.compare_tree.insert(
+                "",
+                "end",
+                iid=row["id"],
+                values=(
+                    row["id"],
+                    (row.get("created_at") or "")[:19].replace("T", " "),
+                    (row.get("label") or "")[:60],
+                    row.get("ocr_engine") or "—",
+                    row.get("ocr_dpi") or "—",
+                    row.get("marks_count", 0),
+                    f"{float(row.get('quality_score') or 0):.2f}",
+                ),
+            )
+
+    def _save_parse_snapshot(self) -> None:
+        draft = self._extraction_draft
+        if draft is None or draft.result is None:
+            messagebox.showinfo("Снимок", "Сначала извлеките документ (вкладка «1. Заявка»).")
+            return
+        label = simpledialog.askstring(
+            "Снимок парсинга",
+            "Подпись снимка (например: tesseract DPI300 / easyocr DPI400):",
+            initialvalue=(
+                f"{Path(draft.result.source_path).stem} · "
+                f"{draft.result.ocr_engine or 'no-ocr'}"
+            ),
+            parent=self,
+        )
+        if label is None:
+            return
+        try:
+            dpi = int(self.ocr_dpi_var.get())
+        except Exception:
+            dpi = None
+        try:
+            snap = save_snapshot_from_extraction(
+                draft.result,
+                label=label.strip() or "",
+                notes="",
+                ocr_dpi=dpi,
+            )
+            _log.info(
+                "parse snapshot saved id=%s marks=%s quality=%s engine=%s",
+                snap.id,
+                snap.metrics.marks_count,
+                snap.metrics.quality_score,
+                snap.ocr_engine,
+            )
+            self.status.set(f"Снимок сохранён: {snap.id}")
+            self._refresh_compare_list()
+            messagebox.showinfo(
+                "Снимок",
+                f"Сохранено: {snap.id}\n"
+                f"Марок: {snap.metrics.marks_count}  quality: {snap.metrics.quality_score}\n"
+                f"OCR: {snap.ocr_engine or '—'}  DPI: {dpi or '—'}",
+            )
+        except Exception as exc:
+            _log.exception("save snapshot failed")
+            messagebox.showerror("Снимок", str(exc))
+
+    def _run_compare_selected(self) -> None:
+        sel = list(self.compare_tree.selection())
+        if len(sel) != 2:
+            messagebox.showinfo("Сравнение", "Выберите ровно 2 снимка (Ctrl+клик).")
+            return
+        try:
+            a = load_snapshot(sel[0])
+            b = load_snapshot(sel[1])
+            report = compare_snapshots(a, b)
+            lines = [
+                f"A: {a.id}",
+                f"   {a.label}",
+                f"   OCR={a.ocr_engine}  DPI={a.ocr_dpi}  marks={report['marks']['count_a']}  "
+                f"quality={report['quality']['a']}",
+                f"B: {b.id}",
+                f"   {b.label}",
+                f"   OCR={b.ocr_engine}  DPI={b.ocr_dpi}  marks={report['marks']['count_b']}  "
+                f"quality={report['quality']['b']}",
+                "",
+                f"Пересечение марок: {report['marks']['intersection']}",
+                f"Jaccard: {report['marks']['jaccard']:.2%}",
+                f"Recall A←B: {report['marks']['recall_a_vs_b']}",
+                f"Recall B←A: {report['marks']['recall_b_vs_a']}",
+                f"Winner (quality): {report['quality']['winner']}",
+                f"Δ marks: {report['metrics_delta']['marks_count']:+d}  "
+                f"Δ text_chars: {report['metrics_delta']['text_chars']:+d}  "
+                f"Δ quality: {report['metrics_delta']['quality_score']:+.3f}",
+                "",
+                "=== Только в A ===",
+                *([f"  {m}" for m in report["marks"]["only_a"]] or ["  —"]),
+                "",
+                "=== Только в B ===",
+                *([f"  {m}" for m in report["marks"]["only_b"]] or ["  —"]),
+                "",
+                "=== Организации: только A ===",
+                *([f"  {m}" for m in report["organizations"]["only_a"]] or ["  —"]),
+                "",
+                "=== Организации: только B ===",
+                *([f"  {m}" for m in report["organizations"]["only_b"]] or ["  —"]),
+            ]
+            text = "\n".join(lines)
+            self.compare_report.delete("1.0", "end")
+            self.compare_report.insert("1.0", text)
+            _log.info("compared snapshots %s vs %s jaccard=%.3f", a.id, b.id, report["marks"]["jaccard"])
+            self.status.set(f"Сравнение: Jaccard {report['marks']['jaccard']:.0%}")
+        except Exception as exc:
+            _log.exception("compare failed")
+            messagebox.showerror("Сравнение", str(exc))
+
+    def _make_scrollable_tab(self, parent: ttk.Frame) -> ttk.Frame:
+        """Canvas + Scrollbar + inner Frame для длинных вкладок (Настройки)."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(
+            outer,
+            highlightthickness=0,
+            borderwidth=0,
+            bg=COLORS["bg"],
+        )
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_event: tk.Event | None = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:
+            canvas.itemconfigure(win_id, width=max(1, int(event.width)))
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        def _wheel_target_is_nested_scroller(widget: tk.Misc) -> bool:
+            """Treeview/Listbox/Text со своим скроллом — не перехватываем колесо."""
+            cur: tk.Misc | None = widget
+            while cur is not None:
+                if cur in (canvas, inner, outer, parent):
+                    return False
+                cls = cur.winfo_class()
+                if cls in ("Treeview", "Listbox", "Text", "TCombobox"):
+                    return True
+                cur = getattr(cur, "master", None)
+            return False
+
+        def _on_mousewheel(event: tk.Event) -> str | None:
+            if _wheel_target_is_nested_scroller(event.widget):
+                return None
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return None
+            canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+            return "break"
+
+        def _bind_wheel(_event: tk.Event | None = None) -> None:
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_wheel(_event: tk.Event | None = None) -> None:
+            canvas.unbind_all("<MouseWheel>")
+
+        for w in (canvas, inner, outer):
+            w.bind("<Enter>", _bind_wheel)
+            w.bind("<Leave>", _unbind_wheel)
+
+        self._settings_canvas = canvas
+        self._settings_scroll_inner = inner
+        return inner
+
     def _build_settings_tab(self) -> None:
+        # Прокручиваемый контейнер: иначе map_frame.expand съедает верх (LLM, путь).
+        body = self._make_scrollable_tab(self.tab_settings)
+
         frame = ttk.LabelFrame(
-            self.tab_settings,
+            body,
             text="Время выдержки климатических испытаний (часы по умолчанию)",
             padding=16,
             style="Card.TLabelframe",
@@ -1179,13 +1514,140 @@ class RequestProcessorApp(tk.Tk):
             pady=(16, 0),
         )
 
+        llm_frame = ttk.LabelFrame(
+            body,
+            text="ИИ-ассистент (LLM / Ollama)",
+            padding=16,
+            style="Card.TLabelframe",
+        )
+        llm_frame.pack(fill="x", pady=(12, 0))
+        self.llm_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            llm_frame,
+            text="Включить LLM поверх детерминированных подсказок (opt-in)",
+            variable=self.llm_enabled_var,
+        ).pack(anchor="w")
+
+        llm_grid = ttk.Frame(llm_frame, style="Card.TFrame")
+        llm_grid.pack(fill="x", pady=(10, 0))
+        self.llm_model_var = tk.StringVar(value="llama3.2")
+        self.llm_base_url_var = tk.StringVar(value="http://127.0.0.1:11434")
+        self.llm_models_dir_var = tk.StringVar(value="D:/ollama/models")
+        self.llm_timeout_var = tk.StringVar(value="60")
+        for row, (label, var, width) in enumerate(
+            (
+                ("Модель:", self.llm_model_var, 28),
+                ("URL Ollama:", self.llm_base_url_var, 40),
+                ("Каталог моделей (OLLAMA_MODELS):", self.llm_models_dir_var, 40),
+                ("Таймаут, с:", self.llm_timeout_var, 8),
+            )
+        ):
+            ttk.Label(llm_grid, text=label, style="Card.TLabel").grid(
+                row=row, column=0, sticky="w", pady=4, padx=(0, 10)
+            )
+            ttk.Entry(llm_grid, textvariable=var, width=width).grid(
+                row=row, column=1, sticky="ew", pady=4
+            )
+        llm_grid.columnconfigure(1, weight=1)
+
+        llm_btns = ttk.Frame(llm_frame, style="Card.TFrame")
+        llm_btns.pack(fill="x", pady=(8, 0))
+        ttk.Button(llm_btns, text="Проверить Ollama", command=self._test_ollama_connection).pack(
+            side="left"
+        )
+        ttk.Label(
+            llm_frame,
+            text="По умолчанию выключено. Модели храните на D: (OLLAMA_MODELS). "
+            "Установка: scripts/install_ollama.ps1",
+            style="CardMuted.TLabel",
+            wraplength=720,
+        ).pack(anchor="w", pady=(8, 0))
+
+        battle_frame = ttk.LabelFrame(
+            body,
+            text="Боевой опыт — перенос на машину разработки",
+            padding=16,
+            style="Card.TLabelframe",
+        )
+        battle_frame.pack(fill="x", pady=(12, 0))
+        self.battle_note_var = tk.StringVar()
+        ttk.Label(
+            battle_frame,
+            text="После работы на другом ПК: экспорт zip → на флешку/Git → импорт у разработчика.",
+            style="CardMuted.TLabel",
+            wraplength=720,
+        ).pack(anchor="w")
+        note_row = ttk.Frame(battle_frame, style="Card.TFrame")
+        note_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(note_row, text="Комментарий к экспорту:", style="Card.TLabel").pack(side="left")
+        ttk.Entry(note_row, textvariable=self.battle_note_var, width=48).pack(
+            side="left", fill="x", expand=True, padx=(8, 0), ipady=2
+        )
+        battle_btns = ttk.Frame(battle_frame, style="Card.TFrame")
+        battle_btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            battle_btns,
+            text="Экспорт опыта (zip)…",
+            command=self._export_battle_experience_dialog,
+        ).pack(side="left")
+        ttk.Button(
+            battle_btns,
+            text="Импорт опыта…",
+            command=self._import_battle_experience_dialog,
+        ).pack(side="left", padx=(8, 0))
+        self.battle_host_label = ttk.Label(
+            battle_frame,
+            text="",
+            style="CardMuted.TLabel",
+        )
+        self.battle_host_label.pack(anchor="w", pady=(8, 0))
+        self._refresh_battle_host_label()
+
+        pack_frame = ttk.LabelFrame(
+            body,
+            text="Пакет документов — папка сохранения",
+            padding=16,
+            style="Card.TLabelframe",
+        )
+        pack_frame.pack(fill="x", pady=(12, 0))
+        self.pack_base_dir_var = tk.StringVar()
+        dir_row = ttk.Frame(pack_frame, style="Card.TFrame")
+        dir_row.pack(fill="x")
+        ttk.Label(dir_row, text="Базовая папка:", style="Card.TLabel").pack(side="left")
+        ttk.Entry(dir_row, textvariable=self.pack_base_dir_var, width=52).pack(
+            side="left", fill="x", expand=True, padx=(8, 6), ipady=2
+        )
+        ttk.Button(dir_row, text="Обзор…", command=self._browse_pack_base_dir).pack(side="left")
+        recent_row = ttk.Frame(pack_frame, style="Card.TFrame")
+        recent_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(recent_row, text="Недавние:", style="Card.TLabel").pack(side="left")
+        self.pack_recent_var = tk.StringVar()
+        self.pack_recent_combo = ttk.Combobox(
+            recent_row,
+            textvariable=self.pack_recent_var,
+            width=58,
+            state="readonly",
+        )
+        self.pack_recent_combo.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.pack_recent_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._apply_recent_pack_path(),
+        )
+        ttk.Label(
+            pack_frame,
+            text="Пустая базовая папка → data/generated. Имя подпапки задаётся при сборке пакета.",
+            style="CardMuted.TLabel",
+            wraplength=720,
+        ).pack(anchor="w", pady=(8, 0))
+
+        # Фиксированная высота таблицы: не expand=True на всю вкладку (съедало верх).
         map_frame = ttk.LabelFrame(
-            self.tab_settings,
+            body,
             text="Маппинг требований → испытания (test_mappings)",
             padding=12,
             style="Card.TLabelframe",
         )
-        map_frame.pack(fill="both", expand=True, pady=(12, 0))
+        map_frame.pack(fill="x", pady=(12, 0))
 
         map_toolbar = ttk.Frame(map_frame)
         map_toolbar.pack(fill="x", pady=(0, 8))
@@ -1212,12 +1674,14 @@ class RequestProcessorApp(tk.Tk):
             side="left", padx=8, ipady=2
         )
 
+        map_tree_row = ttk.Frame(map_frame)
+        map_tree_row.pack(fill="x")
         map_cols = ("pattern", "test_code", "usage", "note")
         self.mappings_tree = ttk.Treeview(
-            map_frame,
+            map_tree_row,
             columns=map_cols,
             show="headings",
-            height=10,
+            height=8,
             selectmode="browse",
         )
         for col, title, width, anchor in (
@@ -1228,14 +1692,14 @@ class RequestProcessorApp(tk.Tk):
         ):
             self.mappings_tree.heading(col, text=title, anchor=anchor)
             self.mappings_tree.column(col, width=width, anchor=anchor)
-        map_scroll = ttk.Scrollbar(map_frame, orient="vertical", command=self.mappings_tree.yview)
+        map_scroll = ttk.Scrollbar(map_tree_row, orient="vertical", command=self.mappings_tree.yview)
         self.mappings_tree.configure(yscrollcommand=map_scroll.set)
-        self.mappings_tree.pack(side="left", fill="both", expand=True)
+        self.mappings_tree.pack(side="left", fill="x", expand=True)
         map_scroll.pack(side="right", fill="y")
         self.mappings_tree.bind("<Double-1>", lambda _e: self._edit_mapping_dialog())
 
         hint = scrolledtext.ScrolledText(
-            self.tab_settings,
+            body,
             height=4,
             state="disabled",
             font=("Segoe UI", 10),
@@ -1266,10 +1730,26 @@ class RequestProcessorApp(tk.Tk):
         if not self._calc_entries and not self._calc_empty_label.winfo_ismapped():
             self._calc_empty_label.pack(pady=40)
 
+    def _find_calc_entry(self, code: str) -> CalcTestEntry | None:
+        for entry in self._calc_entries:
+            if entry.code == code:
+                return entry
+        return None
+
     def _add_test_to_calc(self, code: str) -> None:
         test = self._tests_by_code.get(code)
         if not test:
             messagebox.showwarning("Справочник", f"Испытание «{code}» не найдено.")
+            return
+
+        existing = self._find_calc_entry(code)
+        if existing and existing.quantity_var is not None:
+            try:
+                current = int(existing.quantity_var.get())
+                existing.quantity_var.set(str(current + 1))
+            except ValueError:
+                existing.quantity_var.set("2")
+            self.status.set(f"Количество «{test['name'][:40]}»: +1")
             return
 
         rule_params = json.loads(test.get("rule_params") or "{}")
@@ -1288,6 +1768,7 @@ class RequestProcessorApp(tk.Tk):
             rule_type=rule_type,
             hours_key=hours_key,
             hours_var=hours_var,
+            quantity_var=tk.StringVar(value="1"),
         )
         self._calc_entries.append(entry)
         self._render_calc_entry(entry, len(self._calc_entries) - 1)
@@ -1313,9 +1794,9 @@ class RequestProcessorApp(tk.Tk):
 
         name_lbl = ttk.Label(
             inner,
-            text=entry.name[:42],
+            text=entry.name[:36],
             style="Card.TLabel",
-            width=36,
+            width=30,
             anchor="w",
         )
         name_lbl.pack(side="left")
@@ -1328,6 +1809,21 @@ class RequestProcessorApp(tk.Tk):
             anchor="center",
         )
         rule_lbl.pack(side="left", padx=(4, 0))
+
+        qty_frame = ttk.Frame(inner, style=bg_style)
+        qty_frame.pack(side="left", padx=(4, 0))
+        if entry.quantity_var is not None:
+            ttk.Spinbox(
+                qty_frame,
+                textvariable=entry.quantity_var,
+                from_=1,
+                to=999,
+                increment=1,
+                width=4,
+                font=("Segoe UI", 10),
+            ).pack(side="left")
+        else:
+            ttk.Label(qty_frame, text="1", style="CardMuted.TLabel", width=4).pack(side="left")
 
         if entry.rule_type == "time_based" and entry.hours_var is not None:
             hours_frame = ttk.Frame(inner, style=bg_style)
@@ -1414,6 +1910,18 @@ class RequestProcessorApp(tk.Tk):
                 except ValueError:
                     pass
         return hours
+
+    def _build_quantities_map(self) -> dict[str, int]:
+        quantities: dict[str, int] = {}
+        for entry in self._calc_entries:
+            if entry.quantity_var is None:
+                quantities[entry.code] = 1
+                continue
+            try:
+                quantities[entry.code] = max(1, int(entry.quantity_var.get()))
+            except ValueError:
+                quantities[entry.code] = 1
+        return quantities
 
     def _set_text(self, widget: scrolledtext.ScrolledText, content: str) -> None:
         widget.configure(state="normal")
@@ -1644,12 +2152,31 @@ class RequestProcessorApp(tk.Tk):
             return
 
         test_list = [e.code for e in self._calc_entries]
+        quantities = self._build_quantities_map()
         hours = self._build_hours_map()
+        try:
+            discount = float(self.calc_discount_var.get().replace(",", "."))
+        except ValueError:
+            discount = 0.0
+        try:
+            markup = float(self.calc_markup_var.get().replace(",", "."))
+        except ValueError:
+            markup = 0.0
+        has_armor = self.calc_armor_var.get() or None
         self.status.set("Расчёт…")
 
         def work() -> None:
             try:
-                calc = calculate_cost(mark, test_list, hours, self.db_path)
+                calc = calculate_cost(
+                    mark,
+                    test_list,
+                    hours,
+                    self.db_path,
+                    quantities=quantities,
+                    discount_percent=discount,
+                    markup_percent=markup,
+                    has_armor=has_armor,
+                )
                 calc_id = save_calculation(calc, self.db_path)
                 text = format_breakdown(calc) + f"\n\n✓ Сохранено в БД (id={calc_id})"
                 self.after(0, lambda: self._show_calc_result_mode(text))
@@ -1863,10 +2390,32 @@ class RequestProcessorApp(tk.Tk):
     def _status_icon(status: FieldStatus) -> str:
         return {"ok": "✓", "warning": "⚠", "error": "✗"}[status.value]
 
-    def _mark_tree_tag(self, mark: MarkValidation) -> str:
+    def _mark_tree_tag(self, mark: MarkValidation, *, has_hint: bool = False) -> str:
         if not mark.accepted:
             return "rejected"
+        if has_hint:
+            return "assist"
         return mark.status.value
+
+    def _rebuild_assistant_hints(self) -> None:
+        """Пересчитывает кэш подсказок 💡 для текущего черновика."""
+        self._assistant_hints = {}
+        if not self._extraction_draft:
+            return
+        corrector = get_mark_corrector(self.db_path)
+        ctx = AssistantContext(
+            document_text=self._extraction_draft.result.text[:4000]
+            if self._extraction_draft.result.text
+            else None,
+            document_type=self._extraction_draft.result.source_type,
+        )
+        for idx, mark in enumerate(self._extraction_draft.marks):
+            try:
+                suggestion = corrector.suggest(mark.mark, context=ctx)
+            except Exception:  # noqa: BLE001
+                continue
+            if suggestion.changed:
+                self._assistant_hints[idx] = suggestion.suggested
 
     def _refresh_marks_tree(self) -> None:
         if not hasattr(self, "marks_tree"):
@@ -1874,7 +2423,10 @@ class RequestProcessorApp(tk.Tk):
         for item in self.marks_tree.get_children():
             self.marks_tree.delete(item)
         if not self._extraction_draft:
+            self._assistant_hints = {}
             return
+        # лёгкий rebuild подсказок (детерминированный, быстрый)
+        self._rebuild_assistant_hints()
         for idx, mark in enumerate(self._extraction_draft.marks):
             accepted = "✓" if mark.accepted else "—"
             doc = mark.document or ""
@@ -1882,13 +2434,15 @@ class RequestProcessorApp(tk.Tk):
             if mark.characteristic_size is not None:
                 unit = "мм²" if mark.size_unit == "mm2" else "мм"
                 size_text = f"{mark.characteristic_size:g}{unit}"
+            has_hint = idx in self._assistant_hints
             self.marks_tree.insert(
                 "",
                 "end",
                 iid=str(idx),
-                tags=(self._mark_tree_tag(mark),),
+                tags=(self._mark_tree_tag(mark, has_hint=has_hint),),
                 values=(
                     accepted,
+                    "💡" if has_hint else "",
                     mark.mark,
                     mark.brand or "",
                     str(mark.cores_count or ""),
@@ -1899,29 +2453,83 @@ class RequestProcessorApp(tk.Tk):
                 ),
             )
 
+    def _toggle_validation_warnings(self) -> None:
+        """Развернуть/свернуть длинный список предупреждений (не съедает mid)."""
+        if not self._warn_lines:
+            return
+        self._warn_expanded = not self._warn_expanded
+        self._render_validation_warnings_ui()
+
+    def _render_validation_warnings_ui(self) -> None:
+        """Компактная полоса + опционально ScrolledText (max ~4 строки)."""
+        if not self._warn_lines:
+            self.validation_warn_frame.pack_forget()
+            self.validation_warn_detail.pack_forget()
+            return
+
+        n = len(self._warn_lines)
+        first = self._warn_lines[0]
+        if len(first) > 100:
+            first = first[:97] + "…"
+        summary = f"⚠ {n} предупр." + (f" — {first}" if n else "")
+        if n > 1 and not self._warn_expanded:
+            summary += f"  (+{n - 1})"
+        self.validation_warn_summary_var.set(summary)
+        self._warn_toggle_btn.configure(
+            text="Свернуть" if self._warn_expanded else "Подробнее"
+        )
+
+        # Между opts и mid: pack с before=mid, чтобы mid не уезжал без expand
+        mid = getattr(self, "_pdf_mid_pane", None)
+        if mid is not None and mid.winfo_manager():
+            self.validation_warn_frame.pack(
+                fill="x", pady=(0, 4), before=mid
+            )
+        else:
+            self.validation_warn_frame.pack(
+                fill="x", pady=(0, 4), after=self.pdf_opts_frame
+            )
+
+        if self._warn_expanded:
+            detail = "\n".join(f"• {line}" for line in self._warn_lines)
+            self.validation_warn_detail.configure(state="normal")
+            self.validation_warn_detail.delete("1.0", "end")
+            self.validation_warn_detail.insert("1.0", detail)
+            self.validation_warn_detail.configure(state="disabled")
+            # height fixed: не более 4–5 видимых строк + внутренний scroll
+            lines_show = min(5, max(3, min(n, 5)))
+            self.validation_warn_detail.configure(height=lines_show)
+            self.validation_warn_detail.pack(fill="x", pady=(4, 0))
+        else:
+            self.validation_warn_detail.pack_forget()
+
     def _update_validation_warnings(self, report: ValidationReport) -> None:
         lines: list[str] = []
         if report.flags:
-            lines.append(f"Предупреждения ({len(report.flags)}):")
-            lines.extend(f"  • {flag}" for flag in report.flags)
+            lines.extend(str(flag) for flag in report.flags)
         for mark in report.marks:
             for warning in mark.warnings:
-                short = f"Марка «{mark.mark[:40]}…»: {warning}" if len(mark.mark) > 40 else (
-                    f"Марка «{mark.mark}»: {warning}"
+                short = (
+                    f"Марка «{mark.mark[:40]}…»: {warning}"
+                    if len(mark.mark) > 40
+                    else f"Марка «{mark.mark}»: {warning}"
                 )
                 if short not in lines:
-                    lines.append(f"  • {short}")
+                    lines.append(short)
+        self._warn_lines = lines
+        # По умолчанию свёрнуто — таблица марок остаётся на экране
+        self._warn_expanded = False
         if lines:
-            self.validation_warn_var.set("\n".join(lines))
-            self.validation_warn_frame.pack(fill="x", pady=(0, 4), after=self.pdf_opts_frame)
+            self._render_validation_warnings_ui()
         else:
-            self.validation_warn_var.set("")
+            self.validation_warn_summary_var.set("")
             self.validation_warn_frame.pack_forget()
+            self.validation_warn_detail.pack_forget()
 
     def _set_confirm_buttons_state(self, state: str) -> None:
+        enabled = state == "normal"
         for btn in (getattr(self, "confirm_btn", None), getattr(self, "confirm_btn_top", None)):
-            if btn is not None:
-                btn.configure(state=state)
+            self._set_button_enabled(btn, enabled)
 
     def _update_validation_status_bar(
         self,
@@ -1962,7 +2570,11 @@ class RequestProcessorApp(tk.Tk):
             if result.page_count:
                 parts.append(f"{result.page_count} стр.")
             if result.ocr_used:
-                parts.append("OCR")
+                eng = result.ocr_engine or "ocr"
+                if eng == "easyocr":
+                    parts.append("OCR·torch-CV")
+                else:
+                    parts.append(f"OCR·{eng}")
         if report:
             accepted = sum(1 for m in self._extraction_draft.marks if m.accepted) if self._extraction_draft else 0
             parts.append(f"{accepted} марок")
@@ -2029,11 +2641,137 @@ class RequestProcessorApp(tk.Tk):
             )
         )
 
+    def _ensure_assistant_session(self) -> str:
+        if not self._extraction_draft:
+            return datetime.now().strftime("%Y%m%d%H%M%S")
+        if not self._extraction_draft.assistant_session_id:
+            self._extraction_draft.assistant_session_id = datetime.now().strftime(
+                "%Y%m%d%H%M%S"
+            )
+        return self._extraction_draft.assistant_session_id
+
+    def _doc_name_for_assistant(self) -> str:
+        if not self._extraction_draft:
+            return ""
+        return Path(self._extraction_draft.source_path).name
+
+    def _apply_mark_suggestion_to_draft(
+        self,
+        idx: int,
+        suggested: str,
+        *,
+        suggestion_meta: dict | None = None,
+    ) -> bool:
+        """Применяет suggested к марке idx; True если изменилось."""
+        if not self._extraction_draft or not (0 <= idx < len(self._extraction_draft.marks)):
+            return False
+        mark = self._extraction_draft.marks[idx]
+        if mark.mark.strip() == suggested.strip():
+            return False
+        new_mark = mark.model_copy(update={"mark": suggested})
+        try:
+            parsed = parse_cable_mark_record(suggested, document=mark.document)
+            new_mark = new_mark.model_copy(
+                update={
+                    "brand": parsed.brand or mark.brand,
+                    "cores_count": parsed.cores_count or mark.cores_count,
+                    "characteristic_size": (
+                        parsed.characteristic_size
+                        if parsed.characteristic_size is not None
+                        else mark.characteristic_size
+                    ),
+                    "size_unit": parsed.size_unit or mark.size_unit,
+                    "fire_class": parsed.fire_class or mark.fire_class,
+                    "document": parsed.document or mark.document,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        self._extraction_draft.marks[idx] = new_mark
+        meta = suggestion_meta or {}
+        _log.info(
+            "assistant accept raw=%r suggested=%r conf=%s source=%s",
+            mark.mark,
+            suggested,
+            meta.get("confidence"),
+            meta.get("source"),
+        )
+        return True
+
+    def _record_assistant_decision(
+        self,
+        *,
+        decision: str,
+        raw: str,
+        suggested: str,
+        confidence: float = 0.0,
+        source: str = "deterministic",
+        reason: str = "",
+        mark_index: int | None = None,
+        flush: bool = False,
+    ) -> None:
+        if not self._extraction_draft:
+            return
+        event = AssistantFeedbackEvent(
+            decision=decision,  # type: ignore[arg-type]
+            raw=raw,
+            suggested=suggested,
+            confidence=confidence,
+            source=source,
+            reason=reason,
+            document=self._doc_name_for_assistant(),
+            mark_index=mark_index,
+            session_id=self._ensure_assistant_session(),
+        )
+        self._extraction_draft.assistant_events.append(event)
+        if flush:
+            append_assistant_feedback(
+                [event],
+                db_path=self.db_path,
+            )
+
     def _format_mark_context_panel(self, mark: MarkValidation) -> str:
         """Показывает нормализованную марку, а не сырой OCR-мусор."""
         lines = [f"Марка: {mark.mark}"]
         if mark.document:
             lines.append(f"ТУ/ГОСТ: {mark.document}")
+        try:
+            suggestion = suggest_mark_correction(mark.mark, db_path=self.db_path)
+            if suggestion.changed:
+                lines.append(
+                    f"\nАссистент 💡: «{suggestion.suggested}» "
+                    f"({suggestion.confidence:.0%}, {suggestion.source})"
+                )
+                if suggestion.reason:
+                    lines.append(f"  {suggestion.reason}")
+                lines.append("  → «Принять 💡» / «Отклонить 💡» или диалог «Ассистент»")
+            else:
+                lines.append("\nАссистент: без правок")
+            alts = get_mark_corrector(self.db_path).candidates(mark.mark, limit=3)
+            if alts and (not suggestion.changed or alts[0][0] != suggestion.suggested):
+                lines.append("  Похожие в БД:")
+                for cand, score in alts[:3]:
+                    lines.append(f"    · {cand} ({score:.0%})")
+        except Exception as exc:  # noqa: BLE001 — UI не должен падать
+            lines.append(f"\nАссистент недоступен: {exc}")
+
+        tests = list(mark.suggested_tests or [])
+        if not tests and mark.requirements_raw:
+            try:
+                tests = [
+                    s.code
+                    for s in map_requirements_to_tests(
+                        mark.requirements_raw, db_path=self.db_path
+                    )
+                ]
+            except Exception:  # noqa: BLE001
+                tests = []
+        if tests:
+            lines.append(f"\nИспытания из заявки: {', '.join(tests)}")
+            lines.append("  (вкладка «2. Расчёт» → «Испытания из заявки»)")
+        elif mark.requirements_raw:
+            lines.append(f"\nТребования (сырьё):\n{mark.requirements_raw[:240]}")
+
         raw = (mark.context or "").strip()
         if not raw:
             lines.append("\n(фрагмент документа не сохранён)")
@@ -2055,6 +2793,257 @@ class RequestProcessorApp(tk.Tk):
         else:
             lines.append(f"\nФрагмент в документе:\n{blob[:280]}…")
         return "\n".join(lines)
+
+    def _accept_assistant_for_selected(self) -> None:
+        """Принять подсказку для выделенной марки."""
+        if not self._extraction_draft:
+            messagebox.showinfo("Ассистент", "Сначала извлеките заявку.")
+            return
+        sel = self.marks_tree.selection()
+        if not sel:
+            messagebox.showinfo("Ассистент", "Выберите марку с 💡 в таблице.")
+            return
+        idx = int(sel[0])
+        suggestion = suggest_mark_correction(
+            self._extraction_draft.marks[idx].mark, db_path=self.db_path
+        )
+        if not suggestion.changed:
+            messagebox.showinfo("Ассистент", "Для этой марки подсказки нет.")
+            return
+        raw = self._extraction_draft.marks[idx].mark
+        self._apply_mark_suggestion_to_draft(
+            idx,
+            suggestion.suggested,
+            suggestion_meta={
+                "confidence": suggestion.confidence,
+                "source": suggestion.source,
+            },
+        )
+        self._record_assistant_decision(
+            decision="accepted",
+            raw=raw,
+            suggested=suggestion.suggested,
+            confidence=suggestion.confidence,
+            source=suggestion.source,
+            reason=suggestion.reason,
+            mark_index=idx,
+            flush=True,
+        )
+        self._revalidate_draft()
+        self.status.set(f"Принято: {raw[:40]} → {suggestion.suggested[:40]}")
+
+    def _reject_assistant_for_selected(self) -> None:
+        """Отклонить подсказку (марка остаётся, событие в журнал)."""
+        if not self._extraction_draft:
+            return
+        sel = self.marks_tree.selection()
+        if not sel:
+            messagebox.showinfo("Ассистент", "Выберите марку с 💡.")
+            return
+        idx = int(sel[0])
+        mark = self._extraction_draft.marks[idx]
+        suggestion = suggest_mark_correction(mark.mark, db_path=self.db_path)
+        if not suggestion.changed:
+            messagebox.showinfo("Ассистент", "Подсказки нет — отклонять нечего.")
+            return
+        self._record_assistant_decision(
+            decision="rejected",
+            raw=mark.mark,
+            suggested=suggestion.suggested,
+            confidence=suggestion.confidence,
+            source=suggestion.source,
+            reason=suggestion.reason,
+            mark_index=idx,
+            flush=True,
+        )
+        # Убираем 💡 из кэша, чтобы не навязывать снова в этой сессии
+        self._assistant_hints.pop(idx, None)
+        self._refresh_marks_tree()
+        self.status.set(f"Отклонено: {suggestion.suggested[:50]}")
+
+    def _open_assistant_review_dialog(self) -> None:
+        """Диалог ассистента: подсказки или понятный статус «всё ок»."""
+        if not self._extraction_draft:
+            messagebox.showinfo("Ассистент", "Сначала извлеките заявку (файл или текст).")
+            return
+
+        corrector = get_mark_corrector(self.db_path)
+        items: list[tuple[int, str, object]] = []
+        checked = 0
+        for idx, mark in enumerate(self._extraction_draft.marks):
+            if not mark.accepted:
+                continue
+            checked += 1
+            s = corrector.suggest(mark.mark)
+            if s.changed:
+                items.append((idx, mark.mark, s))
+
+        if not items:
+            messagebox.showinfo(
+                "Ассистент — всё в порядке",
+                "Проверено марок: {n}.\n"
+                "Дополнительных правок нет.\n\n"
+                "Как это работает:\n"
+                "• При извлечении OCR-марки уже чуть нормализуются "
+                "(KCBur→КСБнг, латиница→кириллица).\n"
+                "• Ассистент ищет, что ещё можно улучшить (fuzzy к базе марок).\n"
+                "• Если в таблице есть 💡 — есть конкретная подсказка: "
+                "«Принять» / «Отклонить» или снова «Ассистент 💡».\n"
+                "• Ручная правка: выделите строку → «Изменить» "
+                "(или двойной клик) → «Сохранить в заявку».\n\n"
+                "«Уже в базе» ≠ ошибка: значит текущие обозначения "
+                "совпадают с эталоном / правилами.".format(n=checked),
+            )
+            self.status.set(f"Ассистент: {checked} марок без доп. правок")
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Ассистент — {len(items)} подсказок")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS["bg"])
+
+        ttk.Label(
+            dialog,
+            text=(
+                f"Найдено {len(items)} из {checked} марок с предложением правки.\n"
+                "✓ = применить при «Применить выбранные». Двойной клик / пробел — снять галочку."
+            ),
+            style="Muted.TLabel",
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+
+        cols = ("use", "raw", "suggested", "conf", "source", "reason")
+        tree = ttk.Treeview(dialog, columns=cols, show="headings", height=12, selectmode="browse")
+        for col, title, w in (
+            ("use", "✓", 36),
+            ("raw", "Сейчас", 200),
+            ("suggested", "Подсказка", 200),
+            ("conf", "%", 48),
+            ("source", "Источник", 90),
+            ("reason", "Почему", 180),
+        ):
+            tree.heading(col, text=title)
+            tree.column(col, width=w, anchor="center" if col in ("use", "conf") else "w")
+        tree.pack(fill="both", expand=True, padx=12, pady=4)
+
+        row_state: dict[str, bool] = {}
+        for idx, raw, s in items:
+            iid = str(idx)
+            row_state[iid] = True
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    "✓",
+                    raw,
+                    s.suggested,
+                    f"{s.confidence:.0%}",
+                    s.source,
+                    (s.reason or "")[:80],
+                ),
+            )
+
+        def toggle_row(_event=None) -> str:
+            sel = tree.selection()
+            if not sel:
+                return "break"
+            iid = sel[0]
+            row_state[iid] = not row_state.get(iid, True)
+            vals = list(tree.item(iid, "values"))
+            vals[0] = "✓" if row_state[iid] else "—"
+            tree.item(iid, values=vals)
+            return "break"
+
+        tree.bind("<Double-Button-1>", toggle_row)
+        tree.bind("<space>", toggle_row)
+
+        meta_by_idx = {str(idx): s for idx, _raw, s in items}
+
+        def apply_choices() -> None:
+            accepted_n = 0
+            rejected_n = 0
+            events: list[AssistantFeedbackEvent] = []
+            session = self._ensure_assistant_session()
+            doc = self._doc_name_for_assistant()
+            for iid, use in row_state.items():
+                idx = int(iid)
+                s = meta_by_idx[iid]
+                raw = (
+                    self._extraction_draft.marks[idx].mark
+                    if self._extraction_draft
+                    else ""
+                )
+                if use:
+                    if self._apply_mark_suggestion_to_draft(
+                        idx,
+                        s.suggested,
+                        suggestion_meta={
+                            "confidence": s.confidence,
+                            "source": s.source,
+                        },
+                    ):
+                        accepted_n += 1
+                    events.append(
+                        AssistantFeedbackEvent(
+                            decision="accepted",
+                            raw=raw,
+                            suggested=s.suggested,
+                            confidence=s.confidence,
+                            source=s.source,
+                            reason=s.reason,
+                            document=doc,
+                            mark_index=idx,
+                            session_id=session,
+                        )
+                    )
+                else:
+                    rejected_n += 1
+                    events.append(
+                        AssistantFeedbackEvent(
+                            decision="rejected",
+                            raw=raw,
+                            suggested=s.suggested,
+                            confidence=s.confidence,
+                            source=s.source,
+                            reason=s.reason,
+                            document=doc,
+                            mark_index=idx,
+                            session_id=session,
+                        )
+                    )
+            if self._extraction_draft:
+                self._extraction_draft.assistant_events.extend(events)
+            path = append_assistant_feedback(events, db_path=self.db_path)
+            self._revalidate_draft()
+            dialog.destroy()
+            self.status.set(
+                f"Ассистент: принято {accepted_n}, отклонено {rejected_n}"
+                + (f" · {path.name}" if path else "")
+            )
+
+        def accept_all() -> None:
+            for iid in row_state:
+                row_state[iid] = True
+                vals = list(tree.item(iid, "values"))
+                vals[0] = "✓"
+                tree.item(iid, values=vals)
+
+        def reject_all() -> None:
+            for iid in row_state:
+                row_state[iid] = False
+                vals = list(tree.item(iid, "values"))
+                vals[0] = "—"
+                tree.item(iid, values=vals)
+
+        btns = ttk.Frame(dialog, padding=12)
+        btns.pack(side="bottom", fill="x")
+        ttk.Button(btns, text="Все ✓", command=accept_all).pack(side="left")
+        ttk.Button(btns, text="Все —", command=reject_all).pack(side="left", padx=6)
+        self._accent_button(btns, "Применить выбранные", apply_choices).pack(side="right")
+        ttk.Button(btns, text="Закрыть", command=dialog.destroy).pack(side="right", padx=8)
+        fit_window_to_screen(dialog, prefer_w=800, prefer_h=440)
 
     def _on_draft_mark_select(self, _event=None) -> None:
         if not self._extraction_draft:
@@ -2113,10 +3102,13 @@ class RequestProcessorApp(tk.Tk):
     ) -> None:
         dialog = tk.Toplevel(self)
         dialog.title(title)
-        dialog.geometry("560x420")
         dialog.transient(self)
         dialog.grab_set()
-        dialog.minsize(520, 400)
+        dialog.minsize(520, 480)
+        dialog.configure(bg=COLORS["bg"])
+        # Кнопки снизу ВСЕГДА видны (pack bottom first), форма — остаток
+        btns = ttk.Frame(dialog, padding=(12, 8, 12, 12))
+        btns.pack(side="bottom", fill="x")
 
         seed = existing or MarkValidation(
             mark="",
@@ -2124,8 +3116,6 @@ class RequestProcessorApp(tk.Tk):
             status=FieldStatus.ok,
             accepted=True,
         )
-        if existing is None and not seed.brand:
-            pass
 
         fields: dict[str, tk.Variable] = {
             "mark": tk.StringVar(value=seed.mark),
@@ -2145,13 +3135,22 @@ class RequestProcessorApp(tk.Tk):
             "characteristic_size": tk.StringVar(
                 value=str(seed.characteristic_size) if seed.characteristic_size else ""
             ),
-            "size_unit": tk.StringVar(value=seed.size_unit),
+            "size_unit": tk.StringVar(value=seed.size_unit or "mm2"),
             "document": tk.StringVar(value=seed.document or ""),
         }
 
         form = ttk.Frame(dialog, padding=12)
-        form.pack(fill="both", expand=True)
+        form.pack(side="top", fill="both", expand=True)
         form.columnconfigure(1, weight=1)
+
+        hint = ttk.Label(
+            form,
+            text="Измените поля → «Сохранить в заявку». "
+            "«Разобрать» заполняет только пустые поля из обозначения.",
+            style="Muted.TLabel",
+            wraplength=480,
+        )
+        hint.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         rows = (
             ("Условное обозначение:", "mark"),
@@ -2164,79 +3163,166 @@ class RequestProcessorApp(tk.Tk):
             ("Единица:", "size_unit"),
             ("ТУ / ГОСТ:", "document"),
         )
-        element_combo: ttk.Combobox | None = None
-        unit_combo: ttk.Combobox | None = None
-        for row, (label, key) in enumerate(rows):
+        for row, (label, key) in enumerate(rows, start=1):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 8))
             if key == "structural_element_type":
-                element_combo = ttk.Combobox(
+                ttk.Combobox(
                     form,
                     textvariable=fields[key],
                     values=("жила", "пара", "тройка"),
                     state="readonly",
                     width=24,
-                )
-                element_combo.grid(row=row, column=1, sticky="ew", pady=4)
+                ).grid(row=row, column=1, sticky="ew", pady=4)
             elif key == "size_unit":
-                unit_combo = ttk.Combobox(
+                ttk.Combobox(
                     form,
                     textvariable=fields[key],
                     values=("mm2", "mm"),
                     state="readonly",
                     width=24,
-                )
-                unit_combo.grid(row=row, column=1, sticky="w", pady=4)
+                ).grid(row=row, column=1, sticky="w", pady=4)
             else:
                 ttk.Entry(form, textvariable=fields[key]).grid(
                     row=row, column=1, sticky="ew", pady=4
                 )
 
-        def autofill() -> None:
+        def _parsed_from_designation(designation: str) -> MarkValidation:
+            tmp = MarkValidation(
+                mark=designation,
+                document=fields["document"].get().strip() or None,
+                context=seed.context,
+                confidence=seed.confidence,
+                status=seed.status,
+                accepted=seed.accepted,
+            )
+            try:
+                self._apply_parsed_fields_to_mark(tmp, designation)
+            except Exception:  # noqa: BLE001
+                pass
+            return tmp
+
+        def autofill(*, only_empty: bool = True) -> None:
+            """only_empty=True — не затирает ручные правки оператора."""
             designation = fields["mark"].get().strip()
             if len(designation) < 3:
-                messagebox.showwarning("Марка", "Сначала укажите условное обозначение.")
+                messagebox.showwarning(
+                    "Марка", "Сначала укажите условное обозначение.", parent=dialog
+                )
                 return
-            tmp = MarkValidation(mark=designation, document=fields["document"].get().strip() or None)
-            self._apply_parsed_fields_to_mark(tmp, designation)
-            fields["mark"].set(tmp.mark)
-            fields["brand"].set(tmp.brand or "")
-            fields["fire_class"].set(tmp.fire_class or "")
-            fields["cores_count"].set(str(tmp.cores_count or ""))
-            fields["structural_element_type"].set(tmp.structural_element_type or "жила")
-            fields["structural_elements_count"].set(str(tmp.structural_elements_count or ""))
-            fields["characteristic_size"].set(
-                str(tmp.characteristic_size) if tmp.characteristic_size else ""
+            tmp = _parsed_from_designation(designation)
+            def set_field(key: str, value: str) -> None:
+                if only_empty and fields[key].get().strip():
+                    return
+                fields[key].set(value)
+
+            fields["mark"].set(tmp.mark or designation)
+            set_field("brand", tmp.brand or "")
+            set_field("fire_class", tmp.fire_class or "")
+            set_field("cores_count", str(tmp.cores_count or ""))
+            set_field("structural_element_type", tmp.structural_element_type or "жила")
+            set_field(
+                "structural_elements_count",
+                str(tmp.structural_elements_count or ""),
             )
-            fields["size_unit"].set(tmp.size_unit)
+            set_field(
+                "characteristic_size",
+                str(tmp.characteristic_size) if tmp.characteristic_size else "",
+            )
+            if not only_empty or not fields["size_unit"].get().strip():
+                fields["size_unit"].set(tmp.size_unit or "mm2")
             if tmp.document:
-                fields["document"].set(tmp.document)
+                set_field("document", tmp.document)
+
+        def autofill_force() -> None:
+            if not messagebox.askyesno(
+                "Перезаполнить",
+                "Заполнить все поля из обозначения заново?\n"
+                "Ручные правки в полях ниже будут сброшены.",
+                parent=dialog,
+            ):
+                return
+            # временно очищаем производные поля, кроме mark/document
+            for key in (
+                "brand",
+                "fire_class",
+                "cores_count",
+                "structural_element_type",
+                "structural_elements_count",
+                "characteristic_size",
+            ):
+                fields[key].set("")
+            fields["structural_element_type"].set("жила")
+            autofill(only_empty=False)
 
         def build_mark() -> MarkValidation | None:
             designation = fields["mark"].get().strip()
             if len(designation) < 3:
-                messagebox.showwarning("Марка", "Укажите условное обозначение кабеля.")
+                messagebox.showwarning(
+                    "Марка", "Укажите условное обозначение кабеля.", parent=dialog
+                )
                 return None
+
+            # Автоподстановка чисел из обозначения, если поля пустые
+            parsed = _parsed_from_designation(designation)
+            cores_raw = fields["cores_count"].get().strip()
+            elem_raw = fields["structural_elements_count"].get().strip()
+            size_raw = fields["characteristic_size"].get().strip().replace(",", ".")
+            brand = fields["brand"].get().strip() or parsed.brand
+            fire = fields["fire_class"].get().strip() or parsed.fire_class
+            elem_type = (
+                fields["structural_element_type"].get().strip()
+                or parsed.structural_element_type
+                or "жила"
+            )
+            unit = fields["size_unit"].get().strip() or parsed.size_unit or "mm2"
+
             try:
-                cores = int(fields["cores_count"].get().strip() or "1")
-                elem_count = int(fields["structural_elements_count"].get().strip() or "1")
-                size = float(fields["characteristic_size"].get().strip().replace(",", "."))
+                cores = int(cores_raw) if cores_raw else int(parsed.cores_count or 1)
+                elem_count = (
+                    int(elem_raw)
+                    if elem_raw
+                    else int(parsed.structural_elements_count or cores or 1)
+                )
+                if size_raw:
+                    size = float(size_raw)
+                elif parsed.characteristic_size is not None:
+                    size = float(parsed.characteristic_size)
+                else:
+                    size = 1.0
             except ValueError:
-                messagebox.showwarning("Марка", "ТПЖ, кол-во элементов и размер — числа.")
+                messagebox.showwarning(
+                    "Марка",
+                    "ТПЖ, кол-во элементов и размер должны быть числами.\n"
+                    "Или очистите поля — подставятся из обозначения.",
+                    parent=dialog,
+                )
                 return None
             if cores < 1 or elem_count < 1 or size <= 0:
-                messagebox.showwarning("Марка", "ТПЖ ≥ 1, размер > 0.")
+                messagebox.showwarning(
+                    "Марка", "ТПЖ ≥ 1, размер > 0.", parent=dialog
+                )
                 return None
+
+            # Синхронизируем видимые поля (что реально сохраняем)
+            fields["cores_count"].set(str(cores))
+            fields["structural_elements_count"].set(str(elem_count))
+            fields["characteristic_size"].set(str(size).replace(".", ","))
+            if brand and not fields["brand"].get().strip():
+                fields["brand"].set(brand)
+
             return MarkValidation(
                 mark=designation,
                 document=fields["document"].get().strip() or None,
                 context=seed.context,
-                brand=fields["brand"].get().strip() or None,
-                fire_class=fields["fire_class"].get().strip() or None,
+                requirements_raw=seed.requirements_raw,
+                suggested_tests=list(seed.suggested_tests or []),
+                brand=brand or None,
+                fire_class=fire or None,
                 cores_count=cores,
-                structural_element_type=fields["structural_element_type"].get().strip() or "жила",
+                structural_element_type=elem_type,
                 structural_elements_count=elem_count,
                 characteristic_size=size,
-                size_unit=fields["size_unit"].get() or "mm2",
+                size_unit=unit if unit in ("mm2", "mm") else "mm2",
                 confidence=seed.confidence,
                 status=seed.status,
                 warnings=list(seed.warnings),
@@ -2250,15 +3336,22 @@ class RequestProcessorApp(tk.Tk):
             on_save(built)
             dialog.destroy()
             self._revalidate_draft()
+            self.status.set(f"Марка сохранена в заявку: {built.mark[:60]}")
 
-        tool_row = ttk.Frame(form)
-        tool_row.grid(row=len(rows), column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Button(tool_row, text="Заполнить из обозначения", command=autofill).pack(side="left")
+        ttk.Button(
+            btns, text="Разобрать (пустые)", command=lambda: autofill(only_empty=True)
+        ).pack(side="left")
+        ttk.Button(btns, text="Перезаполнить всё…", command=autofill_force).pack(
+            side="left", padx=(6, 0)
+        )
+        # Явная primary-кнопка (tk) — не «теряется» в теме
+        self._accent_button(btns, save_label, save).pack(side="right")
+        ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="right", padx=(0, 8))
 
-        btns = ttk.Frame(dialog, padding=(12, 0, 12, 12))
-        btns.pack(fill="x")
-        ttk.Button(btns, text=save_label, style="Accent.TButton", command=save).pack(side="left")
-        ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
+        dialog.bind("<Return>", lambda _e: save())
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        fit_window_to_screen(dialog, prefer_w=560, prefer_h=520)
+        dialog.focus_force()
 
     def _add_draft_mark(self) -> None:
         if not self._extraction_draft:
@@ -2282,33 +3375,43 @@ class RequestProcessorApp(tk.Tk):
 
     def _edit_draft_mark(self) -> None:
         if not self._extraction_draft:
+            messagebox.showinfo("Марка", "Сначала извлеките заявку.")
             return
         sel = self.marks_tree.selection()
         if not sel:
-            messagebox.showinfo("Марка", "Выберите марку в таблице.")
+            messagebox.showinfo("Марка", "Выберите марку в таблице, затем «Изменить».")
             return
         idx = int(sel[0])
         mark = self._extraction_draft.marks[idx]
 
         def on_save(built: MarkValidation) -> None:
             built.accepted = mark.accepted
-            built.confidence = mark.confidence
-            built.status = mark.status
-            built.warnings = list(mark.warnings)
+            built.confidence = max(mark.confidence, 0.85)
+            built.status = FieldStatus.ok
+            built.warnings = []
             built.context = mark.context
-            self._extraction_draft.marks[idx] = built
+            built.requirements_raw = mark.requirements_raw
+            built.suggested_tests = list(mark.suggested_tests or [])
+            if self._extraction_draft:
+                self._extraction_draft.marks[idx] = built
 
         self._open_mark_editor(
             mark.model_copy(deep=True),
-            title="Уточнить марку для БД",
-            save_label="Сохранить",
+            title="Изменить марку в заявке",
+            save_label="Сохранить в заявку",
             on_save=on_save,
         )
 
     def _on_draft_mark_double_click(self, event) -> None:
+        """Двойной клик — открыть редактор (не сразу в расчёт)."""
         if self.marks_tree.identify_region(event.x, event.y) == "heading":
             return
-        self._use_mark_in_calc()
+        # Выделить строку под курсором
+        row = self.marks_tree.identify_row(event.y)
+        if row:
+            self.marks_tree.selection_set(row)
+            self.marks_tree.focus(row)
+        self._edit_draft_mark()
 
     def _selected_draft_mark(self) -> MarkValidation | None:
         if not self._extraction_draft or not hasattr(self, "marks_tree"):
@@ -2414,6 +3517,8 @@ class RequestProcessorApp(tk.Tk):
         if not self._extraction_draft:
             return
         lines: list[str] = []
+        # События ассистента пишутся сразу в assistant_*.jsonl — здесь только
+        # ручные правки оператора относительно original_marks.
         orig_by_mark = {m.mark: m for m in self._extraction_draft.original_marks}
         for final in self._extraction_draft.marks:
             if not final.accepted:
@@ -2588,6 +3693,10 @@ class RequestProcessorApp(tk.Tk):
         self._extraction_draft = None
         self._extraction_confirmed = False
         self._refresh_marks_tree()
+        self._warn_lines = []
+        self._warn_expanded = False
+        self.validation_warn_summary_var.set("")
+        self.validation_warn_detail.pack_forget()
         self.validation_warn_frame.pack_forget()
         self.draft_customer_var.set("")
         self.draft_customer_inn_var.set("")
@@ -2612,83 +3721,259 @@ class RequestProcessorApp(tk.Tk):
         if path:
             self.pdf_path_var.set(path)
 
+    def _on_ocr_engine_toggle(self) -> None:
+        """При torch-CV поднимаем DPI по умолчанию (EasyOCR любит крупные глифы)."""
+        if self.ocr_pytorch_var.get():
+            try:
+                cur = int(self.ocr_dpi_var.get())
+            except (TypeError, ValueError, tk.TclError):
+                cur = SCAN_OCR_DPI
+            if cur < EASYOCR_OCR_DPI:
+                self.ocr_dpi_var.set(EASYOCR_OCR_DPI)
+        else:
+            # обратно на скан-default, если пользователь не поднимал вручную выше
+            try:
+                cur = int(self.ocr_dpi_var.get())
+            except (TypeError, ValueError, tk.TclError):
+                cur = SCAN_OCR_DPI
+            if cur == EASYOCR_OCR_DPI:
+                self.ocr_dpi_var.set(SCAN_OCR_DPI)
+
+    def _present_extraction_result(
+        self,
+        result: PdfExtractionResult,
+        *,
+        source_path: Path,
+        json_stem: str,
+        confirm_only: bool,
+    ) -> None:
+        """Общая сборка черновика после extract (файл или текст)."""
+        report = validate_extraction(result)
+        _log.info(
+            "extract done marks=%s orgs=%s text=%s engine=%s conf=%.2f",
+            len(result.cable_marks),
+            len(result.organizations),
+            len(result.text),
+            result.ocr_engine,
+            report.overall_confidence,
+        )
+        out_dir = Path("data/extracted")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_stem = re.sub(r'[<>:"/\\|?*]', "_", json_stem)[:80] or "extract"
+        out_file = out_dir / f"{safe_stem}.json"
+        out_file.write_text(
+            result.model_dump_json(indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        initial_marks = [m.model_copy(deep=True) for m in report.marks]
+        draft = ExtractionDraft(
+            result=result,
+            report=report,
+            source_path=source_path,
+            json_path=out_file,
+            marks=initial_marks,
+            original_marks=[m.model_copy(deep=True) for m in initial_marks],
+            original_customer=result.customer_name,
+        )
+
+        def update_ui() -> None:
+            self._show_extraction_draft(draft)
+            if not confirm_only:
+                self.save_marks_var.set(True)
+                self.save_orgs_var.set(True)
+                confirmed = self._build_confirmed_result()
+                self._persist_extraction(
+                    confirmed,
+                    mark_validations=self._extraction_draft.marks if self._extraction_draft else None,
+                )
+                self._extraction_confirmed = True
+                self._extraction_draft.result = confirmed
+                self._load_cable_marks()
+                self._load_organizations()
+                if confirmed.customer_name:
+                    self.kp_customer_var.set(confirmed.customer_name)
+                self._update_validation_status_bar(
+                    state="confirmed",
+                    file_name=source_path.name,
+                    result=confirmed,
+                    report=draft.report,
+                )
+                self.status.set(
+                    f"Заявка сохранена · марок: {len(confirmed.cable_marks)} · {out_file.name}"
+                )
+            else:
+                n_suggest = 0
+                for m in draft.marks:
+                    try:
+                        if suggest_mark_correction(m.mark, db_path=self.db_path).changed:
+                            n_suggest += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+                hint = f" · ассистент: {n_suggest} правок" if n_suggest else ""
+                self.status.set(
+                    f"Черновик · марок: {sum(1 for m in draft.marks if m.accepted)}{hint} · "
+                    f"проверьте и подтвердите"
+                )
+
+        self.after(0, update_ui)
+
+    def _run_extract_free_text(self) -> None:
+        """Вход: текст из речи заказчика / письмо / запрос по ТУ (без файла)."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Текст заявки (речь / письмо / ТУ)")
+        dialog.transient(self)
+        dialog.grab_set()
+        fit_window_to_screen(dialog, prefer_w=720, prefer_h=480)
+        ttk.Label(
+            dialog,
+            text="Вставьте текст заказчика, письмо или запрос испытаний по ТУ:",
+            style="Muted.TLabel",
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+        text_box = scrolledtext.ScrolledText(dialog, height=18, font=("Segoe UI", 10), wrap="word")
+        text_box.pack(fill="both", expand=True, padx=12, pady=4)
+        self._bind_clipboard(text_box)
+
+        def run_parse() -> None:
+            raw = text_box.get("1.0", "end").strip()
+            if len(raw) < 10:
+                messagebox.showwarning("Текст", "Вставьте осмысленный текст заявки.", parent=dialog)
+                return
+            dialog.destroy()
+            self.status.set("Разбор свободного текста…")
+            confirm_only = self.confirm_only_var.get()
+
+            def work() -> None:
+                try:
+                    result = extract_from_text(raw, source_label="customer_speech")
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    virtual = Path(f"text_customer_{stamp}.txt")
+                    self._present_extraction_result(
+                        result,
+                        source_path=virtual,
+                        json_stem=f"text_customer_{stamp}",
+                        confirm_only=confirm_only,
+                    )
+                except Exception as exc:
+                    _log.exception("free-text extract failed")
+
+                    def fail() -> None:
+                        messagebox.showerror("Текст", str(exc))
+                        self.status.set("Ошибка разбора текста")
+                        self._update_validation_status_bar(state="error")
+
+                    self.after(0, fail)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        btns = ttk.Frame(dialog, padding=12)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Разобрать", style="Accent.TButton", command=run_parse).pack(side="left")
+        ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
+
+    def _open_extract_progress_dialog(self, title: str) -> tuple[tk.Toplevel, tk.StringVar, ttk.Progressbar]:
+        """Модальное окно прогресса парсинга (обновляется из worker через after)."""
+        dlg = tk.Toplevel(self)
+        dlg.title(title)
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        dlg.configure(bg=COLORS["bg"])
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # нельзя закрыть крестиком
+        ttk.Label(dlg, text="Извлечение заявки…", font=("Segoe UI Semibold", 11)).pack(
+            anchor="w", padx=16, pady=(14, 4)
+        )
+        msg_var = tk.StringVar(value="Подготовка…")
+        ttk.Label(dlg, textvariable=msg_var, style="Muted.TLabel", wraplength=420).pack(
+            anchor="w", padx=16, pady=(0, 8)
+        )
+        bar = ttk.Progressbar(dlg, mode="determinate", maximum=100, length=420)
+        bar.pack(fill="x", padx=16, pady=(0, 16))
+        bar["value"] = 0
+        fit_window_to_screen(dlg, prefer_w=460, prefer_h=140)
+        dlg.update_idletasks()
+        return dlg, msg_var, bar
+
     def _run_extract_pdf(self) -> None:
         doc_path = self.pdf_path_var.get().strip()
         if not doc_path:
-            messagebox.showwarning("Заявка", "Выберите файл PDF или Word.")
+            messagebox.showwarning(
+                "Заявка",
+                "Выберите файл PDF или Word.\n"
+                "Или нажмите «Текст…» для ввода речи/письма заказчика.",
+            )
             return
 
-        self.status.set("Извлечение заявки…")
+        eng = "torch-CV" if self.ocr_pytorch_var.get() else "OCR"
+        try:
+            dpi_show = int(self.ocr_dpi_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            dpi_show = SCAN_OCR_DPI
+        self.status.set(f"Извлечение заявки… ({eng}, DPI {dpi_show})")
         confirm_only = self.confirm_only_var.get()
+
+        prog_dlg, prog_msg, prog_bar = self._open_extract_progress_dialog(
+            f"Парсинг · {eng} · DPI {dpi_show}"
+        )
+
+        def on_progress(message: str, *, current: int | None = None, total: int | None = None, stage: str = "") -> None:
+            def ui() -> None:
+                if not prog_dlg.winfo_exists():
+                    return
+                label = message
+                if current is not None and total:
+                    label = f"{message}  ({current}/{total})"
+                    try:
+                        prog_bar["value"] = min(100, max(0, 100.0 * current / total))
+                    except tk.TclError:
+                        pass
+                elif stage == "done":
+                    prog_bar["value"] = 100
+                prog_msg.set(label)
+                self.status.set(label)
+
+            self.after(0, ui)
 
         def work() -> None:
             try:
                 resolved = Path(doc_path).resolve()
+                ocr_engine = "easyocr" if self.ocr_pytorch_var.get() else "auto"
+                try:
+                    dpi = int(self.ocr_dpi_var.get())
+                except (TypeError, ValueError, tk.TclError):
+                    dpi = SCAN_OCR_DPI
+                dpi = max(150, min(dpi, 600))
+                _log.info(
+                    "extract start file=%s ocr=%s engine=%s dpi=%s",
+                    resolved.name,
+                    self.ocr_var.get(),
+                    ocr_engine,
+                    dpi,
+                )
                 result = extract_from_document(
                     Path(doc_path),
                     use_ocr=self.ocr_var.get(),
+                    ocr_engine=ocr_engine,
+                    ocr_dpi=dpi,
+                    progress=on_progress,
                 )
                 result = result.model_copy(update={"source_path": str(resolved)})
-                report = validate_extraction(result)
 
-                out_dir = Path("data/extracted")
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_file = out_dir / f"{Path(doc_path).stem}.json"
-                out_file.write_text(
-                    result.model_dump_json(indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                def finish_ok() -> None:
+                    if prog_dlg.winfo_exists():
+                        prog_dlg.destroy()
+                    self._present_extraction_result(
+                        result,
+                        source_path=resolved,
+                        json_stem=resolved.stem,
+                        confirm_only=confirm_only,
+                    )
 
-                initial_marks = [m.model_copy(deep=True) for m in report.marks]
-                draft = ExtractionDraft(
-                    result=result,
-                    report=report,
-                    source_path=resolved,
-                    json_path=out_file,
-                    marks=initial_marks,
-                    original_marks=[m.model_copy(deep=True) for m in initial_marks],
-                    original_customer=result.customer_name,
-                )
-
-                def update_ui() -> None:
-                    self._show_extraction_draft(draft)
-                    if not confirm_only:
-                        self.save_marks_var.set(True)
-                        self.save_orgs_var.set(True)
-                        confirmed = self._build_confirmed_result()
-                        self._persist_extraction(confirmed)
-                        self._extraction_confirmed = True
-                        self._extraction_draft.result = confirmed
-                        if confirmed.customer_name:
-                            self.kp_customer_var.set(confirmed.customer_name)
-                        self._load_cable_marks()
-                        self._load_organizations()
-                        self._update_validation_status_bar(
-                            state="confirmed",
-                            file_name=resolved.name,
-                            result=confirmed,
-                            report=report,
-                        )
-                        self.parse_info_var.set(
-                            self._format_parse_info(
-                                file_name=resolved.name,
-                                source_type=result.source_type,
-                                marks_count=len(confirmed.cable_marks),
-                                customer_name=confirmed.customer_name,
-                                manufacturer_name=confirmed.manufacturer_name,
-                                ocr_used=result.ocr_used,
-                                page_count=result.page_count,
-                                extracted_at=result.extracted_at.isoformat(),
-                                validation_state="confirmed",
-                            )
-                        )
-                        self.status.set("Заявка обработана (legacy: сразу в БД)")
-                    else:
-                        self.status.set("Черновик — проверьте и нажмите «Принять и сохранить»")
-
-                self.after(0, update_ui)
+                self.after(0, finish_ok)
             except Exception as exc:
+                _log.exception("extract failed")
+
                 def on_error() -> None:
+                    if prog_dlg.winfo_exists():
+                        prog_dlg.destroy()
                     messagebox.showerror("Ошибка извлечения", str(exc))
                     self.status.set("Ошибка")
                     self._update_validation_status_bar(state="error")
@@ -3092,6 +4377,104 @@ class RequestProcessorApp(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _generate_order_protocol(self) -> None:
+        order_id = self._get_selected_order_id()
+        if order_id is None:
+            return
+        self.status.set("Формирование макета протокола…")
+        self.update_idletasks()
+
+        def work() -> None:
+            saved_path: Path | None = None
+            error: str | None = None
+            try:
+                saved_path = generate_protocol_draft_from_order(
+                    order_id, db_path=self.db_path
+                )
+            except Exception as exc:
+                error = str(exc)
+
+            def done() -> None:
+                if error:
+                    self.status.set("Ошибка макета протокола")
+                    messagebox.showerror("Макет протокола", error)
+                    return
+                assert saved_path is not None
+                self.status.set(f"Заказ №{order_id} · протокол: {saved_path.name}")
+                try:
+                    import os
+
+                    os.startfile(str(saved_path))
+                except OSError:
+                    pass
+                messagebox.showinfo(
+                    "Макет протокола",
+                    f"Черновик протокола сохранён:\n{saved_path}\n\n"
+                    "Доработайте результаты испытаний вручную.",
+                )
+
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _build_order_document_pack(self) -> None:
+        """North Star: заявка + КП + макет протокола + summary в одну папку."""
+        order_id = self._get_selected_order_id()
+        if order_id is None:
+            return
+        opts = self._ask_document_pack_options(order_id)
+        if not opts:
+            return
+        pack_settings = get_document_pack_settings(self.db_path)
+        pack_settings.base_dir = opts["output_dir"]
+        save_document_pack_settings(pack_settings, self.db_path)
+        if hasattr(self, "pack_base_dir_var"):
+            self.pack_base_dir_var.set(opts["output_dir"])
+
+        self.status.set("Сборка пакета документов…")
+        self.update_idletasks()
+
+        def work() -> None:
+            pack: dict | None = None
+            error: str | None = None
+            try:
+                pack = build_document_pack(
+                    order_id,
+                    output_dir=opts["output_dir"],
+                    pack_folder_name=opts["pack_folder_name"],
+                    db_path=self.db_path,
+                )
+                push_recent_pack_path(pack["pack_dir"], self.db_path)
+            except Exception as exc:
+                error = str(exc)
+
+            def done() -> None:
+                if error or not pack:
+                    self.status.set("Ошибка пакета документов")
+                    messagebox.showerror("Пакет документов", error or "Неизвестная ошибка")
+                    return
+                pack_dir = pack["pack_dir"]
+                self.status.set(f"Заказ №{order_id} · пакет: {Path(pack_dir).name}")
+                self._load_orders_table()
+                self._show_order_details()
+                self._load_settings()
+                try:
+                    import os
+
+                    os.startfile(pack_dir)
+                except OSError:
+                    pass
+                names = "\n".join(f"  • {Path(f).name}" for f in pack.get("files") or [])
+                messagebox.showinfo(
+                    "Пакет документов",
+                    f"Папка:\n{pack_dir}\n\n{names}\n\n"
+                    "Макет протокола — черновик; ТУ/ПМИ-выдержки — в следующих итерациях.",
+                )
+
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _open_selected_order_application(self) -> None:
         path = self._get_selected_order_application_path()
         if not path:
@@ -3211,6 +4594,20 @@ class RequestProcessorApp(tk.Tk):
         settings = get_climatic_settings(self.db_path) or ClimaticTestSettings()
         for key, var in self.setting_vars.items():
             var.set(str(getattr(settings, key)))
+        if hasattr(self, "llm_enabled_var"):
+            llm = get_assistant_llm_settings(self.db_path)
+            self.llm_enabled_var.set(llm.enabled)
+            self.llm_model_var.set(llm.model)
+            self.llm_base_url_var.set(llm.base_url)
+            self.llm_models_dir_var.set(llm.ollama_models_dir)
+            self.llm_timeout_var.set(str(llm.timeout_seconds))
+        if hasattr(self, "pack_base_dir_var"):
+            pack = get_document_pack_settings(self.db_path)
+            self.pack_base_dir_var.set(pack.base_dir or str(self.generated_dir))
+            recent = pack.recent_paths or []
+            self.pack_recent_combo.configure(values=recent)
+            if recent:
+                self.pack_recent_var.set(recent[0])
 
     def _save_settings(self) -> None:
         try:
@@ -3224,7 +4621,268 @@ class RequestProcessorApp(tk.Tk):
             messagebox.showerror("Настройки", "Укажите корректные числа часов.")
             return
         save_climatic_settings(settings, self.db_path)
-        self.status.set("Настройки выдержки сохранены")
+        if hasattr(self, "llm_enabled_var"):
+            try:
+                llm = AssistantLlmSettings(
+                    enabled=self.llm_enabled_var.get(),
+                    provider="ollama" if self.llm_enabled_var.get() else "off",
+                    model=self.llm_model_var.get().strip() or "llama3.2",
+                    base_url=self.llm_base_url_var.get().strip() or "http://127.0.0.1:11434",
+                    ollama_models_dir=self.llm_models_dir_var.get().strip() or "D:/ollama/models",
+                    timeout_seconds=float(self.llm_timeout_var.get().replace(",", ".")),
+                )
+            except ValueError:
+                messagebox.showerror("LLM", "Укажите корректный таймаут (число секунд).")
+                return
+            save_assistant_llm_settings(llm, self.db_path)
+        if hasattr(self, "pack_base_dir_var"):
+            pack = get_document_pack_settings(self.db_path)
+            pack.base_dir = self.pack_base_dir_var.get().strip()
+            save_document_pack_settings(pack, self.db_path)
+        self.status.set("Настройки сохранены")
+
+    def _refresh_battle_host_label(self) -> None:
+        if not hasattr(self, "battle_host_label"):
+            return
+        try:
+            from ..training.battle_experience import get_battle_host_id
+
+            host_id = get_battle_host_id(self.db_path)
+            self.battle_host_label.configure(
+                text=f"ID этой станции: {host_id}  (префикс файлов при импорте у разработчика)"
+            )
+        except Exception:  # noqa: BLE001
+            self.battle_host_label.configure(text="")
+
+    def _export_battle_experience_dialog(self) -> None:
+        from datetime import datetime
+
+        from ..training.battle_experience import export_battle_experience, get_battle_host_id
+
+        host = get_battle_host_id(self.db_path)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        default_name = f"battle_{host}_{stamp}.zip"
+        path = filedialog.asksaveasfilename(
+            title="Экспорт боевого опыта",
+            defaultextension=".zip",
+            filetypes=[("ZIP", "*.zip")],
+            initialfile=default_name,
+            initialdir=str(self.generated_dir.parent / "training" / "exports"),
+        )
+        if not path:
+            return
+        try:
+            result = export_battle_experience(
+                path,
+                db_path=self.db_path,
+                operator_note=self.battle_note_var.get().strip(),
+            )
+            counts = result["manifest"].get("counts") or {}
+            summary = ", ".join(f"{k}={v}" for k, v in counts.items())
+            messagebox.showinfo(
+                "Экспорт опыта",
+                f"Сохранено:\n{result['path']}\n\n{summary}",
+            )
+            self.status.set(f"Экспорт опыта: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Экспорт опыта", str(exc))
+
+    def _import_battle_experience_dialog(self) -> None:
+        from ..training.battle_experience import import_battle_experience
+
+        path = filedialog.askopenfilename(
+            title="Импорт боевого опыта",
+            filetypes=[("ZIP", "*.zip")],
+        )
+        if not path:
+            return
+        try:
+            result = import_battle_experience(path, db_path=self.db_path)
+            stats = result.get("stats") or {}
+            host = (result.get("manifest") or {}).get("host_name", "?")
+            messagebox.showinfo(
+                "Импорт опыта",
+                f"Источник: {host}\n"
+                f"Правок скопировано: {stats.get('corrections_copied', 0)}\n"
+                f"Снимков: {stats.get('snapshots_copied', 0)}",
+            )
+            self.status.set(f"Импорт опыта с {host}")
+        except Exception as exc:
+            messagebox.showerror("Импорт опыта", str(exc))
+
+    def _test_ollama_connection(self) -> None:
+        if hasattr(self, "llm_enabled_var"):
+            try:
+                llm = AssistantLlmSettings(
+                    enabled=True,
+                    model=self.llm_model_var.get().strip() or "llama3.2",
+                    base_url=self.llm_base_url_var.get().strip() or "http://127.0.0.1:11434",
+                    ollama_models_dir=self.llm_models_dir_var.get().strip() or "D:/ollama/models",
+                    timeout_seconds=float(self.llm_timeout_var.get().replace(",", ".")),
+                )
+            except ValueError:
+                messagebox.showerror("Ollama", "Укажите корректный таймаут.")
+                return
+        else:
+            llm = get_assistant_llm_settings(self.db_path)
+        health = check_ollama_health(llm)
+        if health.ok:
+            models_preview = ", ".join(health.models[:5]) if health.models else "—"
+            messagebox.showinfo(
+                "Ollama",
+                f"{health.message}\n\nМодели: {models_preview}",
+            )
+        else:
+            messagebox.showerror("Ollama", health.message)
+
+    def _browse_pack_base_dir(self) -> None:
+        from tkinter import filedialog
+
+        initial = self.pack_base_dir_var.get().strip() or str(self.generated_dir)
+        path = filedialog.askdirectory(
+            title="Базовая папка для пакетов документов",
+            initialdir=initial if Path(initial).is_dir() else str(self.generated_dir),
+        )
+        if path:
+            self.pack_base_dir_var.set(path)
+
+    def _apply_recent_pack_path(self) -> None:
+        selected = self.pack_recent_var.get().strip()
+        if selected:
+            self.pack_base_dir_var.set(str(Path(selected).parent))
+
+    def _suggest_pack_folder_name(self, order_id: int) -> str:
+        details = get_order_details(order_id, self.db_path) or {}
+        customer = (details.get("customer_name") or "заказчик")[:24]
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        safe = re.sub(r'[<>:"/\\|?*«»]', "_", customer).strip("._ ") or "заказ"
+        return f"pack_order{order_id}_{safe}_{stamp}"
+
+    def _ask_document_pack_options(self, order_id: int) -> dict[str, str] | None:
+        """Диалог: базовая папка + имя подпапки пакета."""
+        pack_settings = get_document_pack_settings(self.db_path)
+        default_base = pack_settings.base_dir.strip() or str(self.generated_dir)
+
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Пакет документов · заказ №{order_id}")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(bg=COLORS["bg"])
+        frame = ttk.Frame(dlg, padding=16, style="Card.TFrame")
+        frame.pack(fill="both", expand=True)
+
+        base_var = tk.StringVar(value=default_base)
+        name_var = tk.StringVar(value=self._suggest_pack_folder_name(order_id))
+
+        ttk.Label(frame, text="Сохранить в папку:", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        base_row = ttk.Frame(frame, style="Card.TFrame")
+        base_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        base_entry = ttk.Entry(base_row, textvariable=base_var, width=48)
+        base_entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            base_row,
+            text="Обзор…",
+            command=lambda: self._browse_into_var(base_var, "Папка для пакета"),
+        ).pack(side="left", padx=(6, 0))
+
+        if pack_settings.recent_paths:
+            ttk.Label(frame, text="Недавние пакеты:", style="CardMuted.TLabel").grid(
+                row=2, column=0, sticky="w"
+            )
+            recent_var = tk.StringVar()
+            recent_cb = ttk.Combobox(
+                frame,
+                textvariable=recent_var,
+                values=pack_settings.recent_paths,
+                width=54,
+                state="readonly",
+            )
+            recent_cb.grid(row=3, column=0, sticky="ew", pady=(2, 10))
+
+            def _use_recent(_e: object = None) -> None:
+                p = recent_var.get().strip()
+                if p:
+                    base_var.set(str(Path(p).parent))
+
+            recent_cb.bind("<<ComboboxSelected>>", _use_recent)
+
+        ttk.Label(frame, text="Имя папки пакета:", style="Card.TLabel").grid(
+            row=4, column=0, sticky="w", pady=(0, 4)
+        )
+        ttk.Entry(frame, textvariable=name_var, width=54).grid(
+            row=5, column=0, sticky="ew", pady=(0, 16)
+        )
+
+        result: dict[str, str] = {}
+
+        def _ok() -> None:
+            base = base_var.get().strip()
+            name = name_var.get().strip()
+            if not base:
+                messagebox.showwarning("Пакет", "Укажите базовую папку.", parent=dlg)
+                return
+            if not name:
+                messagebox.showwarning("Пакет", "Укажите имя папки пакета.", parent=dlg)
+                return
+            result["output_dir"] = base
+            result["pack_folder_name"] = name
+            dlg.destroy()
+
+        def _cancel() -> None:
+            dlg.destroy()
+
+        btns = ttk.Frame(frame, style="Card.TFrame")
+        btns.grid(row=6, column=0, sticky="w")
+        self._accent_button(btns, "Собрать", _ok).pack(side="left")
+        ttk.Button(btns, text="Отмена", command=_cancel).pack(side="left", padx=8)
+
+        dlg.update_idletasks()
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - w) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - h) // 2)
+        dlg.geometry(f"+{x}+{y}")
+        dlg.wait_window()
+        return result or None
+
+    def _browse_into_var(self, var: tk.StringVar, title: str) -> None:
+        from tkinter import filedialog
+
+        initial = var.get().strip() or str(self.generated_dir)
+        path = filedialog.askdirectory(
+            title=title,
+            initialdir=initial if Path(initial).is_dir() else str(self.generated_dir),
+        )
+        if path:
+            var.set(path)
+
+    def _show_orders_context_menu(self, event: tk.Event) -> None:
+        row = self.orders_tree.identify_row(event.y)
+        if row:
+            self.orders_tree.selection_set(row)
+        order_id = self._get_selected_order_id()
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Открыть КП", command=self._open_selected_order_kp)
+        menu.add_command(label="Открыть заявку", command=self._open_selected_order_application)
+        menu.add_command(label="Сформировать заявку", command=self._generate_order_application)
+        menu.add_command(label="Пакет документов…", command=self._build_order_document_pack)
+        menu.add_command(label="Макет протокола", command=self._generate_order_protocol)
+        menu.add_separator()
+        if order_id is not None:
+            menu.add_command(
+                label=f"Копировать № заказа ({order_id})",
+                command=lambda: self._copy_text_to_clipboard(str(order_id)),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _copy_text_to_clipboard(self, text: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status.set("Скопировано в буфер обмена")
 
     def _load_mappings_table(self) -> None:
         if not hasattr(self, "mappings_tree"):
@@ -3449,6 +5107,7 @@ class RequestProcessorApp(tk.Tk):
 
 
 def main() -> None:
+    setup_logging(level="INFO")
     app = RequestProcessorApp()
     app.mainloop()
 

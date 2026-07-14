@@ -1,5 +1,5 @@
 """
-Загрузка YAML-семейств документов (Kaluga, Speclan, …).
+Загрузка YAML-семейств документов (periodic, LAN, …).
 
 См. data/families/*.yaml, Obsidian 35a §7–8.
 """

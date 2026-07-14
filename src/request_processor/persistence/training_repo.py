@@ -430,6 +430,9 @@ def sync_corrections_from_dir(
                     ).fetchone()
                     if found:
                         doc_id = int(found[0])
+                exported_from = "gui_confirm"
+                if str(row.get("change") or "").startswith("assistant_"):
+                    exported_from = f"assistant_{row.get('decision') or 'event'}"
                 conn.execute(
                     """
                     INSERT INTO training_corrections (
@@ -447,7 +450,7 @@ def sync_corrections_from_dir(
                         if row.get("corrected") is not None
                         else str(row.get("corrected") or ""),
                         row.get("mark"),
-                        "gui_confirm",
+                        exported_from,
                         _now(),
                     ),
                 )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,15 +10,12 @@ from click.testing import CliRunner
 
 from request_processor.cli import cli
 from request_processor.models import PdfExtractionResult
-
-EXTRACTED_DIR = Path(__file__).resolve().parents[1] / "data" / "extracted"
+from tests.fixture_loader import load_extraction_fixture
 
 
 @pytest.fixture
 def letter_result() -> PdfExtractionResult:
-    path = EXTRACTED_DIR / "Письмо на период. исп. от 04.05.26.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return PdfExtractionResult.model_validate(data)
+    return load_extraction_fixture("letter_periodic_sample.json")
 
 
 @pytest.fixture
@@ -34,13 +30,13 @@ def blocked_result() -> PdfExtractionResult:
         cable_marks=[],
         organizations=[
             OrganizationExtract(
-                name='ООО НИЦ «Кабель-Тест»',
+                name='ООО «Испытательный центр»',
                 role="customer",
                 org_type="testing_center",
                 confidence=0.7,
             )
         ],
-        customer_name='ООО НИЦ «Кабель-Тест»',
+        customer_name='ООО «Испытательный центр»',
         ocr_used=True,
         is_scanned=True,
     )

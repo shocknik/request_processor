@@ -16,7 +16,13 @@ from typing import Any
 from ...config import PROJECT_ROOT, TRAINING_EXPORTS_REPORTS_DIR
 from ..pdf_extractor import _find_tesseract, _render_pages
 from .confidence import OcrPageResult, ocr_image_with_data
-from .preprocess import PREPROCESS_VERSION, is_cv_available, preprocess_for_ocr, preprocess_metadata
+from .preprocess import (
+    PREPROCESS_VERSION,
+    correct_orientation,
+    is_cv_available,
+    preprocess_for_ocr,
+    preprocess_metadata,
+)
 
 
 def _normalize_for_cer(text: str) -> str:
@@ -69,6 +75,7 @@ def _run_tesseract_page(
     *,
     dpi: int,
     use_preprocess: bool,
+    soft_preprocess: bool = False,
 ) -> OcrPageResult:
     import pytesseract
 
@@ -77,7 +84,13 @@ def _run_tesseract_page(
         raise RuntimeError("Tesseract OCR не найден")
     pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
-    working = preprocess_for_ocr(image) if use_preprocess else image
+    working = image
+    if use_preprocess:
+        # soft: no adaptive threshold (better for Latin brand tables after orient)
+        working = preprocess_for_ocr(
+            image,
+            adaptive_threshold=not soft_preprocess,
+        )
     preprocess_ver = PREPROCESS_VERSION if use_preprocess and is_cv_available() else None
     return ocr_image_with_data(
         working,
@@ -94,7 +107,7 @@ def benchmark_pdf_page(
     dpi: int = 200,
 ) -> dict[str, Any]:
     """
-    Compare OCR on one page: without preprocess vs with preprocess v1.
+    Compare OCR on one page: raw vs preprocessed after auto-orient (v3).
     """
     path = Path(pdf_path).resolve()
     if not path.is_file():
@@ -106,7 +119,13 @@ def benchmark_pdf_page(
     if page < 1 or page > len(images):
         raise ValueError(f"Страница {page} вне диапазона 1..{len(images)}")
 
-    image = images[page - 1]
+    # Orientation first — without it page-2 FLEXICORE CER stays ~88% garbage
+    import pytesseract
+
+    tesseract_cmd = _find_tesseract()
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    image = correct_orientation(images[page - 1], tesseract_cmd=tesseract_cmd)
     gt_text = _load_ocr_page_gt(path, page)
 
     t0 = time.perf_counter()
@@ -114,8 +133,17 @@ def benchmark_pdf_page(
     raw_ms = int((time.perf_counter() - t0) * 1000)
 
     t1 = time.perf_counter()
-    pre_result = _run_tesseract_page(image, dpi=dpi, use_preprocess=True)
+    # Soft preprocess for fair Latin+RU comparison (matches production dual path)
+    pre_result = _run_tesseract_page(
+        image, dpi=dpi, use_preprocess=True, soft_preprocess=True
+    )
     pre_ms = int((time.perf_counter() - t1) * 1000)
+
+    # Mark-column / ROI: left-center band where brand names usually sit (35s metric)
+    t2 = time.perf_counter()
+    mark_col = _ocr_mark_column_roi(image, dpi=dpi)
+    mark_col_ms = int((time.perf_counter() - t2) * 1000)
+    mark_gt = _extract_mark_lines_from_gt(gt_text) if gt_text else None
 
     report: dict[str, Any] = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -125,6 +153,7 @@ def benchmark_pdf_page(
         "page": page,
         "page_count": len(images),
         "dpi": dpi,
+        "auto_orient": True,
         "preprocess": preprocess_metadata(),
         "variants": {
             "raw": {
@@ -143,8 +172,20 @@ def benchmark_pdf_page(
                 "cer": character_error_rate(pre_result.text, gt_text) if gt_text else None,
                 "text_preview": pre_result.text[:500],
             },
+            "mark_column_roi": {
+                "text_chars": len(mark_col.get("text") or ""),
+                "duration_ms": mark_col_ms,
+                "cer": character_error_rate(mark_col.get("text") or "", mark_gt)
+                if mark_gt
+                else character_error_rate(mark_col.get("text") or "", gt_text)
+                if gt_text
+                else None,
+                "roi": mark_col.get("roi"),
+                "text_preview": (mark_col.get("text") or "")[:500],
+            },
         },
         "ground_truth_available": gt_text is not None,
+        "mark_column_gt_available": mark_gt is not None,
     }
 
     if gt_text:
@@ -157,6 +198,46 @@ def benchmark_pdf_page(
         report["preprocess_improved_cer"] = pre_cer < raw_cer
 
     return report
+
+
+def _extract_mark_lines_from_gt(gt_text: str) -> str:
+    """Keep GT lines that look like brand/mark rows for mark-column CER."""
+    lines = []
+    for line in gt_text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if re.search(
+            r"FLEXICORE|H07RN|VicabFLEX|нг\(|кВ|UTP|Cat\s*5|[А-ЯЁ]{2,}\s*\d",
+            s,
+            re.IGNORECASE,
+        ):
+            lines.append(s)
+    return "\n".join(lines) if lines else gt_text
+
+
+def _ocr_mark_column_roi(image: Any, *, dpi: int) -> dict[str, Any]:
+    """OCR left-center horizontal band (typical mark column in application tables)."""
+    import pytesseract
+
+    tesseract_cmd = _find_tesseract()
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    w, h = image.size
+    # Column ~15–55% width (after # col); full height of table body ~20–90%
+    x0, x1 = int(w * 0.12), int(w * 0.58)
+    y0, y1 = int(h * 0.15), int(h * 0.95)
+    crop = image.crop((x0, y0, x1, y1))
+    config = "--psm 6 --oem 1"
+    try:
+        text = pytesseract.image_to_string(crop, lang="eng+rus", config=config) or ""
+    except Exception:
+        text = pytesseract.image_to_string(crop, lang="eng", config=config) or ""
+    return {
+        "text": text,
+        "roi": {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "dpi": dpi},
+    }
 
 
 def save_benchmark_report(report: dict[str, Any], output_path: Path | None = None) -> Path:

@@ -22,8 +22,10 @@ from request_processor.extraction.ocr.preprocess import (
 def test_preprocess_metadata() -> None:
     meta = preprocess_metadata()
     assert meta["version"] == PREPROCESS_VERSION
+    assert meta["version"] >= "v3"
     assert "grayscale" in meta["pipeline"]
-    assert "deskew" in meta["pipeline"] or meta["version"] >= "v2"
+    assert "deskew" in meta["pipeline"]
+    assert "auto_orient" in meta["pipeline"]
 
 
 def test_preprocess_without_opencv_returns_original() -> None:

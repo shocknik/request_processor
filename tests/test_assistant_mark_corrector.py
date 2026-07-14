@@ -1,4 +1,4 @@
-"""Тесты задела ИИ-ассистента: коррекция марок."""
+"""Тесты ИИ-ассистента: коррекция марок (детерминированный слой)."""
 
 from __future__ import annotations
 
@@ -16,3 +16,5 @@ def test_cyrillic_mark_mostly_unchanged() -> None:
     raw = "ВВГ-Пнг(А) 3х2,5"
     result = suggest_mark_correction(raw)
     assert "ВВГ" in result.suggested
+    # без сильного fuzzy-шума обозначение не должно «плыть»
+    assert "3х2,5" in result.suggested or "3x2,5" in result.suggested

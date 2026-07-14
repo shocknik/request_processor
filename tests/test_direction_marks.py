@@ -1,4 +1,4 @@
-"""Марки направлений СЕРК: КГ* и VicabFLEX."""
+"""Марки направлений в ИЛ: КГ* и VicabFLEX."""
 
 from __future__ import annotations
 

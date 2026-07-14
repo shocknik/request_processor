@@ -21,7 +21,7 @@ from .organization_extractor import (
     _EMAIL_PATTERN,
     _infer_org_type,
     _fix_ocr_name,
-    extract_kaluga_factory_address,
+    extract_periodic_factory_address,
     normalize_address_text,
     normalize_org_name,
     sanitize_address,
@@ -35,7 +35,7 @@ _LETTER_MARKERS = re.compile(
     r"Mpocum\s+(?:Bac\s+)?nprovectu|Мроснм\s+Бас\s+нроБестн|"
     r"TeHepanbHomy|мз\s+ТеНеранбНому\s+АннрекТору|"
     r"TeEHEPAAbHOMY|Nnepuoauyeckie\s+UCNblITAHMA|NMpocum\s+Bac\s+nprovectm|"
-    r"KAGEABHOM\s+NPOAYKLIMM|spetskabel\.ru",
+    r"KAGEABHOM\s+NPOAYKLIMM",
     re.IGNORECASE,
 )
 
@@ -110,71 +110,151 @@ def _extract_recipient(line: str) -> tuple[str | None, str | None]:
 def _trim_org_name(raw: str) -> str:
     """Обрезает адрес и реквизиты, попавшие в название (OCR)."""
     name = re.split(r"\s+Ул\s*:|ул\s*:|Тел\s*\.|ИНН|ОКПО|ОГРН|,\s*\d{6}\b", raw, maxsplit=1)[0]
-    name = re.sub(r"\s+", " ", name).strip(" .,;:<»\"'")
-    name = re.sub(r"х\s*$", "»", name)  # OCR «Спецкабельх → Спецкабель»
+    name = re.sub(r"\s+", " ", name).strip(" .,;:")
+    # Не срезать закрывающую «» — только мусор
+    name = name.strip(" '\"")
+    name = re.sub(r"х\s*$", "»", name)  # OCR: лишняя «х» на конце кавычки
     name = name.rstrip("х").strip()
     name = re.sub(r"b$", "", name, flags=re.IGNORECASE)
+    # Достроить кавычки: «Спецкабель → «Спецкабель»
+    if "«" in name and "»" not in name:
+        name = name + "»"
     return _fix_ocr_name(name)
 
 
+def _collapse_periodic_factory_name(name: str) -> str:
+    """Сжимает OCR-мусор вокруг «Кабельный завод» до канонического имени на бланке."""
+    if not name:
+        return name
+    low = name.lower()
+    if "кабельн" not in low or "завод" not in low:
+        return name
+    if re.search(r"O6GL|OfPAH|OTBETCT|ОфРАН|ОТБЕТСТ", name, re.I):
+        return 'ООО «Кабельный завод»'
+    letters = [c for c in name if c.isalpha()]
+    if letters:
+        latin = sum(1 for c in letters if "a" <= c.lower() <= "z")
+        if latin / len(letters) > 0.08 or len(name) > 42:
+            return 'ООО «Кабельный завод»'
+    return name
+
+
+def _format_sender_from_candidate(name: str) -> str:
+    """Собирает отображаемое имя из фрагмента, найденного в тексте (не шаблон)."""
+    cleaned = _fix_ocr_name(_trim_org_name(name))
+    if not cleaned:
+        return cleaned
+    low = cleaned.lower()
+    if "ооо" in low or "ao " in low or low.startswith("ао ") or "зао" in low:
+        return cleaned
+    # Фрагмент только «Спецкабель» / «НПП Спецкабель» → ООО НПП «…»
+    if re.search(r"\bнпп\b", low):
+        core = re.sub(r"^(?:ооо\s+)?нпп\s*", "", cleaned, flags=re.I).strip(" «»\"'")
+        return f'ООО НПП «{core}»' if core else cleaned
+    return f'ООО НПП «{cleaned}»' if len(cleaned) < 40 else cleaned
+
+
+def _is_testing_center_noise(name: str) -> bool:
+    """Отсекает ИЦ / placeholder, которые нельзя выдавать за заказчика."""
+    low = name.lower().replace(" ", "")
+    needles = (
+        "испытательныйцентр",
+        "кабель-тест",
+        "кабенб-тест",
+        "ка6егб-тесм",
+        "ka6erb-tecm",
+        "производитель",
+        "hull",
+        "null",
+        "нull",
+        "hul",
+        "ниц",
+    )
+    return any(n in low for n in needles)
+
+
 def _extract_sender_name(header: str) -> str | None:
-    """Название организации-отправителя из шапки письма."""
-    if re.search(r"KaayxKckni\s+KaGeAbHbIN|Калужск\w+\s+кабельн", header, re.IGNORECASE):
-        return 'ООО «Калужский кабельный завод»'
+    """
+    Название организации-отправителя из шапки письма.
 
+    Только то, что видно в тексте. Без подстановки «шаблонных» юрлиц.
+    """
     candidates: list[str] = []
+    header_has_npp = bool(re.search(r"\bнпп\b|HNN", header, re.I))
+    header_has_spec = bool(re.search(r"спецкабель", header, re.I))
 
-    for m in _OOO_BLOCK.finditer(header):
-        name = (m.group(2) or m.group(3) or m.group(4) or m.group(5) or "").strip()
-        name = _trim_org_name(name)
-        if name and len(name) >= 4 and "кабель-тест" not in name.lower():
-            candidates.append(name)
-
-    if re.search(r"Ka6erb-Tecm|Kabenb-TecT|Кабель-Тест", header, re.I):
-        m = re.search(
-            r"(?:OOO|ООО)\s+(?:HUL|НИЦ|НПП)?\s*[«\"]?([^»\"]+)[»\"]?",
-            header,
-            re.I,
-        )
-        if m:
-            candidates.append(_trim_org_name(m.group(1)))
-
-    if re.search(r"Спецкабель|Cneukabel|spetskabel|Сненка6", header, re.I):
-        for c in candidates:
-            if "спецкабель" in c.lower():
-                return f'ООО НПП «{_trim_org_name(c)}»'
-        return 'ООО НПП «Спецкабель»'
-
-    if re.search(r"кабельн\w+\s+завод", header, re.I):
-        factory = re.search(
-            r"([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z\-]+(?:\s+[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z\-]+)?)\s*$",
-            header.split("\n")[0] if "\n" in header else "",
-            re.M,
-        )
-        if factory:
-            candidates.append(factory.group(1))
-
-    if candidates:
-        best = max(candidates, key=len)
-        if "кабель-тест" not in best.lower() and "ниц" not in best.lower():
-            return f'ООО НПП «{_fix_ocr_name(best)}»' if "ооо" not in best.lower() else best
-
-    m = re.search(
-        r"(?:кабельн\w+\s+завод\s+)?([А-ЯЁA-Z][А-ЯЁа-яё\-]{3,30})",
+    # 1) ООО НПП «…» / OOO HNN (приоритет для LAN / производителей)
+    for m in re.finditer(
+        r"(?:OOO|ООО)\s+(?:HNN|НПП)\s*[«\"'<]?\s*([^»\"'>;\nхx]{3,40})",
         header,
         re.I,
-    )
-    if m and "кабель-тест" not in m.group(0).lower():
-        return f'ООО «{_fix_ocr_name(m.group(1))}»'
+    ):
+        full = _trim_org_name(m.group(0).replace("<", "«").replace(">", "»"))
+        if full and not _is_testing_center_noise(full):
+            candidates.append(full)
+
+    # 2) Одно слово «Спецкабель» на бланке (после OCR-алиаса)
+    if header_has_spec:
+        candidates.append('ООО НПП «Спецкабель»')
+
+    # 3) «…кабельный завод…» — только если нет НПП/Спецкабель в шапке
+    #    (иначе residual OCR «Кабельный завод Видяеву» перебивает реального отправителя)
+    if not header_has_npp and not header_has_spec:
+        for m in re.finditer(
+            r"[«\"']?([^»\"'\n]{0,50}кабельн\w*\s+завод[^»\"'\n]{0,30})[»\"']?",
+            header,
+            re.I,
+        ):
+            frag = _trim_org_name(m.group(1))
+            # отсечь «завод + ФИО» (Видяеву В.И.)
+            if re.search(r"\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\.?\b", frag):
+                continue
+            if frag and not _is_testing_center_noise(frag):
+                candidates.append(
+                    frag if "ооо" in frag.lower() else f'ООО «{frag.strip("«»")}»'
+                )
+
+    for m in _OOO_BLOCK.finditer(header):
+        full = (m.group(0) or "").strip()
+        name = _trim_org_name(full)
+        if name and len(name) >= 4 and not _is_testing_center_noise(name):
+            candidates.append(name)
+
+    filtered = [c for c in candidates if len(c) >= 4 and not _is_testing_center_noise(c)]
+
+    if filtered:
+        def score(s: str) -> tuple[int, int]:
+            low = s.lower()
+            pts = 0
+            if "спецкабель" in low:
+                pts += 8
+            if "нпп" in low:
+                pts += 4
+            if "ооо" in low:
+                pts += 2
+            if "кабельн" in low and "завод" in low:
+                # ниже НПП: завод только если нет спецкабеля
+                pts += 3 if not header_has_spec else -2
+            if re.search(r"\b[а-яё]+\s+[а-яё]\.[а-яё]", low):
+                pts -= 5  # ФИО в названии
+            return (pts, len(s))
+
+        best = max(filtered, key=score)
+        if "ооо" in best.lower():
+            return _collapse_periodic_factory_name(_fix_ocr_name(best))
+        return _collapse_periodic_factory_name(_format_sender_from_candidate(best))
+
+    if re.search(r"KaayxKckni\s+KaGeAbHbIN|кабельн\w*\s+завод", header, re.I):
+        return 'ООО «Кабельный завод»'
 
     return None
 
 
 def _extract_sender_address(header: str, *, exclude: str | None = None) -> str | None:
     """Адрес отправителя из шапки (ул. …, индекс)."""
-    kaluga = extract_kaluga_factory_address(header)
-    if kaluga:
-        return kaluga
+    factory_addr = extract_periodic_factory_address(header)
+    if factory_addr:
+        return factory_addr
 
     addr_m = _ADDRESS_IN_HEADER.search(header)
     if addr_m:
@@ -204,9 +284,15 @@ def parse_business_letter(text: str) -> LetterParseResult | None:
     Разбирает шапку письма: получатель (ИЛ) и отправитель (заказчик).
 
     Возвращает None, если документ не похож на письмо.
+    Текст сначала нормализуется (OCR-латиница → кириллица) — читаем документ,
+    а не подставляем шаблонные юрлица.
     """
     if not is_business_letter(text):
         return None
+
+    from .ocr_text_normalizer import normalize_ocr_text
+
+    text = normalize_ocr_text(text)
 
     recipient_line = None
     recipient_org = None
@@ -291,15 +377,16 @@ def organizations_from_letter(text: str) -> list[OrganizationExtract]:
         org_type = "manufacturer"
 
     sender_addr = parsed.sender_legal_address
-    if parsed.sender_name and "калужск" in parsed.sender_name.lower():
-        sender_addr = extract_kaluga_factory_address(text) or sender_addr
+    if parsed.sender_name and "кабельн" in parsed.sender_name.lower() and "завод" in parsed.sender_name.lower():
+        sender_addr = extract_periodic_factory_address(text) or sender_addr
 
+    sender_name = _collapse_periodic_factory_name(parsed.sender_name)
     customer = OrganizationExtract(
-        name=parsed.sender_name,
+        name=sender_name,
         address=sender_addr,
         legal_address=sender_addr,
         actual_address=sender_addr,
-        postal_code="249841" if sender_addr and sender_addr.startswith("249841") else None,
+        postal_code=None,
         phone=parsed.sender_phone,
         email=parsed.sender_email,
         inn=parsed.sender_inn,
@@ -316,7 +403,7 @@ def organizations_from_letter(text: str) -> list[OrganizationExtract]:
 
     result = [customer, manufacturer]
 
-    if parsed.recipient_org_name and "кабель-тест" in parsed.recipient_org_name.lower():
+    if parsed.recipient_org_name and "испытательный центр" in parsed.recipient_org_name.lower():
         fsa = _FSA_PATTERN.search(text[:3000])
         testing = OrganizationExtract(
             name=re.sub(r"\s+", " ", parsed.recipient_org_name).strip(),

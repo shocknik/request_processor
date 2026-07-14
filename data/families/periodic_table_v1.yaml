@@ -1,5 +1,5 @@
-id: kaluga_periodic_v1
-display_name: Письмо на периодические испытания (таблица Калуга)
+id: periodic_letter_v1
+display_name: Письмо производителя — таблица периодических испытаний
 document_type: letter_periodic
 priority: 10
 enabled: true
@@ -7,7 +7,7 @@ min_marks_threshold: 3
 confidence_threshold: 0.85
 
 sender_patterns:
-  - "калужск\\w+\\s+кабельн"
+  - "кабельн\\w*\\s+завод"
   - "KaayxKckni\\s+KaGeAbHbIN"
 
 detection:

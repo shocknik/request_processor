@@ -11,6 +11,7 @@ from request_processor.extraction.organization_extractor import (
     normalize_org_name,
     pick_customer_name,
     pick_manufacturer_name,
+    _is_non_customer_org,
 )
 
 from tests.fixture_loader import fixture_search_text, load_extraction_fixture
@@ -24,26 +25,26 @@ def _norm_name(name: str) -> str:
     "fixture_name,customer_fragment,manufacturer_fragment,min_orgs",
     [
         (
-            "Письмо на период. исп. от 04.05.26.json",
-            "калужск",
+            "letter_periodic_sample.json",
+            "кабельн",
+            "кабельн",
+            2,
+        ),
+        (
+            "letter_lan_sample.json",
+            "нпп",
             None,
             1,
         ),
         (
-            "Письмо 145 от 02.02.2026 .json",
-            "спецкабель",
-            None,
-            1,
-        ),
-        (
-            "27_1-2-2026 Направление в ИЛ 10094807 Кабель-Тест.json",
-            "тест-с",
+            "direction_sample.json",
+            "кирскабель",
             "кирскабель",
             2,
         ),
         (
-            "27_1-2-2026 Акт отбора 10094807(1).json",
-            "тест-с",
+            "act_sample.json",
+            "кирскабель",
             None,
             1,
         ),
@@ -68,11 +69,16 @@ def test_extract_organizations_on_fixtures(
 
 
 def test_extract_organizations_roles_direction() -> None:
-    result = load_extraction_fixture("27_1-2-2026 Направление в ИЛ 10094807 Кабель-Тест.json")
+    result = load_extraction_fixture("direction_sample.json")
     orgs = extract_organizations(fixture_search_text(result))
     roles = {org.role for org in orgs}
     assert "customer" in roles
     assert "manufacturer" in roles
+    customer = pick_customer_name(orgs)
+    assert "кирскабель" in _norm_name(customer)
+    assert not _is_non_customer_org(next(o for o in orgs if o.name == customer))
+    assert any(o.org_type == "testing_center" for o in orgs)
+    assert any(o.org_type == "certification_body" for o in orgs)
 
 
 def test_extract_organizations_empty_text() -> None:
@@ -81,7 +87,18 @@ def test_extract_organizations_empty_text() -> None:
 
 
 def test_letter_145_customer_not_testing_center() -> None:
-    result = load_extraction_fixture("Письмо 145 от 02.02.2026 .json")
-    customer = pick_customer_name(extract_organizations(fixture_search_text(result)))
-    assert "кабель-тест" not in _norm_name(customer)
-    assert re.search(r"спецкабель", _norm_name(customer))
+    result = load_extraction_fixture("letter_lan_sample.json")
+    orgs = extract_organizations(fixture_search_text(result))
+    customer = pick_customer_name(orgs)
+    assert customer  # lab must not be customer
+    assert "спецкабель" in _norm_name(customer)
+    assert not _is_non_customer_org(next(o for o in orgs if o.name == customer))
+
+
+def test_periodic_letter_factory_name_not_ocr_garbage() -> None:
+    result = load_extraction_fixture("letter_periodic_sample.json")
+    orgs = extract_organizations(fixture_search_text(result))
+    customer = pick_customer_name(orgs)
+    assert "кабельн" in _norm_name(customer)
+    assert "завод" in _norm_name(customer)
+    assert "o6gl" not in _norm_name(customer)

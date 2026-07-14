@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_NER_MODEL = "Davlan/bert-base-multilingual-cased-ner-hrl"
 
 _RECIENT_HINTS = re.compile(
-    r"директору|видяев|кабель-тест|испытательн",
+    r"директору|видяев|испытательный центр|испытательн",
     re.IGNORECASE,
 )
 
@@ -146,7 +146,7 @@ def enhance_organizations(
         key = normalize_org_name(name)
         if not key or key in existing:
             continue
-        if "спецкабель" in key or "завод" in key or "ооо" in name.lower():
+        if "производитель" in key or "завод" in key or "ооо" in name.lower():
             extra.append(
                 OrganizationExtract(
                     name=name if "«" in name else f"«{name}»",

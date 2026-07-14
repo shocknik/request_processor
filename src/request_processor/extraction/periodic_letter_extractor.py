@@ -21,7 +21,7 @@ _PERIODIC_MARKER = re.compile(
 _SIZE_X = r"[xх×]"
 
 # Таблица Калужа без слова «периодические» (скопирована из PDF / OCR таблицы)
-_KALUGA_TABLE_HINT = re.compile(
+_PERIODIC_TABLE_HINT = re.compile(
     rf"(?:^|\s)(?:13{_SIZE_X}4ок\s*\(N|3{_SIZE_X}2,5ок\s*\(N|"
     rf"[1-4]\s+(?:ПВСнг|NBCur|МБСнг|АПуВ|AllyB|ПуПВ|ПБГВВ|NBIBB|FIБББ|ББР-Мнг|ВВГ-Пнг))",
     re.IGNORECASE,
@@ -36,12 +36,12 @@ def is_periodic_letter(text: str) -> bool:
     if not text:
         return False
     head = text[:4000]
-    if _PERIODIC_MARKER.search(head) or _KALUGA_TABLE_HINT.search(head):
+    if _PERIODIC_MARKER.search(head) or _PERIODIC_TABLE_HINT.search(head):
         return True
     try:
         from .families.registry import get_family_registry
 
-        family = get_family_registry().get("kaluga_periodic_v1")
+        family = get_family_registry().get("periodic_letter_v1")
         if family and family.is_confident_match(text):
             return True
     except Exception:

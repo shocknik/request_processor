@@ -27,22 +27,22 @@ def _marks_from_result(result) -> list[str]:
     "fixture_name,min_count,required_fragments",
     [
         (
-            "Письмо на период. исп. от 04.05.26.json",
+            "letter_periodic_sample.json",
             3,
             ("пвснг", "апув", "пбгвв"),
         ),
         (
-            "Письмо 145 от 02.02.2026 .json",
+            "letter_lan_sample.json",
             2,
             ("спецлан", "cat5"),
         ),
         (
-            "27_1-2-2026 Направление в ИЛ 10094807 Кабель-Тест.json",
+            "direction_sample.json",
             3,
             ("рквнг", "пcпcнг", "пвпнг"),
         ),
         (
-            "27_1-2-2026 Акт отбора 10094807(1).json",
+            "act_sample.json",
             17,
             ("ккзмк",),
         ),
@@ -64,9 +64,9 @@ def test_find_cable_marks_on_fixtures(
         )
 
 
-def test_letter_kaluga_extracts_vvg_and_four_marks() -> None:
-    """Письмо Калужского завода: 4 марки из OCR-таблицы."""
-    result = load_extraction_fixture("Письмо на период. исп. от 04.05.26.json")
+def test_letter_periodic_extracts_vvg_and_four_marks() -> None:
+    """Письмо производителя: 4 марки из OCR-таблицы."""
+    result = load_extraction_fixture("letter_periodic_sample.json")
     marks = [_normalize_mark(m) for m in _marks_from_result(result)]
     assert len(marks) >= 4
     joined = " ".join(marks)

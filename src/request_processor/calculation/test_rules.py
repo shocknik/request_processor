@@ -37,10 +37,10 @@ CATEGORY_SHORT: dict[str, str] = {
 }
 
 CATEGORY_COLORS: dict[str, str] = {
-    "Административная работа": "#f1f5f9",
-    "Подготовка к испытаниям": "#fef3c7",
-    "Конструкция": "#e0f2fe",
-    "Физико-механические параметры": "#fce7f3",
+    "Административная работа": "#0c80f4",
+    "Подготовка к испытаниям": "#f2ce40",
+    "Конструкция": "#60e87e",
+    "Физико-механические параметры": "#ef5baf",
     "Электрические параметры НЧ": "#dbeafe",
     "Электрические параметры ВЧ": "#c7d2fe",
     "Оптические параметры": "#d1fae5",
@@ -135,6 +135,9 @@ def infer_rule_type(
             "cost_per_hour": spec["cost_per_hour"],
         }
 
+    if "оптическ" in name_l and "волокн" in name_l:
+        return "per_core", {}
+
     if any(k in name_l for k in _PER_GROUP_KEYWORDS):
         return "per_group", {}
 
@@ -150,7 +153,7 @@ def rule_type_label(rule_type: str) -> str:
     return {
         "fixed": "фикс",
         "per_core": "× жилы",
-        "per_group": "× пары",
+        "per_group": "× скрутка",
         "time_based": "⏱ часы",
     }.get(rule_type, rule_type)
 

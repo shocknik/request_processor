@@ -57,3 +57,15 @@ terminals/
 
 # Установщики (не хранить в git)
 tools/*.exe
+
+# Локальные/чувствительные артефакты
+_mech_extract/
+data/client_profiles.local.yaml
+data/knowledge/
+
+# IDE / session (не продукт)
+mcps/
+.grok/
+
+# Превью иконок (в git только .ico)
+assets/*_preview*

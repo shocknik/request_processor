@@ -22,6 +22,7 @@ from ..config import OCR_CACHE_DIR
 from ..parsing.cable_mark_parser import extract_document_from_text, fix_ocr_document_text
 from ..assistant.mark_corrector import suggest_mark_correction
 from ..models import CableMarkMatch, PdfExtractionResult
+from .ocr_mark_normalizer import normalize_mark_after_ocr
 from .ocr_text_normalizer import normalize_ocr_text
 from .organization_extractor import (
     extract_organizations,
@@ -43,6 +44,7 @@ _SIZE_PART = (
     r"\d+\s*[зЗпП]?\s*[хx]\s*"
     r"(?:[\d.,\(\)]+|[а-яёa-zA-Z]{1,6})"
     r"(?:\s*[хx]\s*[\d.,\(\)]+)*"
+    # Без пробелов: «(N, PE)» нормализуется в «(N,PE)» в _fix_periodic_letter_ocr
     r"(?:[а-яёa-zA-Z\-\(\),\d/]*)"
     r"(?:\s*\([^)]+\))?"
     r"(?:-\d+[.,]?\d*)?"
@@ -61,11 +63,11 @@ _SIZE_PART_LATIN = (
 )
 
 # СПЕЦЛАН / SPECLAN / CMELVIAH (OCR) F/UTP … 2x2x0,52
-_SPECLAN_BRAND = r"(?:СПЕЦЛАН|SPECLAN|CMELVIAH|CMELAN|СNЕ[UW][АA]{1,2}Н|СNЕLWIАН)"
-_SPECLAN_FIRE = r"(?:нг|ur|Hr|hr|ng|Нг)\s*\(\s*A\s*\)"
-_SPECLAN_MARK_PATTERN = re.compile(
+_LAN_BRAND = r"(?:СПЕЦЛАН|SPECLAN|CMELVIAH|CMELAN|СNЕ[UW][АA]{1,2}Н|СNЕLWIАН)"
+_LAN_FIRE = r"(?:нг|ur|Hr|hr|ng|Нг)\s*\(\s*A\s*\)"
+_LAN_MARK_PATTERN = re.compile(
     r"(?:\d+\.\s*)?"
-    rf"({_SPECLAN_BRAND}\s+(?:SF?/)?UTP\s+Cat\s+5\w\s+ZH\s+{_SPECLAN_FIRE}-HF\s+\d+\s*x\s*\d+(?:\s*x\s*[\d.,]+)?)",
+    rf"({_LAN_BRAND}\s+(?:SF?/)?UTP\s+Cat\s+5\w\s+ZH\s+{_LAN_FIRE}-HF\s+\d+\s*x\s*\d+(?:\s*x\s*[\d.,]+)?)",
     re.IGNORECASE,
 )
 
@@ -77,7 +79,7 @@ _LETTER_MARKS_BLOCK = re.compile(
 )
 _LETTER_MARK_ITEM = re.compile(
     r"\d+\.\s*"
-    rf"({_SPECLAN_BRAND}\s+.+?)"
+    rf"({_LAN_BRAND}\s+.+?)"
     r"(?:\s+(?:ТУ|TU|Ty)\s*\d+\.[КкKk]\d{2,3}-\d{3}-\d{4})?"
     r"(?=\s+(?:В\s+количестве|KonuyectBe)|;|\d+\.\s+(?:СПЕЦ|SPECLAN|CMEL)|\d+\.\s+[А-ЯЁA-Z]|$)",
     re.IGNORECASE,
@@ -92,7 +94,7 @@ _MARK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# КГРвЭСТ 3*35+16/3в+3*2,5 - 1140 (направления СЕРК, звёздочная запись жил)
+# КГРвЭСТ 3*35+16/3в+3*2,5 - 1140 (направления в ИЛ, звёздочная запись жил)
 _STAR_CORE_MARK_PATTERN = re.compile(
     r"(КГ[А-ЯЁа-яёA-Za-z]+\s+"
     r"\d+\*[\d.,]+"
@@ -102,24 +104,36 @@ _STAR_CORE_MARK_PATTERN = re.compile(
 )
 
 # FLEXICORE (заявка Флексикор, таблица приложения)
-_FLEXICORE_FIRE = r"нг\([AaАа]\)"
+# Fire-safety: нг(A) / OCR ur(A)|ng(A) — нормализуется в _fix_series_cable_ocr
+_FLEXICORE_FIRE = r"(?:нг|ur|ng)\s*\(\s*[AaАа]\s*\)"
+_FLEXICORE_KV = r"(?:кВ|kB|KB|кB|kВ)"
 _FLEXICORE_MARK_PATTERN = re.compile(
     r"(FLEXICORE(?:®)?\s+"
     r"(?:"
-    rf"FLAT\s+{_FLEXICORE_FIRE}-LS"
+    rf"FLAT\s+{_FLEXICORE_FIRE}\s*-\s*LS"
     r"|Li(?:YY|YCY)"
-    r"|(?:\d+\s+)?(?:H|CH|CY)(?:\s+{_FLEXICORE_FIRE}-(?:LS|HF))?"
-    r"(?:\s+\d+[.,]?\d*\s*/\s*\d+\s*кВ)?"
-    r"|100(?:\s+0,6/1\s*кВ)?(?:\s+{_FLEXICORE_FIRE}-LS(?:\s+0,6/1\s*кВ)?)?"
-    r"|110(?:\s+{_FLEXICORE_FIRE}-LS)?"
+    r"|\d{2,}\s+(?:H|CH|CY)"
+    rf"(?:\s+{_FLEXICORE_FIRE}\s*-\s*(?:LS|HF))?"
+    rf"(?:\s+\d+[.,]?\d*\s*/\s*\d+\s*{_FLEXICORE_KV})?"
+    r"|100"
+    rf"(?:\s+\d+[.,]?\d*\s*/\s*\d+\s*{_FLEXICORE_KV})?"
+    rf"(?:\s+{_FLEXICORE_FIRE}\s*-\s*LS)?"
+    rf"(?:\s+\d+[.,]?\d*\s*/\s*\d+\s*{_FLEXICORE_KV})?"
+    r"|110"
+    rf"(?:\s+{_FLEXICORE_FIRE}\s*-\s*LS)?"
     r"))",
     re.IGNORECASE,
 )
 _FLEXICORE_TABLE_LINE = re.compile(
-    r"(FLEXICORE(?:®)?\s+[^\n|]{2,90}?)(?=\s*\||\s*ТУ|\n|$)",
+    r"(FLEXICORE(?:®)?\s+(?:(?!FLEXICORE|H07RN)[^\n|]){1,70}?)"
+    r"(?=\s*\||\s*T[УYYuу]\s|\s*ТУ|\s+FLEXICORE|\s+H07RN|\n|$)",
     re.IGNORECASE,
 )
-_H07RN_MARK_PATTERN = re.compile(r"(H07RN-F\s+RU)", re.IGNORECASE)
+# H07RN-F RU — часто внизу таблицы; OCR: H07RN F RU / H07RNF / HO7RN-F (O≈0)
+_H07RN_MARK_PATTERN = re.compile(
+    r"((?:H|Н)[0OО]?7(?:RN|RМ|R[NM])[\s\-]*F(?:\s+RU)?)",
+    re.IGNORECASE,
+)
 
 # VicabFLEX (латиница, направления в ИЛ)
 _VICABFLEX_FIRE = r"нг\([AaАа]\)"
@@ -156,7 +170,10 @@ _REJECT_PREFIXES = re.compile(
 )
 
 DEFAULT_OCR_DPI = 200
-SCAN_OCR_DPI = 300
+# Практика 09.07: сканы стабильнее на 400 DPI (Tesseract)
+SCAN_OCR_DPI = 400
+# EasyOCR (PyTorch): тот же класс DPI; opt-in, не default
+EASYOCR_OCR_DPI = 400
 
 _EASYOCR_READER = None
 
@@ -187,7 +204,7 @@ def _normalize_text_for_marks(text: str) -> str:
     return text
 
 
-def _fix_speclan_letter_ocr(text: str) -> str:
+def _fix_lan_letter_ocr(text: str) -> str:
     """Правки OCR в гарантийных письмах (латиница вместо кириллицы)."""
     text = re.sub(
         r"\b(?:CMELVIAH|CMELAN|SPECLAN|Cneu\w*lan|Sneu\w*lan|СNЕ[UW][АA]{1,2}Н|СNЕLWIАН)\b",
@@ -195,13 +212,11 @@ def _fix_speclan_letter_ocr(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    text = re.sub(r"Сненка6[бе]/1?б", "Спецкабель", text, flags=re.IGNORECASE)
-    text = re.sub(r"Сненка6бенб", "Спецкабель", text, flags=re.IGNORECASE)
     text = re.sub(r"ТараНТ\w+ое\s+ннсбМо", "Гарантийное письмо", text, flags=re.IGNORECASE)
     text = re.sub(r"Мроснм\s+Бас\s+нроБестн", "Просим Вас провести", text, flags=re.IGNORECASE)
     text = re.sub(r"МаркКах\s+Ка6ена", "Марках кабеля", text, flags=re.IGNORECASE)
     text = re.sub(r"мз\s+ТеНеранбНому\s+АннрекТору", "Генеральному директору", text, flags=re.IGNORECASE)
-    text = re.sub(r"Ка6енб-ТесТ", "Кабель-Тест", text, flags=re.IGNORECASE)
+    text = re.sub(r"Испытательный центр", "Испытательный центр", text, flags=re.IGNORECASE)
     text = re.sub(r"МНН/КNN", "ИНН/КПП", text, flags=re.IGNORECASE)
     text = re.sub(
         r"\bMapkax?\s+Kabena?\b",
@@ -235,14 +250,17 @@ def _fix_speclan_letter_ocr(text: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(r"\bOOO\s+HNN\b", "ООО НПП", text, flags=re.IGNORECASE)
-    text = re.sub(r"Cneukabenl?", "Спецкабель", text, flags=re.IGNORECASE)
-    text = re.sub(r"Kabenb-TecT", "Кабель-Тест", text, flags=re.IGNORECASE)
+    # Proizvoditel / Сненка* → см. client_profiles.local.yaml (Спецкабель и др.)
+    from .client_profiles import apply_org_ocr_aliases
+
+    text = apply_org_ocr_aliases(text)
+    text = re.sub(r"Ispytatelnyj centr", "Испытательный центр", text, flags=re.IGNORECASE)
     text = re.sub(r"\bYa\.\s+", "ул. ", text, flags=re.IGNORECASE)
     return text
 
 
 def _fix_periodic_letter_ocr(text: str) -> str:
-    """Правки OCR в письмах на периодические испытания (таблица марок)."""
+    """Правки OCR в письмах на периодические испытания (таблица марок, периодические)."""
     text = re.sub(
         r"N?Mpocum\s+Bac\s+nprovectm?",
         "Просим Вас провести",
@@ -250,7 +268,7 @@ def _fix_periodic_letter_ocr(text: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(r"TeEHEPAAbHOMY\s+ANPeKTOPy", "Генеральному директору", text, flags=re.IGNORECASE)
-    text = re.sub(r"KaayxKckni\s+KaGeAbHbIN\s+3GB0A", "Калужский кабельный завод", text, flags=re.IGNORECASE)
+    text = re.sub(r"KaayxKckni\s+KaGeAbHbIN\s+3GB0A", "Кабельный завод", text, flags=re.IGNORECASE)
     text = re.sub(
         r"Nnepuoauyeckie\s+UCNblITAHMA",
         "периодические испытания",
@@ -259,23 +277,72 @@ def _fix_periodic_letter_ocr(text: str) -> str:
     )
     text = re.sub(r"\bBBI-MHr\(A\)", "ВВГнг(А)", text, flags=re.IGNORECASE)
     text = re.sub(r"\bBBI-", "ВВГ-", text, flags=re.IGNORECASE)
+    # «ББР-Мнг» / «BBP-Mнг» / «ВВГ-П-Nнг» — частый OCR для ВВГ-Пнг (исх 163)
     text = re.sub(r"ББР-Мнг\(А\)", "ВВГ-Пнг(А)", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bББР-Мнг", "ВВГ-Пнг", text, flags=re.IGNORECASE)
     text = re.sub(r"\bББР-", "ВВГ-П", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bBBP-Mнг", "ВВГ-Пнг", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bBBP-", "ВВГ-П", text, flags=re.IGNORECASE)
+    text = re.sub(r"ВВГ-П-Nнг", "ВВГ-Пнг", text, flags=re.IGNORECASE)
+    text = re.sub(r"ВВГ-П\s*Nнг", "ВВГ-Пнг", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bВВГ-Мнг", "ВВГ-Пнг", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bВВГ-Nнг", "ВВГ-Пнг", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bВВГ\s*Nнг", "ВВГ-Пнг", text, flags=re.IGNORECASE)
+    # OCR теряет «П» у плоского: «ВВГнг(А) 3х2,5ок» → «ВВГ-Пнг…»
+    text = re.sub(
+        r"\bВВГнг(\s*\(\s*[АA]\s*\))\s*(\d+\s*[хx]\s*[\d.,]*ок)",
+        r"ВВГ-Пнг\1 \2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Пробел между fire-safety и размером: «нг(А)3х» → «нг(А) 3х»
+    text = re.sub(
+        r"([нг]{1,2}\s*\(\s*[АA]\s*\))\s*(\d+\s*[хx])",
+        r"\1 \2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\bБбI?NнуСК", "выпускается", text, flags=re.IGNORECASE)
     text = re.sub(r"3[хx]2,50К", "3х2,5ок", text, flags=re.IGNORECASE)
-    text = re.sub(r"\(N,\s*РЕ\)", "(N, PE)", text, flags=re.IGNORECASE)
+    text = re.sub(r"3[хx]2[,.]50[оoОO]?[кkКK]", "3х2,5ок", text, flags=re.IGNORECASE)
+    # Без пробела после запятой — иначе _SIZE_PART обрывает марку на «(N,»
+    text = re.sub(r"\(N,\s*РЕ\)", "(N,PE)", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(N,\s*PE\)", "(N,PE)", text, flags=re.IGNORECASE)
     text = re.sub(r"--0,66", "-0,66", text)
     text = re.sub(r"NBCur\(A\)-LS", "ПВСнг(А)-LS", text, flags=re.IGNORECASE)
     text = re.sub(r"МБСнг\(А\)\}", "ПВСнг(А)", text, flags=re.IGNORECASE)
     text = re.sub(r"\bМБСнг", "ПВСнг", text, flags=re.IGNORECASE)
     text = re.sub(r"\bAllyB\b", "АПуВ", text, flags=re.IGNORECASE)
     text = re.sub(r"FIБББ", "ПБГВВ", text, flags=re.IGNORECASE)
+    text = re.sub(r"FIБIББ", "ПБГВВ", text, flags=re.IGNORECASE)
+    text = re.sub(r"FЕРББ", "ПБГВВ", text, flags=re.IGNORECASE)
     text = re.sub(r"\bNBIBB\b", "ПБГВВ", text, flags=re.IGNORECASE)
+    text = re.sub(r"F[I1l][БBЕEРP]{2,4}(?=\s*\d|\b)", "ПБГВВ", text, flags=re.IGNORECASE)
+    # Пробел «ПБГВВ3х» → «ПБГВВ 3х»
+    text = re.sub(r"(ПБГВВ)(\d+\s*[хx])", r"\1 \2", text, flags=re.IGNORECASE)
     text = re.sub(r"Мул\s+Бгат\s*\(А\)", "ПуПВнг(А)", text, flags=re.IGNORECASE)
+    text = re.sub(r"Мул\s*Бг?ат\s*\(А\)", "ПуПВнг(А)", text, flags=re.IGNORECASE)
+    text = re.sub(r"Пу[ПГ]Внг\s*\(\s*А\s*\)", "ПуПВнг(А)", text, flags=re.IGNORECASE)
+    # «…нг(А)-LSLТх 1х6» без бренда → ПуПВнг
+    text = re.sub(
+        r"(?<![А-ЯЁA-Z])нг\s*\(\s*А\s*\)\s*-\s*LSL[ТT][хxX]\s*(\d+\s*[хx]\s*[\d.,]+)",
+        r"ПуПВнг(А)-LSLTx \1",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"LSLТ[хx]", "LSLTx", text)
+    text = re.sub(r"LSL[ТT][хxX]", "LSLTx", text)
+    text = re.sub(
+        r"(?<!ПуПВнг\(А\)-)(?<!-)LSLTx\s*(\d+\s*[хx]\s*[\d.,]+)",
+        r"ПуПВнг(А)-LSLTx \1",
+        text,
+    )
     text = re.sub(r"3[хx]1\.5", "3х1,5", text, flags=re.IGNORECASE)
     text = re.sub(r"3x40K", "3х4ок", text, flags=re.IGNORECASE)
     text = re.sub(r"Nposoa\s+Mapkn\w*", "Провод марки", text, flags=re.IGNORECASE)
+    text = re.sub(r"флросоа\s+марКн", "Провод марки", text, flags=re.IGNORECASE)
     text = re.sub(r"Ka6eAb\s+CHACBON\s+MAPK:", "Кабель силовой марки:", text, flags=re.IGNORECASE)
+    text = re.sub(r"KaGег?б\s+Сн?АОБОМ\s+МАРКК?:", "Кабель силовой марки:", text, flags=re.IGNORECASE)
     text = re.sub(
         r"Nроснм\s+Бас\s+нросестн",
         "Просим Вас провести",
@@ -286,16 +353,48 @@ def _fix_periodic_letter_ocr(text: str) -> str:
     return text
 
 
-def _fix_flexicore_ocr(text: str) -> str:
-    """Правки OCR в заявках FLEXICORE."""
+def _fix_series_cable_ocr(text: str) -> str:
+    """Правки OCR в заявках FLEXICORE (в т.ч. после auto-orient стр. 2)."""
     text = re.sub(r"FL[Ee3][XХx][I1l]CORE", "FLEXICORE", text, flags=re.IGNORECASE)
     text = re.sub(r"FLEX1CORE", "FLEXICORE", text, flags=re.IGNORECASE)
+    # «H ur(A)» / «Hur(A)» / «CH ur(A)» — склеенный OCR fire-safety
+    text = re.sub(
+        r"\b(H|CH|CY)(?:\s*)(?:ur|xr|nr|ng|uг|хr)\s*\(\s*A\s*\)",
+        r"\1 нг(A)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Tesseract/EasyOCR: «нг(A)» → ur/ng/nr/нr/xr/nurf после preprocess
+    text = re.sub(
+        r"\b(?:ur|ng|nr|nurf|uг|xr|хr|xг|нr|нr)\s*\(\s*A\s*\)",
+        "нг(A)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # EasyOCR often: «нr(A)» / «нR(A)» / «nг(A)»
+    text = re.sub(r"[нn][rгR]\s*\(\s*A\s*\)", "нг(A)", text, flags=re.IGNORECASE)
     text = re.sub(r"нг\s*\(\s*A\s*\)", "нг(A)", text, flags=re.IGNORECASE)
+    # EasyOCR: LiYCY / FLAT splits
+    text = re.sub(r"\bLi\s*Y\s*CY\b", "LiYCY", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bLi\s*YY\b", "LiYY", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bFL\s*AT\b", "FLAT", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"0[,.]6\s*/\s*1\s*(?:kB|KB|кB|kВ|xB|хB|хВ|xВ)\b",
+        "0,6/1 кВ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:H|Н)[0OО]?7(?:RN|RМ|R[NM])[\s\-]*F(?:\s*RU)?\b",
+        "H07RN-F RU",
+        text,
+        flags=re.IGNORECASE,
+    )
     return text
 
 
-def _fix_vicab_direction_ocr(text: str) -> str:
-    """Правки OCR в направлениях СЕРК (VicabFLEX, CY, кВ)."""
+def _fix_direction_marks_ocr(text: str) -> str:
+    """Правки OCR в направлениях в ИЛ (VicabFLEX, CY, кВ)."""
     text = re.sub(
         r"V[иiI][сc]аб[A-Za-zА-Яа-яЁё]{0,10}",
         "VicabFLEX",
@@ -317,13 +416,13 @@ def _fix_vicab_direction_ocr(text: str) -> str:
 
 
 def _fix_latin_brand_ocr(text: str) -> str:
-    return _fix_flexicore_ocr(_fix_vicab_direction_ocr(text))
+    return _fix_series_cable_ocr(_fix_direction_marks_ocr(text))
 
 
 def _fix_ocr_confusables(text: str) -> str:
     """Исправляет типичные OCR-ошибки перед поиском марок и ТУ."""
     text = _fix_latin_brand_ocr(text)
-    text = _fix_speclan_letter_ocr(text)
+    text = _fix_lan_letter_ocr(text)
     text = _fix_periodic_letter_ocr(text)
     return normalize_ocr_text(text)
 
@@ -358,6 +457,11 @@ def is_plausible_mark(mark: str) -> bool:
     is_latin_brand = re.match(r"^(?:FLEXICORE|VicabFLEX|H07RN-F)", mark, re.IGNORECASE)
     if not has_cyr_size and not has_lan_size and not has_star_size and not is_latin_brand:
         return False
+    # One brand token per mark (joined OCR lines are not a single mark)
+    if mark.upper().count("FLEXICORE") > 1:
+        return False
+    if mark.upper().count("VICABFLEX") > 1:
+        return False
     name = re.split(r"\s+\d", mark, maxsplit=1)[0]
     if len(name) > 100 or len(name) < 3:
         return False
@@ -375,11 +479,12 @@ def _clean_mark(raw: str) -> str:
     )
     mark = re.sub(r"\s+Упаковка.*$", "", mark, flags=re.IGNORECASE)
     mark = re.sub(
-        r"\s+(?:Прово\w*|Кабел\w*|марк[аи]|ТУ|ГОСТ|СТО).*$",
+        r"\s+(?:Прово\w*|Кабел\w*|марк[аи]|ТУ|TY|ГОСТ|СТО|Прошу|наименование).*$",
         "",
         mark,
         flags=re.IGNORECASE,
     )
+    mark = re.sub(r"\s+\d+\s*м\b.*$", "", mark, flags=re.IGNORECASE)
     if mark.upper().startswith("СПЕЦЛАН"):
         mark = re.sub(r"\s+В\s+количестве.*$", "", mark, flags=re.IGNORECASE)
     if mark.upper().startswith("VICABFLEX"):
@@ -387,10 +492,16 @@ def _clean_mark(raw: str) -> str:
         mark = re.sub(r"\bСУ\b", "CY", mark, flags=re.IGNORECASE)
         mark = re.sub(r"(\d)кВ", r"\1 кВ", mark, flags=re.IGNORECASE)
         return mark.strip()
-    if mark.upper().startswith("FLEXICORE") or mark.upper().startswith("H07RN"):
+    if mark.upper().startswith("FLEXICORE") or re.match(r"^(?:H|Н)[0OО]?7", mark, re.I):
         mark = mark.replace("®", "")
+        mark = _fix_series_cable_ocr(mark)
         mark = re.sub(r"нг\([Аа]\)", "нг(A)", mark, flags=re.IGNORECASE)
+        mark = re.sub(r"\s*_\s*$", "", mark)
         mark = re.sub(r"\s+", " ", mark).strip()
+        mark = re.sub(r"\s+H07RN.*$", "", mark, flags=re.IGNORECASE)
+        # normalize H07RN variants to canonical GT form
+        if re.match(r"^(?:H|Н)[0OО]?7", mark, re.I):
+            mark = "H07RN-F RU"
         return mark
     if re.match(r"^КГ[А-ЯЁа-яё]", mark):
         return mark.strip()
@@ -452,7 +563,7 @@ def _find_letter_list_marks(text: str) -> list[tuple[str, int, int, str | None]]
         found.append((mark, base_offset + m.start(1), base_offset + m.end(1), doc))
 
     if not found:
-        for m in _SPECLAN_MARK_PATTERN.finditer(text):
+        for m in _LAN_MARK_PATTERN.finditer(text):
             tail = text[m.end() : m.end() + 80]
             tu_m = _TU_TAIL_PATTERN.search(tail)
             doc = extract_document_from_text(tu_m.group(0)) if tu_m else None
@@ -461,12 +572,29 @@ def _find_letter_list_marks(text: str) -> list[tuple[str, int, int, str | None]]
     return found
 
 
-def _dedupe_cable_matches(items: list[CableMarkMatch]) -> list[CableMarkMatch]:
+def _mark_dedupe_key(mark: str) -> str:
+    return re.sub(r"\s+", "", mark.lower()).replace("x", "х")
+
+
+def _dedupe_cable_matches(
+    items: list[CableMarkMatch],
+    *,
+    light: bool = False,
+) -> list[CableMarkMatch]:
+    """
+    Дедупликация марок.
+
+    light=True — только OCR-нормализация (без fuzzy snap по cable_marks).
+    Используется для писем на периодические испытания.
+    """
     seen: set[str] = set()
     out: list[CableMarkMatch] = []
     for m in items:
-        fixed = _clean_mark(m.mark)
-        key = fixed.lower()
+        if light:
+            fixed = normalize_mark_after_ocr(m.mark.strip())
+        else:
+            fixed = _clean_mark(m.mark)
+        key = _mark_dedupe_key(fixed)
         if fixed and key not in seen:
             seen.add(key)
             out.append(
@@ -480,6 +608,58 @@ def _dedupe_cable_matches(items: list[CableMarkMatch]) -> list[CableMarkMatch]:
     return out
 
 
+_FLEXICORE_FIRE_TAIL = re.compile(
+    r"^(FLEXICORE(?:®)?\s+.+?)\s+нг\(A\)-(LS|HF)$",
+    re.IGNORECASE,
+)
+_FLEXICORE_VOLT_TAIL = re.compile(
+    r"^(FLEXICORE(?:®)?\s+.+?)\s+(\d+[.,]?\d*\s*/\s*\d+\s*кВ)$",
+    re.IGNORECASE,
+)
+
+
+def _expand_flexicore_combinations(items: list[CableMarkMatch]) -> list[CableMarkMatch]:
+    """Если OCR дал «100 нг(A)-LS» и «100 0,6/1 кВ» порознь — добавляем полную строку.
+
+    Не brand-hardcode: только комбинирование уже найденных FLEXICORE-кандидатов.
+    """
+    by_key = {m.mark.lower(): m for m in items}
+    fires: dict[str, tuple[str, str, CableMarkMatch]] = {}
+    volts: dict[str, tuple[str, str, CableMarkMatch]] = {}
+    for m in items:
+        if not m.mark.upper().startswith("FLEXICORE"):
+            continue
+        fm = _FLEXICORE_FIRE_TAIL.match(m.mark)
+        if fm:
+            base = re.sub(r"\s+", " ", fm.group(1)).strip()
+            fires[base.lower()] = (base, fm.group(2).upper().replace("А", "A"), m)
+            continue
+        vm = _FLEXICORE_VOLT_TAIL.match(m.mark)
+        if vm:
+            base = re.sub(r"\s+", " ", vm.group(1)).strip()
+            volt = vm.group(2).replace(".", ",")
+            volts[base.lower()] = (base, volt, m)
+
+    extras: list[CableMarkMatch] = []
+    for key, (base, fire_suf, src) in fires.items():
+        if key not in volts:
+            continue
+        _, volt, _vsrc = volts[key]
+        combined = f"{base} нг(A)-{fire_suf} {volt}"
+        combined = _clean_mark(combined)
+        ckey = combined.lower()
+        if ckey in by_key or not is_plausible_mark(combined):
+            continue
+        by_key[ckey] = CableMarkMatch(
+            mark=combined,
+            context=src.context,
+            document=src.document,
+            requirements_raw=src.requirements_raw,
+        )
+        extras.append(by_key[ckey])
+    return items + extras
+
+
 def _extract_marks_from_family(text: str, family_id: str) -> list[CableMarkMatch]:
     """Извлекает марки через YAML-семейство, только при уверенном совпадении."""
     from .families.registry import DocumentFamily, get_family_registry
@@ -489,11 +669,11 @@ def _extract_marks_from_family(text: str, family_id: str) -> list[CableMarkMatch
     if family is None or not family.is_confident_match(text):
         return []
 
-    if family_id == "kaluga_periodic_v1":
+    if family_id == "periodic_letter_v1":
         from .periodic_letter_extractor import extract_marks_from_periodic_letter
 
         periodic = extract_marks_from_periodic_letter(text)
-        cleaned = _dedupe_cable_matches(periodic)
+        cleaned = _dedupe_cable_matches(periodic, light=True)
         if len(cleaned) >= family.min_marks_threshold:
             return cleaned
         return []
@@ -505,7 +685,7 @@ def _extract_marks_from_family(text: str, family_id: str) -> list[CableMarkMatch
             raw = m.group(1) if m.lastindex else m.group(0)
             _add_match(matches, seen, raw, text, m.start(), m.end())
 
-    if family_id == "speclan_letter_v1" and len(matches) < family.min_marks_threshold:
+    if family_id == "lan_letter_v1" and len(matches) < family.min_marks_threshold:
         for mark, start, end, doc in _find_letter_list_marks(text):
             _add_match(matches, seen, mark, text, start, end, document=doc)
 
@@ -519,7 +699,7 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
     Ищет марки кабелей по структурному паттерну «название + NхM».
 
     Не использует список брендов — любая строка нужной формы.
-    Семейства YAML (Калуга, Спецкабель) — только при score ≥ confidence_threshold.
+    Семейства YAML (периодические, LAN) — только при score ≥ confidence_threshold.
     """
     base = _normalize_text_for_marks(text)
     if not base:
@@ -549,13 +729,17 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
     if family is not None:
         family_marks = _extract_marks_from_family(normalized, family.id)
         if family_marks:
-            return _dedupe_cable_matches(matches + family_marks)
+            if family.id == "periodic_letter_v1":
+                return _expand_flexicore_combinations(family_marks)
+            return _expand_flexicore_combinations(
+                _dedupe_cable_matches(matches + family_marks)
+            )
 
     for mark, start, end, doc in _find_letter_list_marks(normalized):
         _add_match(matches, seen, mark, normalized, start, end, document=doc)
 
     for pattern in (
-        _SPECLAN_MARK_PATTERN,
+        _LAN_MARK_PATTERN,
         _AFTER_MARKI_PATTERN,
         _PRODUCT_MARK_PATTERN,
         _MARK_PATTERN,
@@ -564,11 +748,31 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
             raw = m.group(1) if m.lastindex else m.group(0)
             _add_match(matches, seen, raw, normalized, m.start(), m.end())
 
-    return matches
+    return _expand_flexicore_combinations(matches)
 
 
-def resolve_ocr_engine() -> Literal["tesseract", "easyocr", "none"]:
-    """Какой OCR-движок будет использован для сканов (tesseract приоритетнее)."""
+OcrEngineChoice = Literal["auto", "tesseract", "easyocr"]
+OcrEngineResolved = Literal["tesseract", "easyocr", "none"]
+
+
+def resolve_ocr_engine(
+    preferred: OcrEngineChoice | str = "auto",
+) -> OcrEngineResolved:
+    """Выбор OCR-движка.
+
+    * ``auto`` — tesseract, иначе easyocr (PyTorch CV)
+    * ``tesseract`` / ``easyocr`` — явный engine (A/B spike 35v)
+    """
+    pref = (preferred or "auto").strip().lower()
+    if pref in ("easyocr", "pytorch_cv", "pytorch", "torch"):
+        try:
+            import easyocr  # noqa: F401
+        except ImportError:
+            return "none"
+        return "easyocr"
+    if pref == "tesseract":
+        return "tesseract" if _find_tesseract() else "none"
+    # auto
     if _find_tesseract():
         return "tesseract"
     try:
@@ -670,22 +874,76 @@ def _resolve_preprocess_tag(use_preprocess: bool) -> str | None:
     return PREPROCESS_VERSION if is_cv_available() else None
 
 
+def _ocr_bottom_band_eng(image, pytesseract, *, band_ratio: float = 0.22) -> str:
+    """OCR нижней полосы страницы eng-only — латиница H07RN / FLEXICORE footer.
+
+    Геометрия (crop), не brand-regex: Tesseract rus+eng часто «съедает» хвост таблицы.
+    """
+    from PIL import Image
+
+    if image is None:
+        return ""
+    w, h = image.size
+    y0 = max(0, int(h * (1.0 - band_ratio)))
+    crop = image.crop((0, y0, w, h))
+    # slight upscale helps thin Latin glyphs
+    if crop.height < 200:
+        crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.LANCZOS)
+    config = "--psm 6 --oem 1"
+    try:
+        return pytesseract.image_to_string(crop, lang="eng", config=config) or ""
+    except Exception:
+        return ""
+
+
 def _ocr_image_tesseract(image, pytesseract, *, use_preprocess: bool = True) -> str:
     # rus первичен — кириллица в марках; eng для Cat/UTP в LAN-кабеле
-    if use_preprocess:
-        from .ocr.preprocess import is_cv_available, preprocess_for_ocr
+    # Auto-orient (OSD) first — FLEXICORE стр. 2 скана повёрнута на 90°.
+    # Adaptive threshold after orient often *hurts* Latin brand tables → soft preprocess
+    # + merge with raw so RU letters and FLEXICORE both survive.
+    # Bottom-band eng pass (35s): recovers H07RN-F RU when full-page OCR misses footer.
+    from .ocr.preprocess import correct_orientation, is_cv_available, preprocess_for_ocr
 
-        if is_cv_available():
-            image = preprocess_for_ocr(image)
+    tesseract_cmd = getattr(pytesseract.pytesseract, "tesseract_cmd", None)
+    image = correct_orientation(image, tesseract_cmd=tesseract_cmd or None)
     config = "--psm 6 --oem 1"
-    return pytesseract.image_to_string(image, lang="rus+eng", config=config)
+    text_raw = pytesseract.image_to_string(image, lang="rus+eng", config=config)
+    text_footer = _ocr_bottom_band_eng(image, pytesseract)
+    parts: list[str] = []
+    if not use_preprocess or not is_cv_available():
+        if text_raw.strip():
+            parts.append(text_raw.strip())
+        if text_footer.strip() and text_footer.strip() not in (text_raw or ""):
+            parts.append(text_footer.strip())
+        return "\n\n".join(parts)
+    # Soft path: deskew/denoise/upscale without adaptive threshold
+    soft = preprocess_for_ocr(image, adaptive_threshold=False)
+    text_soft = pytesseract.image_to_string(soft, lang="rus+eng", config=config)
+    if not text_soft.strip():
+        primary = text_raw
+    elif not text_raw.strip():
+        primary = text_soft
+    elif len(text_soft) > len(text_raw) * 1.15:
+        primary = f"{text_soft}\n\n{text_raw}".strip() if text_raw.strip() else text_soft
+    else:
+        primary = f"{text_raw}\n\n{text_soft}".strip() if text_soft.strip() != text_raw.strip() else text_raw
+    if text_footer.strip() and text_footer.strip() not in (primary or ""):
+        primary = f"{primary}\n\n{text_footer}".strip()
+    return primary
 
 
 def _ocr_with_tesseract(
-    pdf_path: Path, dpi: int = DEFAULT_OCR_DPI, *, use_preprocess: bool = True
+    pdf_path: Path,
+    dpi: int = DEFAULT_OCR_DPI,
+    *,
+    use_preprocess: bool = True,
+    progress=None,
 ) -> str:
     import pytesseract
 
+    from .progress import NULL_PROGRESS
+
+    prog = progress or NULL_PROGRESS
     tesseract_cmd = _find_tesseract()
     if not tesseract_cmd:
         raise RuntimeError(
@@ -695,33 +953,167 @@ def _ocr_with_tesseract(
         )
     pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
+    prog("Рендер страниц PDF…", stage="ocr")
     images = _render_pages(pdf_path, dpi=dpi)
-    if len(images) == 1:
+    n = len(images)
+    if n == 1:
+        prog("OCR страница 1/1…", current=0, total=1, stage="ocr")
         text = _ocr_image_tesseract(images[0], pytesseract, use_preprocess=use_preprocess)
+        prog("OCR страница 1/1 готово", current=1, total=1, stage="ocr")
         return text.strip()
 
-    parts: list[str] = [""] * len(images)
-    with ThreadPoolExecutor(max_workers=min(4, len(images))) as pool:
+    # С progress — постранично (видно остаток); без — параллельно быстрее
+    if progress is not None:
+        parts: list[str] = []
+        for idx, img in enumerate(images):
+            prog(
+                f"OCR страница {idx + 1}/{n}…",
+                current=idx,
+                total=n,
+                stage="ocr",
+            )
+            parts.append(
+                _ocr_image_tesseract(img, pytesseract, use_preprocess=use_preprocess).strip()
+            )
+            prog(
+                f"OCR страница {idx + 1}/{n} готово",
+                current=idx + 1,
+                total=n,
+                stage="ocr",
+            )
+        return "\n\n".join(p for p in parts if p)
+
+    parts_p: list[str] = [""] * n
+    with ThreadPoolExecutor(max_workers=min(4, n)) as pool:
         futures = {
             pool.submit(_ocr_image_tesseract, img, pytesseract, use_preprocess=use_preprocess): idx
             for idx, img in enumerate(images)
         }
         for future in as_completed(futures):
             idx = futures[future]
-            parts[idx] = future.result().strip()
+            parts_p[idx] = future.result().strip()
 
-    return "\n\n".join(p for p in parts if p)
+    return "\n\n".join(p for p in parts_p if p)
 
 
-def _ocr_with_easyocr(pdf_path: Path, dpi: int = DEFAULT_OCR_DPI) -> str:
+def _easyocr_prepare_image(image):
+    """Подготовка кадра для EasyOCR: orient + контраст/upscale (без жёсткого threshold)."""
     import numpy as np
 
+    from .ocr.preprocess import correct_orientation, is_cv_available
+
+    tesseract_cmd = _find_tesseract()
+    image = correct_orientation(image, tesseract_cmd=tesseract_cmd)
+    if not is_cv_available():
+        return np.array(image.convert("RGB"))
+
+    import cv2
+
+    arr = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    # CLAHE — выравнивание контраста (сканы с серой таблицей)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    h, w = gray.shape[:2]
+    # EasyOCR любит крупные глифы; до ~2200 px по высоте
+    if h < 2200:
+        scale = 2200 / h
+        gray = cv2.resize(
+            gray,
+            (int(w * scale), int(h * scale)),
+            interpolation=cv2.INTER_CUBIC,
+        )
+    # лёгкое усиление краёв букв
+    blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
+    sharp = cv2.addWeighted(gray, 1.4, blur, -0.4, 0)
+    return cv2.cvtColor(sharp, cv2.COLOR_GRAY2RGB)
+
+
+def _easyocr_lines_from_image(reader, rgb_arr) -> list[str]:
+    """Построчный rec (не paragraph) — таблицы лучше, чем «слипшийся» абзац."""
+    # detail=1 → (bbox, text, conf); paragraph=False — строки таблицы не склеиваются
+    raw = reader.readtext(
+        rgb_arr,
+        detail=1,
+        paragraph=False,
+        mag_ratio=1.5,
+        text_threshold=0.6,
+        low_text=0.3,
+        link_threshold=0.3,
+        canvas_size=2560,
+        contrast_ths=0.1,
+        adjust_contrast=0.5,
+    )
+    if not raw:
+        return []
+    # sort by vertical position then x
+    items: list[tuple[float, float, str]] = []
+    for bbox, text, conf in raw:
+        if not text or not str(text).strip():
+            continue
+        if conf is not None and float(conf) < 0.15:
+            continue
+        ys = [p[1] for p in bbox]
+        xs = [p[0] for p in bbox]
+        items.append((sum(ys) / len(ys), min(xs), str(text).strip()))
+    items.sort(key=lambda t: (round(t[0] / 12.0), t[1]))  # group ~12px rows
+    # merge tokens on same row band
+    lines: list[str] = []
+    band: list[tuple[float, str]] = []
+    band_y: float | None = None
+    for y, x, text in items:
+        if band_y is None or abs(y - band_y) <= 18:
+            band.append((x, text))
+            band_y = y if band_y is None else (band_y * 0.7 + y * 0.3)
+        else:
+            band.sort(key=lambda t: t[0])
+            lines.append(" ".join(t for _, t in band))
+            band = [(x, text)]
+            band_y = y
+    if band:
+        band.sort(key=lambda t: t[0])
+        lines.append(" ".join(t for _, t in band))
+    return lines
+
+
+def _ocr_with_easyocr(
+    pdf_path: Path, dpi: int = EASYOCR_OCR_DPI, *, progress=None
+) -> str:
+    """EasyOCR (PyTorch CV): orient + CLAHE/upscale + line-mode + footer band."""
+    from .progress import NULL_PROGRESS
+
+    prog = progress or NULL_PROGRESS
+    prog("Загрузка EasyOCR (PyTorch)…", stage="ocr")
     reader = _get_easyocr_reader()
+    images = _render_pages(pdf_path, dpi=dpi)
+    n = len(images)
     parts: list[str] = []
-    for image in _render_pages(pdf_path, dpi=dpi):
-        lines = reader.readtext(np.array(image), detail=0, paragraph=True)
-        if lines:
-            parts.append("\n".join(lines))
+    for idx, image in enumerate(images):
+        prog(
+            f"torch-CV страница {idx + 1}/{n}…",
+            current=idx,
+            total=n,
+            stage="ocr",
+        )
+        rgb = _easyocr_prepare_image(image)
+        lines = _easyocr_lines_from_image(reader, rgb)
+        h = rgb.shape[0]
+        y0 = int(h * 0.78)
+        footer = rgb[y0:, :, :]
+        foot_lines = _easyocr_lines_from_image(reader, footer)
+        page_text = "\n".join(lines)
+        if foot_lines:
+            foot_text = "\n".join(foot_lines)
+            if foot_text.strip() and foot_text.strip() not in page_text:
+                page_text = f"{page_text}\n{foot_text}".strip()
+        if page_text.strip():
+            parts.append(_fix_series_cable_ocr(page_text))
+        prog(
+            f"torch-CV страница {idx + 1}/{n} готово",
+            current=idx + 1,
+            total=n,
+            stage="ocr",
+        )
     return "\n\n".join(parts)
 
 
@@ -731,58 +1123,113 @@ def ocr_pdf(
     *,
     use_cache: bool = True,
     use_preprocess: bool = True,
+    engine: OcrEngineChoice | str = "auto",
 ) -> str:
     """
-    Распознаёт текст со скана. Сначала tesseract, при недоступности — easyocr.
+    Распознаёт текст со скана.
 
-    Результат кэшируется в ``data/ocr_cache/`` по отпечатку файла, DPI, движку
-    и версии препроцессинга (OpenCV v1 для сканов).
+    ``engine``: auto | tesseract | easyocr (pytorch_cv).
+    Кэш: ``data/ocr_cache/`` — отдельный ключ на engine (+ preprocess tag).
     """
-    path = Path(pdf_path)
-    engine = resolve_ocr_engine()
-    preprocess_tag = _resolve_preprocess_tag(use_preprocess) if engine == "tesseract" else None
+    text, _used = ocr_pdf_ex(
+        pdf_path,
+        dpi=dpi,
+        use_cache=use_cache,
+        use_preprocess=use_preprocess,
+        engine=engine,
+    )
+    return text
 
-    if use_cache and engine != "none":
-        cached = _read_ocr_cache(path, dpi, engine, preprocess=preprocess_tag)
+
+def ocr_pdf_ex(
+    pdf_path: Path | str,
+    dpi: int = DEFAULT_OCR_DPI,
+    *,
+    use_cache: bool = True,
+    use_preprocess: bool = True,
+    engine: OcrEngineChoice | str = "auto",
+    progress=None,
+) -> tuple[str, OcrEngineResolved]:
+    """Как ``ocr_pdf``, но возвращает (text, фактический engine)."""
+    from .progress import NULL_PROGRESS
+
+    prog = progress or NULL_PROGRESS
+    path = Path(pdf_path)
+    preferred = (engine or "auto").strip().lower()
+    if preferred in ("pytorch_cv", "pytorch", "torch"):
+        preferred = "easyocr"
+    if preferred not in ("auto", "tesseract", "easyocr"):
+        preferred = "auto"
+
+    resolved = resolve_ocr_engine(preferred)  # type: ignore[arg-type]
+    if resolved == "none":
+        raise RuntimeError(
+            "OCR недоступен. Установи Tesseract (rus) или: pip install easyocr (venv на D:)"
+        )
+
+    preprocess_tag = (
+        _resolve_preprocess_tag(use_preprocess) if resolved == "tesseract" else None
+    )
+
+    if use_cache:
+        cached = _read_ocr_cache(path, dpi, resolved, preprocess=preprocess_tag)
         if cached is not None:
             logger.debug(
                 "OCR cache hit: %s (%s, dpi=%d, pre=%s)",
                 path.name,
-                engine,
+                resolved,
                 dpi,
                 preprocess_tag,
             )
-            return normalize_ocr_text(cached)
+            prog("OCR из кэша (мгновенно)", current=1, total=1, stage="ocr")
+            return normalize_ocr_text(cached), resolved
 
     text = ""
-    if engine == "tesseract":
+    used: OcrEngineResolved = resolved
+
+    if resolved == "tesseract":
         try:
-            text = _ocr_with_tesseract(path, dpi=dpi, use_preprocess=use_preprocess)
+            text = _ocr_with_tesseract(
+                path, dpi=dpi, use_preprocess=use_preprocess, progress=progress
+            )
         except Exception as exc:
             logger.warning("Tesseract OCR failed: %s", exc)
-            engine = "easyocr"
+            if preferred != "auto":
+                raise
+            used = "easyocr"
             preprocess_tag = None
             if use_cache:
-                cached = _read_ocr_cache(path, dpi, engine)
+                cached = _read_ocr_cache(path, dpi, "easyocr")
                 if cached is not None:
-                    return cached
+                    return cached, "easyocr"
 
-    if not text.strip():
+    need_easy = resolved == "easyocr" or (
+        preferred == "auto" and used == "easyocr" and not text.strip()
+    )
+    if need_easy or (preferred == "auto" and resolved == "tesseract" and not text.strip()):
         try:
-            text = _ocr_with_easyocr(path, dpi=dpi)
-            engine = "easyocr"
+            text = _ocr_with_easyocr(path, dpi=dpi, progress=progress)
+            used = "easyocr"
             preprocess_tag = None
         except ImportError as exc:
-            raise RuntimeError(
-                "Для сканов нужен OCR. Установи Tesseract (rus) или: pip install easyocr"
-            ) from exc
+            if preferred == "easyocr":
+                raise RuntimeError(
+                    "Для EasyOCR (PyTorch CV): pip install easyocr (venv на D:)"
+                ) from exc
+            logger.warning("EasyOCR fallback unavailable: %s", exc)
 
     if text.strip():
         text = normalize_ocr_text(text)
 
     if use_cache and text.strip():
-        _write_ocr_cache(path, dpi, engine, text, preprocess=preprocess_tag)
-    return text
+        _write_ocr_cache(
+            path,
+            dpi,
+            used,
+            text,
+            preprocess=preprocess_tag if used == "tesseract" else None,
+        )
+    return text, used
 
 
 def extract_text(pdf_path: Path | str, *, use_ocr: bool = False) -> str:
@@ -897,19 +1344,28 @@ def extract_from_pdf(
     use_ocr: bool = True,
     ocr_dpi: int = DEFAULT_OCR_DPI,
     use_ocr_cache: bool = True,
+    ocr_engine: OcrEngineChoice | str = "auto",
+    progress=None,
 ) -> PdfExtractionResult:
     """
     Полное извлечение: текст, таблицы, марки кабелей, метаданные.
 
     Для сканов при use_ocr=True автоматически запускает OCR.
+    ``ocr_engine``: auto | tesseract | easyocr (pytorch_cv) — A/B spike 35v.
+    ``progress``: callback(message, current=, total=, stage=) для GUI.
     """
+    from .progress import NULL_PROGRESS
+
+    prog = progress or NULL_PROGRESS
     path = Path(pdf_path)
     if not path.exists():
         raise FileNotFoundError(f"PDF не найден: {path}")
 
+    prog("Анализ PDF…", current=0, total=100, stage="open")
     is_scanned, page_count = _detect_scanned(path)
     _page_count, has_images, plumber_text = _pdf_page_stats(path)
     ocr_used = False
+    ocr_engine_used: str | None = None
     tables: list[list[list[str]]] = []
 
     table_ocr_text = ""
@@ -918,9 +1374,27 @@ def extract_from_pdf(
     )
 
     if use_ocr_path:
-        # True scans — 300 DPI; garbled pseudo-text layer — default DPI (200 часто лучше).
-        scan_dpi = max(ocr_dpi, SCAN_OCR_DPI) if is_scanned else ocr_dpi
-        text = ocr_pdf(path, dpi=scan_dpi, use_cache=use_ocr_cache, use_preprocess=use_ocr)
+        eng_pref = (ocr_engine or "auto").strip().lower()
+        if eng_pref in ("easyocr", "pytorch_cv", "pytorch", "torch"):
+            scan_dpi = max(ocr_dpi, EASYOCR_OCR_DPI)
+        elif is_scanned:
+            scan_dpi = max(ocr_dpi, SCAN_OCR_DPI)
+        else:
+            scan_dpi = ocr_dpi
+        prog(
+            f"OCR ({eng_pref}, DPI {scan_dpi}, ~{page_count} стр.)…",
+            current=5,
+            total=100,
+            stage="ocr",
+        )
+        text, ocr_engine_used = ocr_pdf_ex(
+            path,
+            dpi=scan_dpi,
+            use_cache=use_ocr_cache,
+            use_preprocess=use_ocr,
+            engine=ocr_engine,
+            progress=progress,
+        )
         ocr_used = True
         if not is_scanned:
             logger.info(
@@ -932,9 +1406,11 @@ def extract_from_pdf(
             logger.warning("PDF %s: скан — OCR включён принудительно", path.name)
         if is_scanned:
             try:
-                from .ocr.table import ocr_tables_from_pdf, tables_text_from_results
+                from .ocr.table import TABLE_OCR_DPI, ocr_tables_from_pdf, tables_text_from_results
 
-                table_results = ocr_tables_from_pdf(path, dpi=scan_dpi)
+                prog("OCR таблиц…", current=70, total=100, stage="tables")
+                table_dpi = max(scan_dpi, TABLE_OCR_DPI)
+                table_results = ocr_tables_from_pdf(path, dpi=table_dpi)
                 table_ocr_text = tables_text_from_results(table_results)
                 if table_ocr_text:
                     tables = [result.rows for result in table_results if result.rows]
@@ -948,16 +1424,19 @@ def extract_from_pdf(
             except Exception as exc:
                 logger.debug("Table OCR skipped for %s: %s", path.name, exc)
     else:
+        prog("Чтение текстового слоя…", current=20, total=100, stage="text")
         text = extract_text(path)
         tables = extract_tables(path)
 
+    prog("Поиск марок…", current=85, total=100, stage="marks")
     search_text = build_search_text(text, tables)
-
     cable_marks = _resolve_cable_marks(text, tables)
+    prog("Организации…", current=92, total=100, stage="orgs")
     organizations = finalize_organizations(extract_organizations(search_text), search_text)
+    prog("Готово", current=100, total=100, stage="done")
 
     logger.info(
-        "PDF %s: pages=%d, text=%d chars, tables=%d, marks=%d, orgs=%d, scanned=%s, ocr=%s",
+        "PDF %s: pages=%d, text=%d chars, tables=%d, marks=%d, orgs=%d, scanned=%s, ocr=%s, engine=%s",
         path.name,
         page_count,
         len(text),
@@ -966,6 +1445,7 @@ def extract_from_pdf(
         len(organizations),
         is_scanned,
         ocr_used,
+        ocr_engine_used,
     )
 
     return PdfExtractionResult(
@@ -980,6 +1460,7 @@ def extract_from_pdf(
         manufacturer_name=pick_manufacturer_name(organizations),
         is_scanned=is_scanned,
         ocr_used=ocr_used,
+        ocr_engine=ocr_engine_used,
         extracted_at=datetime.now(),
     )
 
@@ -1022,7 +1503,7 @@ def extract_tables_from_docx(docx_path: Path | str) -> list[list[list[str]]]:
 def _build_extraction_result(
     *,
     source_path: Path,
-    source_type: Literal["pdf", "docx"],
+    source_type: Literal["pdf", "docx", "text"],
     text: str,
     page_count: int = 0,
     tables: list[list[list[str]]] | None = None,
@@ -1032,8 +1513,13 @@ def _build_extraction_result(
     """Собирает результат: марки + организации из текста заявки."""
     search_text = build_search_text(text, tables)
     organizations = finalize_organizations(extract_organizations(search_text), search_text)
+    resolved = source_path if source_path.is_absolute() or source_path.exists() else source_path
+    try:
+        path_str = str(resolved.resolve())
+    except OSError:
+        path_str = str(source_path)
     return PdfExtractionResult(
-        source_path=str(source_path.resolve()),
+        source_path=path_str,
         source_type=source_type,
         page_count=page_count,
         text=text,
@@ -1048,18 +1534,48 @@ def _build_extraction_result(
     )
 
 
+def extract_from_text(
+    text: str,
+    *,
+    source_label: str = "free_text",
+) -> PdfExtractionResult:
+    """
+    Вход «речь/текст заказчика» или любой свободный текст заявки.
+
+    Без OCR: сразу извлекает марки, организации и вид испытаний-эвристики.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise ValueError("Пустой текст заявки")
+    # Виртуальный source_path — не файл на диске
+    label = re.sub(r"[^\w.\-]+", "_", source_label, flags=re.UNICODE).strip("_") or "free_text"
+    result = _build_extraction_result(
+        source_path=Path(f"{label}.txt"),
+        source_type="text",
+        text=cleaned,
+        page_count=1,
+    )
+    return result.model_copy(update={"source_path": f"text://{label}"})
+
+
 def extract_from_document(
     path: Path | str,
     *,
     use_ocr: bool = True,
     ocr_dpi: int = DEFAULT_OCR_DPI,
     use_ocr_cache: bool = True,
+    ocr_engine: OcrEngineChoice | str = "auto",
+    progress=None,
 ) -> PdfExtractionResult:
     """
     Единая точка входа для заявок: PDF или Word (.docx).
 
     PDF делегирует в extract_from_pdf; Word — текст + марки + организации.
+    ``ocr_engine``: auto | tesseract | easyocr (pytorch_cv).
     """
+    from .progress import NULL_PROGRESS
+
+    prog = progress or NULL_PROGRESS
     file_path = Path(path)
     if not file_path.exists():
         raise FileNotFoundError(f"Файл не найден: {file_path}")
@@ -1071,14 +1587,20 @@ def extract_from_document(
             use_ocr=use_ocr,
             ocr_dpi=ocr_dpi,
             use_ocr_cache=use_ocr_cache,
+            ocr_engine=ocr_engine,
+            progress=progress,
         )
     if suffix == ".docx":
+        prog("Чтение Word…", current=10, total=100, stage="text")
         text = extract_text_from_docx(file_path)
         tables = extract_tables_from_docx(file_path)
-        return _build_extraction_result(
+        prog("Поиск марок и организаций…", current=80, total=100, stage="marks")
+        result = _build_extraction_result(
             source_path=file_path,
             source_type="docx",
             text=text,
             tables=tables,
         )
+        prog("Готово", current=100, total=100, stage="done")
+        return result
     raise ValueError(f"Неподдерживаемый формат: {suffix}. Используйте PDF или .docx")

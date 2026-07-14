@@ -104,11 +104,29 @@ _ADDRESS_STOP_MARKERS = (
     "Nposoa",
 )
 
-_KALUGA_POSTAL = "249841"
-_KALUGA_CANONICAL_ADDRESS = (
-    "249841, Калужская область, Дзержинский район, "
-    "д. Жилетово, ул. Промышленная, д. 1, стр. 5"
-)
+def _load_periodic_factory_profile() -> tuple[str, str]:
+    """Почтовый индекс и канонический адрес завода для писем периодических испытаний.
+
+    Реальные значения — только в ``data/client_profiles.local.yaml`` (gitignored).
+    Без файла профиль пустой: адрес берётся из OCR-текста без принудительной подстановки.
+    """
+    try:
+        import yaml
+        from ..config import DATA_DIR
+
+        path = DATA_DIR / "client_profiles.local.yaml"
+        if path.is_file():
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            prof = data.get("periodic_factory") or {}
+            postal = str(prof.get("postal_code") or "").strip()
+            address = str(prof.get("canonical_address") or "").strip()
+            return postal, address
+    except Exception:
+        pass
+    return "", ""
+
+
+_PERIODIC_FACTORY_POSTAL, _PERIODIC_FACTORY_CANONICAL_ADDRESS = _load_periodic_factory_profile()
 
 _CABLE_MARK_IN_ADDRESS = re.compile(
     r"(?:ВВГ|ПВСнг|ПВС-|АПуВ\s+\d|ПБГВВ|BBI-|NBCur|Mapka\s|"
@@ -116,10 +134,14 @@ _CABLE_MARK_IN_ADDRESS = re.compile(
     re.IGNORECASE,
 )
 
-_KALUGA_ADDRESS_BLOCK = re.compile(
-    rf"{_KALUGA_POSTAL}\s*,\s*(.+?)(?=\s*(?:1p/c|p/c|р/с|BUK|WHH|ИНН|Ka6eAb|"
-    rf"HanmeHosa|Mapka|BBI-|NMpocum)\b)",
-    re.IGNORECASE | re.DOTALL,
+_PERIODIC_FACTORY_ADDRESS_BLOCK = (
+    re.compile(
+        rf"{re.escape(_PERIODIC_FACTORY_POSTAL)}\s*,\s*(.+?)(?=\s*(?:1p/c|p/c|р/с|BUK|WHH|ИНН|Ka6eAb|"
+        rf"HanmeHosa|Mapka|BBI-|NMpocum)\b)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    if _PERIODIC_FACTORY_POSTAL
+    else re.compile(r"(?!x)x")  # never matches without local profile
 )
 
 
@@ -147,23 +169,27 @@ def fix_ocr_address_text(raw: str) -> str:
     return normalize_ocr_text(raw.replace("\n", " "))
 
 
-def _fix_kaluga_settlement_errors(text: str) -> str:
-    """OCR иногда подменяет «д. Жилетово» (Kuaetoso) на «п. Киевский»."""
-    if _KALUGA_POSTAL not in text and "Дзержинск" not in text:
+def _fix_periodic_settlement_errors(text: str) -> str:
+    """Коррекция OCR-ошибок н.п., если задан локальный профиль завода."""
+    if not _PERIODIC_FACTORY_POSTAL or _PERIODIC_FACTORY_POSTAL not in text:
         return text
-    text = re.sub(r"п\.\s*Киевск\w*", "д. Жилетово", text, flags=re.IGNORECASE)
-    text = re.sub(r"д\.\s*Киевск\w*", "д. Жилетово", text, flags=re.IGNORECASE)
-    text = re.sub(r"(?<![\w-])Киевск\w*(?![\w-])", "Жилетово", text, flags=re.IGNORECASE)
+    if _PERIODIC_FACTORY_CANONICAL_ADDRESS:
+        m = re.search(r"д\.\s*([^,]+)", _PERIODIC_FACTORY_CANONICAL_ADDRESS)
+        settlement = m.group(1).strip() if m else ""
+        if settlement:
+            text = re.sub(r"п\.\s*Киевск\w*", f"д. {settlement}", text, flags=re.IGNORECASE)
+            text = re.sub(r"д\.\s*Киевск\w*", f"д. {settlement}", text, flags=re.IGNORECASE)
+            text = re.sub(r"(?<![\w-])Киевск\w*(?![\w-])", settlement, text, flags=re.IGNORECASE)
     return text
 
 
-def _is_kaluga_cable_factory(name: str, source_text: str = "") -> bool:
-    if "калужск" in name.lower() and "кабельн" in name.lower():
+def _is_periodic_letter_factory(name: str, source_text: str = "") -> bool:
+    if "кабельн" in name.lower() and "завод" in name.lower():
         return True
     if source_text:
         return bool(
             re.search(
-                r"KaayxKckni\s+KaGeAbHbIN|Калужск\w+\s+кабельн",
+                r"KaayxKckni\s+KaGeAbHbIN|кабельн\w*\s+завод",
                 source_text[:2500],
                 re.IGNORECASE,
             )
@@ -190,17 +216,17 @@ def _looks_like_cable_marks(text: str) -> bool:
 def normalize_address_text(raw: str) -> str:
     """Сжимает пробелы и правит типичные OCR-ошибки в адресе."""
     text = fix_ocr_address_text(raw)
-    text = _fix_kaluga_settlement_errors(text)
+    text = _fix_periodic_settlement_errors(text)
     text = re.sub(r"\s+", " ", text).strip(" .,;")
     text = re.sub(r"С\s+анкт", "Санкт", text, flags=re.IGNORECASE)
     text = re.sub(r"Р\s+ОССИЯ", "РОССИЯ", text, flags=re.IGNORECASE)
-    if text.startswith(f"{_KALUGA_POSTAL},"):
+    if text.startswith(f"{_PERIODIC_FACTORY_POSTAL},"):
         text = re.sub(r",\s*1\s*$", "", text)
     return text
 
 
-_KALUGA_LATIN_ADDRESS = re.compile(
-    r"249841.*(?:Poccumickaa|KaAyKCKaA|A3@PXXUHCKMM|Kuaetoso|MpOMbiLuAeHHas)",
+_PERIODIC_FACTORY_LATIN_ADDRESS = re.compile(
+    r"(?:Poccumickaa|KaAyKCKaA|A3@PXXUHCKMM|Kuaetoso|MpOMbiLuAeHHas)",
     re.IGNORECASE,
 )
 
@@ -209,24 +235,24 @@ def finalize_organization_address(
     org: OrganizationExtract,
     source_text: str = "",
 ) -> OrganizationExtract:
-    """Нормализует адрес организации после OCR (кириллица, Калужа)."""
+    """Нормализует адрес организации после OCR (кириллица, адрес завода)."""
     name_low = org.name.lower()
     raw_addr = org.legal_address or org.address or ""
-    if _is_kaluga_cable_factory(org.name, source_text):
+    if _is_periodic_letter_factory(org.name, source_text):
         preferred: str | None = None
         if source_text:
-            preferred = extract_kaluga_factory_address(source_text)
+            preferred = extract_periodic_factory_address(source_text)
         if not preferred and raw_addr:
             if re.search(r"Киевск", raw_addr, re.IGNORECASE) or (
-                _KALUGA_POSTAL in raw_addr
+                _PERIODIC_FACTORY_POSTAL in raw_addr
                 and "Промышленная" in raw_addr
-                and "Жилетово" not in raw_addr
+                and True
             ):
-                preferred = _KALUGA_CANONICAL_ADDRESS
+                preferred = _PERIODIC_FACTORY_CANONICAL_ADDRESS
             else:
                 preferred = sanitize_address(raw_addr) or normalize_address_text(raw_addr)
         if preferred and not _looks_like_cable_marks(preferred):
-            postal = _postal_from_address(preferred) or org.postal_code or _KALUGA_POSTAL
+            postal = _postal_from_address(preferred) or org.postal_code or _PERIODIC_FACTORY_POSTAL
             return org.model_copy(
                 update={
                     "address": preferred,
@@ -237,25 +263,25 @@ def finalize_organization_address(
             )
     if not raw_addr:
         if source_text and (
-            "калужск" in name_low
+            ("кабельн" in name_low and "завод" in name_low)
             or re.search(r"KaayxKckni\s+KaGeAbHbIN", source_text[:2500], re.I)
         ):
-            fixed = extract_kaluga_factory_address(source_text)
+            fixed = extract_periodic_factory_address(source_text)
             if fixed:
                 return org.model_copy(
                     update={
                         "address": fixed,
                         "legal_address": fixed,
                         "actual_address": fixed,
-                        "postal_code": _KALUGA_POSTAL,
+                        "postal_code": _PERIODIC_FACTORY_POSTAL,
                     }
                 )
         return org
 
-    if _KALUGA_LATIN_ADDRESS.search(raw_addr) or (
-        "калужск" in name_low and re.search(r"[A-Za-z]{4,}", raw_addr)
+    if _PERIODIC_FACTORY_LATIN_ADDRESS.search(raw_addr) or (
+        ("кабельн" in name_low and "завод" in name_low) and re.search(r"[A-Za-z]{4,}", raw_addr)
     ):
-        fixed = extract_kaluga_factory_address(source_text or raw_addr) or normalize_address_text(
+        fixed = extract_periodic_factory_address(source_text or raw_addr) or normalize_address_text(
             raw_addr
         )
     else:
@@ -362,6 +388,33 @@ def extract_customer_addresses(text: str) -> tuple[str | None, str | None]:
     return legal, actual
 
 
+def is_act_document(text: str) -> bool:
+    """Акт отбора образцов (заявитель в отдельном блоке)."""
+    if not text or not text.strip():
+        return False
+    return bool(re.search(r"АКТ\s+отбора\s+образц", text, re.I))
+
+
+def extract_applicant_details(text: str) -> tuple[str | None, str | None]:
+    """Заявитель из блока «Наименование и адрес заявителя» (акт отбора)."""
+    pattern = re.compile(
+        r"Наименование\s+и\s+адрес\s+заявителя\s*:\s*(.+?)\n"
+        r"([\d\D]+?)(?=Мес\s*то\s+отбора|Место\s+отбора|№\s+Наименование|$)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None, None
+
+    name_raw = match.group(1).strip().strip('"«»')
+    name = _clean_org_name(_fix_ocr_name(name_raw))
+    if len(normalize_org_name(name)) < 4:
+        return None, None
+
+    addr = sanitize_address(match.group(2).strip())
+    return name, addr
+
+
 def extract_manufacturer_details(text: str) -> tuple[str | None, str | None]:
     """Изготовитель и его адрес из блока «Изготовитель:»."""
     pattern = re.compile(
@@ -432,12 +485,12 @@ def _clean_org_name(raw: str) -> str:
 def _fix_ocr_name(name: str) -> str:
     """Поправки типичных OCR-ошибок в названии завода."""
     fixes = (
-        (r"КААУЖСК", "Калужск"),
+        (r"КААУЖСК", "Кабельн"),
         (r"кабеАьн", "кабельн"),
         (r"кабеаьн", "кабельн"),
         (r"ХАВOА", "завод"),
         (r"ХАВОА", "завод"),
-        (r"Ка\^ужск", "Калужск"),
+        (r"Ка\^ужск", "Кабельн"),
         (r"заводл", "завод"),
     )
     for pattern, repl in fixes:
@@ -453,6 +506,132 @@ def _infer_org_type(text: str, name: str) -> OrgType:
     if re.search(r"кабельн\w+|завод", name, re.I):
         return "manufacturer"
     return "unknown"
+
+
+def _infer_header_org_type(text: str, name: str) -> OrgType:
+    """Тип организации из шапки: орган по сертификации не путаем с ИЛ в теле направления."""
+    head = text[:1500]
+    if re.search(r"орган\w*\s+по\s+сертификац", head, re.I):
+        return "certification_body"
+    return _infer_org_type(text, name)
+
+
+def is_direction_document(text: str) -> bool:
+    """Направление в аккредитованную испытательную лабораторию."""
+    if not text or not text.strip():
+        return False
+    return bool(
+        re.search(r"НАПРАВЛЕНИЕ", text, re.I)
+        and re.search(r"испытательн", text, re.I)
+    )
+
+
+_NON_CUSTOMER_ORG_TYPES = frozenset({"certification_body", "testing_center"})
+
+
+def _is_non_customer_org(org: OrganizationExtract) -> bool:
+    """Орган сертификации и ИЛ не могут быть заказчиком испытаний."""
+    if org.org_type in _NON_CUSTOMER_ORG_TYPES:
+        return True
+    name = org.name or ""
+    if re.search(r"орган\w*\s+по\s+сертификац", name, re.I):
+        return True
+    if re.search(r"испытательн\w+\s+(?:центр|лаборатор)", name, re.I):
+        return True
+    if re.search(r"кабель[\s\-–]*тест", name, re.I):
+        return True
+    return False
+
+
+def extract_testing_center_from_direction(text: str) -> OrganizationExtract | None:
+    """Испытательный центр из блока «Наименование и адрес испытательной лаборатории»."""
+    match = re.search(
+        r"Испытательный\s+центр\s+(.+?)"
+        r"(?:,\s*аттестат|аттестат\s+аккредитации|адрес\s*:|$)",
+        text[:6000],
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+
+    chunk = match.group(1).strip()
+    name: str | None = None
+    nic = re.search(r'НИЦ\s*[«""]([^»"]+)[»""]', chunk, re.I)
+    if nic:
+        name = f'ООО НИЦ «{nic.group(1).strip()}»'
+    else:
+        ooo = re.search(r'ООО\s+[«""]([^»"]+)[»""]', chunk, re.I)
+        if ooo:
+            name = f'ООО «{ooo.group(1).strip()}»'
+        else:
+            short = re.sub(r"\s+", " ", chunk.split(",")[0]).strip()[:120]
+            name = _clean_org_name(short) if short else None
+
+    if not name or len(normalize_org_name(name)) < 4:
+        return None
+
+    tail = text[match.start() : match.start() + 900]
+    addr = None
+    addr_m = re.search(r"адрес\s*:\s*([^.\n]+)", tail, re.I)
+    if addr_m:
+        addr = sanitize_address(addr_m.group(1))
+
+    fsa_m = _FSA_PATTERN.search(tail)
+    return OrganizationExtract(
+        name=name,
+        address=addr,
+        legal_address=addr,
+        actual_address=addr,
+        postal_code=_postal_from_address(addr),
+        org_type="testing_center",
+        role="unknown",
+        is_accredited=bool(fsa_m),
+        fsa_registry_number=fsa_m.group(0).upper().replace("  ", " ") if fsa_m else None,
+        confidence=0.8,
+    )
+
+
+def assign_organization_roles(
+    organizations: list[OrganizationExtract],
+    text: str,
+) -> list[OrganizationExtract]:
+    """Расставляет роли с учётом типа документа (направление в ИЛ и т.д.)."""
+    if not organizations:
+        return organizations
+
+    result = [org.model_copy(deep=True) for org in organizations]
+
+    for org in result:
+        if org.role == "customer" and _is_non_customer_org(org):
+            org.role = "unknown"
+            if re.search(r"сертификац", org.name or "", re.I):
+                org.org_type = "certification_body"
+            elif org.org_type != "certification_body":
+                org.org_type = "testing_center"
+
+    if not is_direction_document(text):
+        return result
+
+    manufacturer = next(
+        (o for o in result if o.role == "manufacturer"),
+        next((o for o in result if o.org_type == "manufacturer"), None),
+    )
+    if not manufacturer:
+        return result
+
+    has_customer = any(
+        o.role == "customer" and o.name and not _is_non_customer_org(o) for o in result
+    )
+    if not has_customer:
+        customer = manufacturer.model_copy(deep=True)
+        customer.role = "customer"
+        mfg_key = normalize_org_name(manufacturer.name)
+        if not any(
+            normalize_org_name(o.name) == mfg_key and o.role == "customer" for o in result
+        ):
+            result.append(customer)
+
+    return result
 
 
 def _extract_name(text: str) -> str | None:
@@ -524,7 +703,7 @@ def _build_org_from_header(text: str) -> OrganizationExtract | None:
         re.search(r"аккредитован\w*", text[:4000], re.IGNORECASE)
     )
 
-    org_type = _infer_org_type(text, name)
+    org_type = _infer_header_org_type(text, name)
     if org_type == "unknown" and re.search(r"завод|кабель", name, re.I):
         org_type = "manufacturer"
 
@@ -554,23 +733,23 @@ def _build_org_from_header(text: str) -> OrganizationExtract | None:
     )
 
 
-def extract_kaluga_factory_address(text: str) -> str | None:
-    """Адрес ООО «Калужский кабельный завод» из шапки письма (OCR)."""
-    if not re.search(r"KaayxKckni\s+KaGeAbHbIN|Калужск\w+\s+кабельн", text[:2500], re.I):
+def extract_periodic_factory_address(text: str) -> str | None:
+    """Адрес ООО «Кабельный завод» из шапки письма (OCR)."""
+    if not re.search(r"KaayxKckni\s+KaGeAbHbIN|кабельн\w*\s+завод", text[:2500], re.I):
         return None
-    block = _KALUGA_ADDRESS_BLOCK.search(text[:2500])
+    block = _PERIODIC_FACTORY_ADDRESS_BLOCK.search(text[:2500])
     if block:
-        raw = f"{_KALUGA_POSTAL}, {block.group(1)}"
+        raw = f"{_PERIODIC_FACTORY_POSTAL}, {block.group(1)}"
         cleaned = sanitize_address(raw)
         if cleaned and not _looks_like_cable_marks(cleaned):
             return cleaned
-    postal = re.search(rf"\b{_KALUGA_POSTAL}\b", text[:2500])
+    postal = re.search(rf"\b{_PERIODIC_FACTORY_POSTAL}\b", text[:2500])
     if postal:
         chunk = text[postal.start() : postal.start() + 180]
         cleaned = sanitize_address(chunk)
         if cleaned and not _looks_like_cable_marks(cleaned):
             return cleaned
-    return _KALUGA_CANONICAL_ADDRESS
+    return _PERIODIC_FACTORY_CANONICAL_ADDRESS
 
 
 def extract_organizations(text: str) -> list[OrganizationExtract]:
@@ -611,9 +790,34 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
             labeled.role = role
             add(labeled, role)
 
+    is_direction = is_direction_document(text)
+    is_act = is_act_document(text)
+
     header_org = _build_org_from_header(text)
     if header_org:
-        add(header_org, "customer")
+        if (is_direction or is_act) and header_org.org_type == "certification_body":
+            header_org.role = "unknown"
+            add(header_org, "unknown")
+        elif is_direction and _is_non_customer_org(header_org):
+            header_org.role = "unknown"
+            add(header_org, "unknown")
+        else:
+            add(header_org, "customer")
+
+    if is_act:
+        app_name, app_addr = extract_applicant_details(text)
+        if app_name:
+            applicant = OrganizationExtract(
+                name=app_name,
+                address=app_addr,
+                legal_address=app_addr,
+                actual_address=app_addr,
+                postal_code=_postal_from_address(app_addr),
+                org_type="manufacturer",
+                role="customer",
+                confidence=0.85 if app_addr else 0.75,
+            )
+            add(applicant, "customer")
 
     mfg_name, mfg_addr = extract_manufacturer_details(text)
     if mfg_name:
@@ -657,16 +861,25 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
             seen.add(normalize_org_name(manufacturer.name))
             found.append(manufacturer)
 
+    if is_direction:
+        testing_center = extract_testing_center_from_direction(text)
+        if testing_center:
+            add(testing_center, "unknown")
+
     found = finalize_organizations(found, text)
+    found = assign_organization_roles(found, text)
     return enhance_organizations(text, found)
 
 
 def pick_customer_name(organizations: list[OrganizationExtract]) -> str:
     for org in organizations:
-        if org.role == "customer" and org.name:
+        if org.role == "customer" and org.name and not _is_non_customer_org(org):
             return org.name
     for org in organizations:
-        if org.role in ("manufacturer", "unknown") and org.name:
+        if org.role == "manufacturer" and org.name:
+            return org.name
+    for org in organizations:
+        if org.role == "unknown" and org.name and not _is_non_customer_org(org):
             return org.name
     return ""
 
@@ -678,4 +891,7 @@ def pick_manufacturer_name(organizations: list[OrganizationExtract]) -> str:
     for org in organizations:
         if org.org_type == "manufacturer" and org.name:
             return org.name
-    return pick_customer_name(organizations)
+    for org in organizations:
+        if org.role == "customer" and org.name and not _is_non_customer_org(org):
+            return org.name
+    return ""

@@ -25,7 +25,7 @@ def gui_app(tmp_path):
 def test_gui_starts_and_has_notebook(gui_app: RequestProcessorApp) -> None:
     assert gui_app.notebook is not None
     tabs = gui_app.notebook.tabs()
-    assert len(tabs) == 9
+    assert len(tabs) == 10
 
 
 def test_gui_tab_titles(gui_app: RequestProcessorApp) -> None:
@@ -34,6 +34,7 @@ def test_gui_tab_titles(gui_app: RequestProcessorApp) -> None:
     assert "2. Расчёт" in titles
     assert "3. КП" in titles
     assert "4. Заказы" in titles
+    assert "5. Сравнение" in titles
 
 
 def test_gui_extraction_state_initial(gui_app: RequestProcessorApp) -> None:
@@ -42,11 +43,61 @@ def test_gui_extraction_state_initial(gui_app: RequestProcessorApp) -> None:
     assert gui_app.ocr_var.get() is True
 
 
+def test_validation_warnings_compact_not_expanded(gui_app: RequestProcessorApp) -> None:
+    """Жёлтая полоса предупреждений не раздувается: свёрнута + summary."""
+    from request_processor.models import FieldStatus, MarkValidation, ValidationReport
+
+    report = ValidationReport(
+        overall_confidence=0.5,
+        document_type="letter",
+        customer_name="Тест",
+        manufacturer_name="",
+        recipient_name="",
+        flags=["Нет производителя", "Слабый OCR на стр. 1", "Проверьте ИНН"],
+        marks=[
+            MarkValidation(
+                mark="ВВГ 3х1,5",
+                confidence=0.4,
+                status=FieldStatus.warning,
+                warnings=["неполное обозначение"],
+                accepted=True,
+            )
+        ],
+        block_confirm=False,
+        organizations=[],
+    )
+    gui_app._update_validation_warnings(report)
+    assert gui_app._warn_expanded is False
+    assert gui_app.validation_warn_frame.winfo_manager() == "pack"
+    assert "предупр" in gui_app.validation_warn_summary_var.get().lower()
+    # ScrolledText.pack управляет внешним .frame — смотрим pack_slaves родителя
+    detail_frame = getattr(gui_app.validation_warn_detail, "frame", gui_app.validation_warn_detail)
+    assert detail_frame not in gui_app.validation_warn_frame.pack_slaves()
+    gui_app._toggle_validation_warnings()
+    assert gui_app._warn_expanded is True
+    assert detail_frame in gui_app.validation_warn_frame.pack_slaves()
+    # mid-pane всё ещё в pack (основное окно марок не «съедено»)
+    assert gui_app._pdf_mid_pane.winfo_manager() == "pack"
+
+
 def test_gui_mappings_table_on_settings(gui_app: RequestProcessorApp) -> None:
     assert hasattr(gui_app, "mappings_tree")
     gui_app._load_mappings_table()
     children = gui_app.mappings_tree.get_children()
     assert len(children) >= 6
+
+
+def test_settings_tab_is_scrollable(gui_app: RequestProcessorApp) -> None:
+    """Вкладка «Настройки» — Canvas+scroll; LLM/путь не выталкиваются за край."""
+    assert hasattr(gui_app, "_settings_canvas")
+    assert hasattr(gui_app, "_settings_scroll_inner")
+    assert gui_app._settings_canvas.winfo_exists()
+    # Ключевые контролы существуют (видны через прокрутку)
+    assert hasattr(gui_app, "llm_enabled_var")
+    assert hasattr(gui_app, "pack_base_dir_var")
+    assert hasattr(gui_app, "mappings_tree")
+    # Таблица маппинга — фиксированная высота, не expand на всю вкладку
+    assert int(gui_app.mappings_tree.cget("height")) <= 10
 
 
 def test_use_mark_in_calc_from_draft(gui_app: RequestProcessorApp, tmp_path) -> None:
@@ -91,7 +142,8 @@ def test_use_mark_in_calc_from_draft(gui_app: RequestProcessorApp, tmp_path) -> 
     )
 
 
-def test_draft_mark_double_click_transfers_to_calc(gui_app: RequestProcessorApp, tmp_path) -> None:
+def test_draft_mark_double_click_opens_editor(gui_app: RequestProcessorApp, tmp_path) -> None:
+    """Двойной клик открывает редактор (не сразу в расчёт)."""
     from pathlib import Path
     from unittest.mock import MagicMock
 
@@ -130,7 +182,52 @@ def test_draft_mark_double_click_transfers_to_calc(gui_app: RequestProcessorApp,
     event.x = 10
     event.y = 10
     gui_app.marks_tree.identify_region = MagicMock(return_value="cell")
+    gui_app.marks_tree.identify_row = MagicMock(return_value="0")
+    opened: list[str] = []
+    gui_app._open_mark_editor = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda *a, **k: opened.append(k.get("save_label") or "ok")
+    )
     gui_app._on_draft_mark_double_click(event)
+    assert gui_app._open_mark_editor.called
+    assert opened and "Сохранить" in opened[0]
+
+
+def test_use_mark_in_calc_from_button(gui_app: RequestProcessorApp, tmp_path) -> None:
+    """Кнопка «→ В расчёт» подставляет марку в поле расчёта."""
+    from pathlib import Path
+
+    from request_processor.models import FieldStatus, MarkValidation, PdfExtractionResult
+    from request_processor.ui.gui import ExtractionDraft
+    from request_processor.validation.extraction_validator import validate_extraction
+
+    mark = MarkValidation(
+        mark="АПуВ 1х6",
+        confidence=0.9,
+        status=FieldStatus.ok,
+        accepted=True,
+    )
+    result = PdfExtractionResult(
+        source_path="t.pdf",
+        source_type="pdf",
+        page_count=1,
+        text="test",
+        cable_marks=[],
+    )
+    report = validate_extraction(result)
+    json_path = tmp_path / "t.json"
+    json_path.write_text("{}", encoding="utf-8")
+    gui_app._extraction_draft = ExtractionDraft(
+        result=result,
+        report=report,
+        source_path=Path("t.pdf"),
+        json_path=json_path,
+        marks=[mark],
+        original_marks=[mark.model_copy(deep=True)],
+    )
+    gui_app._extraction_confirmed = True
+    gui_app._refresh_marks_tree()
+    gui_app.marks_tree.selection_set("0")
+    gui_app._use_mark_in_calc()
     assert gui_app.mark_var.get() == "АПуВ 1х6"
 
 

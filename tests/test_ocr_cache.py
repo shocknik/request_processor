@@ -88,6 +88,8 @@ def test_clear_ocr_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_easyocr_reader_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    import numpy as np
+
     import request_processor.extraction.pdf_extractor as pe
 
     pe._EASYOCR_READER = None
@@ -95,17 +97,19 @@ def test_easyocr_reader_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class FakeReader:
         def readtext(self, *_args, **_kwargs):
-            return ["line"]
+            # detail=1 format: (bbox, text, conf)
+            return [([(0, 0), (10, 0), (10, 10), (0, 10)], "FLEXICORE 100", 0.9)]
 
     def fake_reader_ctor(*_args, **_kwargs):
         created["count"] += 1
         return FakeReader()
 
     monkeypatch.setattr("easyocr.Reader", fake_reader_ctor)
+    rgb = np.zeros((100, 200, 3), dtype=np.uint8)
     monkeypatch.setattr(pe, "_render_pages", lambda *_a, **_k: [object()])
+    monkeypatch.setattr(pe, "_easyocr_prepare_image", lambda _img: rgb)
 
-    with patch("numpy.array", side_effect=lambda x: x):
-        pe._ocr_with_easyocr(Path("dummy.pdf"))
-        pe._ocr_with_easyocr(Path("dummy2.pdf"))
+    pe._ocr_with_easyocr(Path("dummy.pdf"))
+    pe._ocr_with_easyocr(Path("dummy2.pdf"))
 
     assert created["count"] == 1

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from request_processor.extraction.direction_table_extractor import (
@@ -14,16 +11,12 @@ from request_processor.extraction.direction_table_extractor import (
 )
 from request_processor.models import PdfExtractionResult
 from request_processor.extraction.pdf_extractor import _resolve_cable_marks
-
-FIXTURE = Path(__file__).resolve().parents[1] / "data" / "extracted" / (
-    "27_1-2-2026 Направление в ИЛ 10094807 Кабель-Тест.json"
-)
+from tests.fixture_loader import load_extraction_fixture
 
 
 @pytest.fixture
 def direction_fixture() -> PdfExtractionResult:
-    data = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    return PdfExtractionResult.model_validate(data)
+    return load_extraction_fixture("direction_sample.json")
 
 
 def test_is_direction_table(direction_fixture: PdfExtractionResult) -> None:

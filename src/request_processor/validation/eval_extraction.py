@@ -64,11 +64,17 @@ def _resolve_doc_path(payload: dict[str, Any], label_path: Path) -> Path | None:
     return None
 
 
-def _predicted_marks(doc_path: Path, *, use_ocr_cache: bool = True) -> list[str]:
+def _predicted_marks(
+    doc_path: Path,
+    *,
+    use_ocr_cache: bool = True,
+    ocr_engine: str = "auto",
+) -> list[str]:
     extraction = extract_from_document(
         doc_path,
         use_ocr=True,
         use_ocr_cache=use_ocr_cache,
+        ocr_engine=ocr_engine,
     )
     if extraction.tables:
         from ..extraction.pdf_extractor import _resolve_cable_marks
@@ -83,6 +89,7 @@ def eval_single_label_file(
     label_path: Path,
     *,
     use_ocr_cache: bool = True,
+    ocr_engine: str = "auto",
     db_path: str | Path = "data/app.db",
 ) -> dict[str, Any] | None:
     payload = json.loads(label_path.read_text(encoding="utf-8"))
@@ -100,7 +107,9 @@ def eval_single_label_file(
         }
 
     doc_row = get_training_document_by_path(doc_path, db_path=db_path)
-    predicted = _predicted_marks(doc_path, use_ocr_cache=use_ocr_cache)
+    predicted = _predicted_marks(
+        doc_path, use_ocr_cache=use_ocr_cache, ocr_engine=ocr_engine
+    )
     expected_norm = {normalize_mark_for_eval(m) for m in expected}
     predicted_norm = {normalize_mark_for_eval(m) for m in predicted}
     matched = expected_norm & predicted_norm
@@ -116,6 +125,7 @@ def eval_single_label_file(
         if doc_path.is_relative_to(PROJECT_ROOT.resolve())
         else doc_path.as_posix(),
         "status": "ok",
+        "ocr_engine": ocr_engine,
         "expected": sorted(expected),
         "predicted": sorted(predicted),
         "matched": len(matched),
@@ -130,6 +140,7 @@ def eval_marks_labels_dir(
     labels_dir: Path | str | None = None,
     *,
     use_ocr_cache: bool = True,
+    ocr_engine: str = "auto",
     db_path: str | Path = "data/app.db",
 ) -> dict[str, Any]:
     root = Path(labels_dir or TRAINING_LABELS_MARKS_DIR)
@@ -139,7 +150,12 @@ def eval_marks_labels_dir(
     per_file: list[dict[str, Any]] = []
     skipped = 0
     for path in files:
-        row = eval_single_label_file(path, use_ocr_cache=use_ocr_cache, db_path=db_path)
+        row = eval_single_label_file(
+            path,
+            use_ocr_cache=use_ocr_cache,
+            ocr_engine=ocr_engine,
+            db_path=db_path,
+        )
         if row is None:
             skipped += 1
             continue
@@ -157,6 +173,7 @@ def eval_marks_labels_dir(
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "labels_dir": str(root),
+        "ocr_engine": ocr_engine,
         "files_total": len(files),
         "files_evaluated": len(evaluated),
         "files_skipped": skipped,

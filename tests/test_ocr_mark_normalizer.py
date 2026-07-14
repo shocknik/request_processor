@@ -23,7 +23,7 @@ def test_mostly_latin_brand_gets_cyrillic() -> None:
     assert normalize_mark_after_ocr("KCBur(A)-LS") == "КСБнг(А)-LS"
 
 
-def test_kaluga_brands_normalized() -> None:
+def test_periodic_brands_normalized() -> None:
     result = normalize_mark_after_ocr("BBI-MHr(A) 3x40K(N,PE)-0,66")
     assert result.startswith("ВВГнг(А)")
     assert "3х4ок" in result

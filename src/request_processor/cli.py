@@ -25,6 +25,7 @@ import click
 from openpyxl import load_workbook
 
 from request_processor.models import TestItemCreate
+from request_processor.logging_setup import get_logger, setup_logging
 
 from .models import ClimaticTestSettings
 
@@ -73,10 +74,19 @@ def _slugify(text: str) -> str:
 
 @click.group()
 @click.version_option(version=__version__)
+@click.option(
+    "--log-level",
+    default="INFO",
+    show_default=True,
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    help="Уровень логов в консоли (в файл всегда DEBUG)",
+)
 @click.pass_context
-def cli(ctx: click.Context) -> None:
+def cli(ctx: click.Context, log_level: str) -> None:
     """request_processor — расчёт заявок на испытания кабельной продукции."""
+    setup_logging(level=log_level)
     ctx.ensure_object(dict)
+    ctx.obj["log"] = get_logger("cli")
 
 
 @cli.command("init-db")
@@ -115,6 +125,11 @@ def load_data_cmd(price: str, db: str) -> None:
 @click.option("--tests", required=True, help="Коды испытаний через запятую")
 @click.option("--hour", "hours_list", multiple=True, help="Часы в формате ключ=значение, можно указывать несколько раз. Пример: --hour temp_low=48")
 @click.option("--hours", default="{}", help='JSON-строка (устаревший способ). Лучше используй --hour')
+@click.option("--qty", "qty_list", multiple=True, help="Количество испытаний: код=число. Пример: --qty испытание_напряжением=3")
+@click.option("--discount", default=0.0, type=float, show_default=True, help="Скидка, %")
+@click.option("--markup", default=0.0, type=float, show_default=True, help="Наценка, %")
+@click.option("--armor/--no-armor", default=None, help="Бронированный кабель (влияет на сложность образца)")
+@click.option("--no-minimum", is_flag=True, help="Не применять минимальный заказ (базовая стоимость)")
 @click.option("--output", default="out", show_default=True, type=click.Path(), help="Папка для результатов")
 @click.option("--save-to-db", is_flag=True, default=True, help="Сохранить расчёт в БД")
 @click.option("--db", default="data/app.db", show_default=True)
@@ -125,6 +140,11 @@ def calculate_cmd(
     tests: str,
     hours_list: tuple[str, ...],
     hours: str,
+    qty_list: tuple[str, ...],
+    discount: float,
+    markup: float,
+    armor: bool | None,
+    no_minimum: bool,
     output: str,
     save_to_db: bool,
     db: str,
@@ -152,9 +172,27 @@ def calculate_cmd(
                 click.echo(click.style("⚠ Не удалось распарсить --hours как JSON. Используйте --hour key=value", fg="yellow"))
 
     test_list = [t.strip() for t in tests.split(",") if t.strip()]
+    quantities: dict[str, int] = {}
+    for item in qty_list:
+        if "=" in item:
+            key, value = item.split("=", 1)
+            try:
+                quantities[key.strip()] = max(1, int(value.strip()))
+            except ValueError:
+                click.echo(click.style(f"⚠ Не удалось распарсить --qty {item}", fg="yellow"))
 
     try:
-        calc = calculate_cost(mark, test_list, hours_dict, db)
+        calc = calculate_cost(
+            mark,
+            test_list,
+            hours_dict,
+            db,
+            quantities=quantities or None,
+            discount_percent=discount,
+            markup_percent=markup,
+            has_armor=armor,
+            apply_minimum=not no_minimum,
+        )
         print_breakdown(calc)
 
         if save_to_db:
@@ -182,6 +220,13 @@ def calculate_cmd(
 @click.option("--full-text", is_flag=True, help="Вывести полный извлечённый текст")
 @click.option("--no-ocr", is_flag=True, help="Не запускать OCR для сканов")
 @click.option("--ocr-dpi", default=200, show_default=True, type=int, help="DPI для OCR сканов")
+@click.option(
+    "--ocr-engine",
+    type=click.Choice(["auto", "tesseract", "easyocr"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="OCR: auto | tesseract | easyocr (PyTorch CV, A/B spike 35v)",
+)
 @click.option("--no-ocr-cache", is_flag=True, help="Не читать/писать кэш OCR (data/ocr_cache/)")
 @click.option("--no-save-marks", is_flag=True, help="Не сохранять марки в БД")
 @click.option("--no-save-orgs", is_flag=True, help="Не сохранять организации в БД")
@@ -203,6 +248,7 @@ def extract_pdf_cmd(
     full_text: bool,
     no_ocr: bool,
     ocr_dpi: int,
+    ocr_engine: str,
     no_ocr_cache: bool,
     no_save_marks: bool,
     no_save_orgs: bool,
@@ -219,6 +265,7 @@ def extract_pdf_cmd(
             use_ocr=not no_ocr,
             ocr_dpi=ocr_dpi,
             use_ocr_cache=not no_ocr_cache,
+            ocr_engine=ocr_engine,
         )
     except Exception as e:
         click.echo(click.style(f"Ошибка извлечения: {e}", fg="red"), err=True)
@@ -244,10 +291,9 @@ def extract_pdf_cmd(
 
     if result.is_scanned:
         if result.ocr_used:
-            from .extraction.pdf_extractor import resolve_ocr_engine
-
-            engine = resolve_ocr_engine()
-            click.echo(click.style(f"Скан распознан через OCR ({engine}).", fg="cyan"))
+            eng = result.ocr_engine or ocr_engine
+            label = "easyocr (PyTorch CV)" if eng == "easyocr" else eng
+            click.echo(click.style(f"Скан распознан через OCR ({label}).", fg="cyan"))
         elif no_ocr:
             click.echo(
                 click.style(
@@ -885,7 +931,7 @@ def list_orders_cmd(limit: int, db: str) -> None:
 @cli.command("ingest-training-doc")
 @click.option("--file", "file_path", required=True, type=click.Path(exists=True))
 @click.option("--type", "document_type", default=None, help="letter_periodic, direction_il, …")
-@click.option("--family", "document_family", default=None, help="kaluga_periodic_v1, speclan_letter_v1, …")
+@click.option("--family", "document_family", default=None, help="periodic_letter_v1, lan_letter_v1, …")
 @click.option("--keep-in-place", is_flag=True, help="Не переносить из inbox в registered/")
 @click.option("--skip-extract", is_flag=True, help="Только регистрация в БД, без extract_from_document")
 @click.option("--db", default="data/app.db", show_default=True)
@@ -979,11 +1025,19 @@ def import_label_cmd(
     help="JSON-отчёт (по умолчанию data/training/exports/reports/eval_marks_<дата>.json)",
 )
 @click.option("--no-ocr-cache", is_flag=True, help="Свежий OCR при сравнении")
+@click.option(
+    "--ocr-engine",
+    type=click.Choice(["auto", "tesseract", "easyocr"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="OCR engine для A/B: auto | tesseract | easyocr (PyTorch CV)",
+)
 @click.option("--db", default="data/app.db", show_default=True)
 def eval_extraction_cmd(
     labels_dir: str,
     output_path: Optional[str],
     no_ocr_cache: bool,
+    ocr_engine: str,
     db: str,
 ) -> None:
     """Сравнивает извлечённые марки с эталонами в labels/marks/."""
@@ -996,12 +1050,14 @@ def eval_extraction_cmd(
     report = eval_marks_labels_dir(
         Path(labels_dir),
         use_ocr_cache=not no_ocr_cache,
+        ocr_engine=ocr_engine,
         db_path=db,
     )
     out = (
         Path(output_path)
         if output_path
-        else TRAINING_EXPORTS_REPORTS_DIR / f"eval_marks_{date.today().isoformat()}.json"
+        else TRAINING_EXPORTS_REPORTS_DIR
+        / f"eval_marks_{date.today().isoformat()}_{ocr_engine}.json"
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1181,9 +1237,182 @@ def list_rag_cmd(doc_kind: Optional[str], limit: int, db: str) -> None:
         )
 
 
+@cli.command("list-parse-snapshots")
+@click.option("--limit", default=50, show_default=True, type=int)
+def list_parse_snapshots_cmd(limit: int) -> None:
+    """Список сохранённых снимков парсинга (data/parse_snapshots/)."""
+    from .parse_compare import list_snapshots
+
+    rows = list_snapshots(limit=limit)
+    if not rows:
+        click.echo("Снимков нет. Сохраните из GUI (вкладка «Сравнение») или save-parse-snapshot.")
+        return
+    for row in rows:
+        click.echo(
+            f"{row['id']}  marks={row['marks_count']:>2}  q={row['quality_score']:.2f}  "
+            f"{(row.get('ocr_engine') or '—'):10}  {(row.get('label') or '')[:50]}"
+        )
+
+
+@cli.command("compare-parse-snapshots")
+@click.argument("snapshot_a")
+@click.argument("snapshot_b")
+@click.option("--output", "output_path", default=None, type=click.Path(), help="JSON отчёт сравнения")
+def compare_parse_snapshots_cmd(snapshot_a: str, snapshot_b: str, output_path: Optional[str]) -> None:
+    """Сравнивает два снимка парсинга по id или пути к JSON."""
+    from .parse_compare import compare_snapshots, load_snapshot
+
+    a = load_snapshot(snapshot_a)
+    b = load_snapshot(snapshot_b)
+    report = compare_snapshots(a, b)
+    if output_path:
+        Path(output_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        click.echo(f"Отчёт: {output_path}")
+    marks = report["marks"]
+    click.echo(f"A: {a.label} ({a.ocr_engine})  marks={marks['count_a']}")
+    click.echo(f"B: {b.label} ({b.ocr_engine})  marks={marks['count_b']}")
+    click.echo(f"Пересечение: {marks['intersection']}  Jaccard: {marks['jaccard']:.2%}")
+    click.echo(f"Только A: {len(marks['only_a'])}  Только B: {len(marks['only_b'])}")
+    click.echo(f"Quality A/B: {report['quality']['a']} / {report['quality']['b']}  winner={report['quality']['winner']}")
+    if marks["only_a"]:
+        click.echo("only A (norm): " + ", ".join(marks["only_a"][:12]))
+    if marks["only_b"]:
+        click.echo("only B (norm): " + ", ".join(marks["only_b"][:12]))
+
+
+@cli.command("save-parse-snapshot")
+@click.option("--json", "json_path", required=True, type=click.Path(exists=True), help="JSON PdfExtractionResult")
+@click.option("--label", default="", help="Подпись снимка")
+@click.option("--notes", default="", help="Заметка")
+@click.option("--dpi", default=None, type=int)
+def save_parse_snapshot_cmd(json_path: str, label: str, notes: str, dpi: Optional[int]) -> None:
+    """Сохраняет снимок парсинга из JSON извлечения."""
+    from .models import PdfExtractionResult
+    from .parse_compare import save_snapshot_from_extraction
+
+    data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    result = PdfExtractionResult.model_validate(data)
+    snap = save_snapshot_from_extraction(result, label=label, notes=notes, ocr_dpi=dpi)
+    click.echo(click.style(f"✓ Снимок {snap.id}", fg="green"))
+    click.echo(f"  marks={snap.metrics.marks_count}  quality={snap.metrics.quality_score}  engine={snap.ocr_engine}")
+
+
+@cli.command("export-battle-experience")
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    type=click.Path(),
+    help="Путь к .zip (по умолчанию data/training/exports/battle_<host>_<дата>.zip)",
+)
+@click.option("--db", default="data/app.db", show_default=True)
+@click.option("--full", is_flag=True, help="Весь архив, не только дельта с прошлого экспорта")
+@click.option("--note", default="", help="Комментарий оператора в manifest")
+def export_battle_experience_cmd(
+    output: Optional[str],
+    db: str,
+    full: bool,
+    note: str,
+) -> None:
+    """Экспорт боевого опыта (правки, снимки, ассистент) для машины разработки."""
+    from datetime import datetime
+
+    from .training.battle_experience import export_battle_experience, get_battle_host_id
+
+    migrate_db(db)
+    host = get_battle_host_id(db)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    out = (
+        Path(output)
+        if output
+        else Path("data/training/exports") / f"battle_{host}_{stamp}.zip"
+    )
+    result = export_battle_experience(
+        out,
+        db_path=db,
+        delta_only=not full,
+        operator_note=note,
+    )
+    m = result["manifest"]
+    click.echo(click.style(f"✓ Пакет: {result['path']}", fg="green"))
+    click.echo(f"  host: {m.get('host_id')}  delta: {m.get('delta_only')}")
+    for k, v in (m.get("counts") or {}).items():
+        click.echo(f"  {k}: {v}")
+
+
+@cli.command("import-battle-experience")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False))
+@click.option("--db", default="data/app.db", show_default=True)
+@click.option("--no-sync", is_flag=True, help="Не вызывать sync-corrections в БД")
+def import_battle_experience_cmd(archive: str, db: str, no_sync: bool) -> None:
+    """Импорт пакета боевого опыта с рабочего ПК."""
+    from .training.battle_experience import import_battle_experience
+
+    migrate_db(db)
+    result = import_battle_experience(
+        archive,
+        db_path=db,
+        sync_db=not no_sync,
+    )
+    m = result.get("manifest") or {}
+    click.echo(click.style("✓ Импорт завершён", fg="green"))
+    click.echo(f"  источник: {m.get('host_name')} ({m.get('host_id')})")
+    click.echo(f"  экспорт:  {m.get('exported_at')}")
+    for k, v in result["stats"].items():
+        click.echo(f"  {k}: {v}")
+    if result.get("sync_corrections"):
+        click.echo(f"  sync_corrections: {result['sync_corrections']}")
+
+
+@cli.command("assistant-llm-status")
+@click.option("--db", default="data/app.db", show_default=True)
+def assistant_llm_status_cmd(db: str) -> None:
+    """Проверка настроек LLM и доступности Ollama."""
+    from .assistant.llm_provider import check_ollama_health
+    from .persistence.sqlite_repo import get_assistant_llm_settings, migrate_db
+
+    migrate_db(db)
+    settings = get_assistant_llm_settings(db)
+    click.echo(f"enabled: {settings.enabled}")
+    click.echo(f"model:   {settings.model}")
+    click.echo(f"url:     {settings.base_url}")
+    click.echo(f"models:  {settings.ollama_models_dir}")
+    health = check_ollama_health(settings)
+    if health.ok:
+        click.echo(click.style(f"Ollama: {health.message}", fg="green"))
+        for name in health.models[:10]:
+            click.echo(f"  - {name}")
+    else:
+        click.echo(click.style(f"Ollama: {health.message}", fg="red"))
+
+
+@cli.command("assistant-llm-test")
+@click.argument("mark")
+@click.option("--db", default="data/app.db", show_default=True)
+@click.option("--enable/--no-enable", default=None, help="Принудительно вкл/выкл LLM для теста")
+def assistant_llm_test_cmd(mark: str, db: str, enable: bool | None) -> None:
+    """Тест подсказки ассистента для одной марки (детерминированный + LLM)."""
+    from .assistant.mark_corrector import suggest_mark_correction
+    from .persistence.sqlite_repo import get_assistant_llm_settings, migrate_db, save_assistant_llm_settings
+
+    migrate_db(db)
+    if enable is not None:
+        settings = get_assistant_llm_settings(db)
+        settings.enabled = enable
+        save_assistant_llm_settings(settings, db)
+    suggestion = suggest_mark_correction(mark, db_path=db)
+    click.echo(f"raw:        {suggestion.raw}")
+    click.echo(f"suggested:  {suggestion.suggested}")
+    click.echo(f"changed:    {suggestion.changed}")
+    click.echo(f"confidence: {suggestion.confidence:.0%}")
+    click.echo(f"source:     {suggestion.source}")
+    click.echo(f"reason:     {suggestion.reason}")
+
+
 @cli.command("gui")
 def gui_cmd() -> None:
     """Запускает графический интерфейс (tkinter)."""
+    setup_logging(level="INFO")
     from .ui.gui import main
 
     main()
