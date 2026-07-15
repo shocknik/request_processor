@@ -834,7 +834,30 @@ def _get_easyocr_reader():
 
 
 def _find_tesseract() -> str | None:
-    """Ищет tesseract.exe в PATH и типичных путях Windows."""
+    """Ищет tesseract.exe: env → PATH → portable проекта → Program Files.
+
+    На рабочем ПК путь часто отличается от машины разработчика.
+    Задайте явно (любой из вариантов):
+
+    * ``TESSERACT_CMD`` / ``TESSERACT_PATH`` — полный путь к ``tesseract.exe``
+    * положите portable: ``tools/Tesseract-OCR/tesseract.exe``
+    * добавьте папку Tesseract в системный PATH
+    """
+    import os
+
+    for env_key in ("TESSERACT_CMD", "TESSERACT_PATH"):
+        raw = (os.environ.get(env_key) or "").strip().strip('"')
+        if raw:
+            p = Path(raw)
+            if p.is_file():
+                return str(p)
+            # иногда указывают папку, а не exe
+            if p.is_dir():
+                for name in ("tesseract.exe", "tesseract"):
+                    cand = p / name
+                    if cand.is_file():
+                        return str(cand)
+
     found = shutil.which("tesseract")
     if found:
         return found
@@ -843,6 +866,9 @@ def _find_tesseract() -> str | None:
         project_root / "tools" / "Tesseract-OCR" / "tesseract.exe",
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        r"D:\Tesseract-OCR\tesseract.exe",
+        r"D:\Apps\Tesseract-OCR\tesseract.exe",
+        r"D:\Program Files\Tesseract-OCR\tesseract.exe",
     ):
         path = Path(candidate)
         if path.exists():

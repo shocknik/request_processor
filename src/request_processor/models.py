@@ -223,8 +223,11 @@ class AssistantLlmSettings(BaseModel):
         description="URL Ollama API (OLLAMA_HOST)",
     )
     ollama_models_dir: str = Field(
-        "D:/ollama/models",
-        description="Каталог моделей (OLLAMA_MODELS), предпочтительно диск D",
+        "",
+        description=(
+            "Каталог моделей Ollama (OLLAMA_MODELS). "
+            "Пусто = %USERPROFILE%\\.ollama\\models (стандарт Windows)"
+        ),
     )
     timeout_seconds: float = Field(60.0, gt=0, le=300, description="Таймаут запроса, с")
     skip_if_confidence_above: float = Field(

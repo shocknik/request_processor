@@ -49,7 +49,9 @@ EXTRACTED_DIR_DEFAULT = EXTRACTED_DIR
 ASSISTANT_LLM_ENABLED_DEFAULT = False
 ASSISTANT_LLM_BASE_URL_DEFAULT = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 ASSISTANT_LLM_MODEL_DEFAULT = os.environ.get("ASSISTANT_LLM_MODEL", "llama3.2")
-# Модели Ollama на диск D (не C:) — задаётся при запуске ollama serve
-OLLAMA_MODELS_DIR_DEFAULT = os.environ.get("OLLAMA_MODELS", "D:/ollama/models")
+# Стандартный каталог Ollama на Windows: %USERPROFILE%\.ollama\models
+# (напр. C:\Users\User\.ollama\models). Перекрывается OLLAMA_MODELS.
+_OLLAMA_MODELS_FALLBACK = str(Path.home() / ".ollama" / "models")
+OLLAMA_MODELS_DIR_DEFAULT = os.environ.get("OLLAMA_MODELS", _OLLAMA_MODELS_FALLBACK)
 ASSISTANT_LLM_TIMEOUT_DEFAULT = float(os.environ.get("ASSISTANT_LLM_TIMEOUT", "60"))
 ASSISTANT_LLM_SKIP_ABOVE_CONFIDENCE = 0.92

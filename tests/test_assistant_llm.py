@@ -132,14 +132,15 @@ def test_mark_corrector_uses_llm_when_enabled(tmp_path) -> None:
 def test_settings_persist_in_db(tmp_path) -> None:
     db = tmp_path / "s.db"
     init_db(db)
+    models_dir = r"C:\Users\User\.ollama\models"
     save_assistant_llm_settings(
-        AssistantLlmSettings(enabled=True, model="mistral", ollama_models_dir="D:/ollama/models"),
+        AssistantLlmSettings(enabled=True, model="mistral", ollama_models_dir=models_dir),
         db,
     )
     loaded = get_assistant_llm_settings(db)
     assert loaded.enabled is True
     assert loaded.model == "mistral"
-    assert loaded.ollama_models_dir.replace("\\", "/") == "D:/ollama/models"
+    assert loaded.ollama_models_dir.replace("/", "\\") == models_dir
 
 
 def test_env_overrides_enabled(monkeypatch) -> None:

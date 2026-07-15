@@ -58,7 +58,12 @@ class OllamaHealth:
 
 
 def apply_ollama_env(settings: AssistantLlmSettings) -> None:
-    """Прописывает OLLAMA_MODELS для хранения весов на диске D (и др.)."""
+    """Прописывает OLLAMA_MODELS, если в настройках задан каталог моделей.
+
+    По умолчанию Ollama уже использует %USERPROFILE%\\.ollama\\models —
+    тогда переменную можно не трогать. Задавайте каталог явно, только
+    если модели лежат в нестандартном месте.
+    """
     models_dir = (settings.ollama_models_dir or "").strip()
     if models_dir:
         path = Path(models_dir)
@@ -115,6 +120,29 @@ def default_llm_settings() -> AssistantLlmSettings:
     )
 
 
+def normalize_ollama_base_url(url: str | None) -> str:
+    """http://127.0.0.1:11434 — без схемы/слэшей, как в GUI."""
+    raw = (url or "").strip().rstrip("/")
+    if not raw:
+        return ASSISTANT_LLM_BASE_URL_DEFAULT.rstrip("/")
+    if not raw.startswith(("http://", "https://")):
+        raw = "http://" + raw
+    return raw.rstrip("/")
+
+
+def _is_local_url(url: str) -> bool:
+    low = url.lower()
+    return any(
+        host in low
+        for host in (
+            "://127.0.0.1",
+            "://localhost",
+            "://[::1]",
+            "://0.0.0.0",
+        )
+    )
+
+
 def _http_json(
     url: str,
     *,
@@ -127,33 +155,178 @@ def _http_json(
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    # Системный HTTP(S)_PROXY часто ломает запросы к localhost/127.0.0.1.
+    if _is_local_url(url):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def check_ollama_health(settings: AssistantLlmSettings) -> OllamaHealth:
+def find_ollama_executable() -> Path | None:
+    """Путь к ollama.exe / ollama, если установлен (даже когда API не поднят)."""
+    import shutil
+    import sys
+
+    which = shutil.which("ollama")
+    if which:
+        return Path(which)
+    candidates: list[Path] = []
+    local = os.environ.get("LOCALAPPDATA", "")
+    user = os.environ.get("USERPROFILE", "")
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    for base in (
+        Path(local) / "Programs" / "Ollama" if local else None,
+        Path(user) / "AppData" / "Local" / "Programs" / "Ollama" if user else None,
+        Path(program_files) / "Ollama",
+        Path(r"C:\Program Files\Ollama"),
+        Path(r"D:\Ollama"),
+        Path(r"D:\ollama"),
+    ):
+        if base is None:
+            continue
+        candidates.append(base / ("ollama.exe" if sys.platform == "win32" else "ollama"))
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def try_start_ollama_server(*, wait_seconds: float = 8.0) -> tuple[bool, str]:
+    """
+    Пытается поднять API (ollama serve), если бинарник есть, а /api/tags молчит.
+    Возвращает (started_or_already_up, message).
+    """
+    import subprocess
+    import sys
+    import time
+
+    exe = find_ollama_executable()
+    if exe is None:
+        return False, "Исполняемый файл ollama не найден в PATH и стандартных папках."
+
+    # Уже отвечает?
+    try:
+        _http_json("http://127.0.0.1:11434/api/tags", timeout=2.0)
+        return True, "Сервер уже отвечает."
+    except Exception:
+        pass
+
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
+            subprocess, "DETACHED_PROCESS", 0
+        )
+    try:
+        subprocess.Popen(  # noqa: S603
+            [str(exe), "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+            close_fds=True,
+        )
+    except OSError as exc:
+        return False, f"Не удалось запустить «{exe} serve»: {exc}"
+
+    deadline = time.time() + max(1.0, wait_seconds)
+    while time.time() < deadline:
+        try:
+            _http_json("http://127.0.0.1:11434/api/tags", timeout=1.5)
+            return True, f"Запущен через «{exe} serve»."
+        except Exception:
+            time.sleep(0.4)
+    return False, (
+        f"Запущен «{exe} serve», но API за {wait_seconds:.0f} с не ответил. "
+        "Откройте приложение Ollama из меню Пуск."
+    )
+
+
+def check_ollama_health(
+    settings: AssistantLlmSettings,
+    *,
+    try_start: bool = True,
+) -> OllamaHealth:
     """Проверка доступности Ollama и списка моделей."""
     apply_ollama_env(settings)
-    url = f"{settings.base_url.rstrip('/')}/api/tags"
-    try:
-        data = _http_json(url, timeout=min(settings.timeout_seconds, 15.0))
-        models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
-        if not models:
+    base = normalize_ollama_base_url(settings.base_url)
+    timeout = min(float(settings.timeout_seconds or 15), 15.0)
+
+    # Несколько URL: GUI/env могут отличаться; 127.0.0.1 vs localhost.
+    urls: list[str] = [f"{base}/api/tags"]
+    if "127.0.0.1" in base:
+        urls.append(base.replace("127.0.0.1", "localhost") + "/api/tags")
+    elif "localhost" in base:
+        urls.append(base.replace("localhost", "127.0.0.1") + "/api/tags")
+    # Уникальные, порядок сохраняем
+    seen: set[str] = set()
+    uniq_urls: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            uniq_urls.append(u)
+
+    last_error: str = ""
+    for url in uniq_urls:
+        try:
+            data = _http_json(url, timeout=timeout)
+            models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+            if not models:
+                return OllamaHealth(
+                    ok=True,
+                    message=(
+                        f"Ollama отвечает ({url.rsplit('/api', 1)[0]}), "
+                        f"но модели не загружены. Выполните: ollama pull {settings.model}"
+                    ),
+                    models=[],
+                )
             return OllamaHealth(
                 ok=True,
-                message="Ollama отвечает, но модели не загружены. Выполните: ollama pull "
-                + settings.model,
-                models=[],
+                message=f"Ollama OK · моделей: {len(models)}",
+                models=models,
             )
-        return OllamaHealth(ok=True, message=f"Доступно моделей: {len(models)}", models=models)
-    except urllib.error.URLError as exc:
-        return OllamaHealth(
-            ok=False,
-            message=f"Ollama недоступна ({settings.base_url}): {exc.reason}",
-            models=[],
-        )
-    except Exception as exc:  # noqa: BLE001
-        return OllamaHealth(ok=False, message=str(exc), models=[])
+        except urllib.error.URLError as exc:
+            last_error = str(exc.reason or exc)
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+
+    start_note = ""
+    if try_start and _is_local_url(base):
+        started, start_msg = try_start_ollama_server()
+        start_note = f"\n\nАвтозапуск: {start_msg}"
+        if started:
+            for url in uniq_urls:
+                try:
+                    data = _http_json(url, timeout=timeout)
+                    models = [
+                        m.get("name", "") for m in data.get("models", []) if m.get("name")
+                    ]
+                    return OllamaHealth(
+                        ok=True,
+                        message=f"Ollama OK (после автозапуска) · моделей: {len(models)}",
+                        models=models,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_error = str(exc)
+
+    exe = find_ollama_executable()
+    exe_line = f"\nБинарник: {exe}" if exe else "\nБинарник ollama: не найден (PATH / Program Files)."
+    models_dir = (settings.ollama_models_dir or "").strip()
+    dir_line = f"\nКаталог моделей: {models_dir}" if models_dir else ""
+    return OllamaHealth(
+        ok=False,
+        message=(
+            f"Ollama API недоступен ({base}).\n"
+            f"Причина: {last_error or 'нет ответа'}"
+            f"{exe_line}{dir_line}{start_note}\n\n"
+            "Что сделать:\n"
+            "1) Запустите приложение Ollama (иконка в трее) или: ollama serve\n"
+            "2) Проверьте URL (по умолчанию http://127.0.0.1:11434)\n"
+            "3) При необходимости: ollama pull " + (settings.model or "llama3.2")
+        ),
+        models=[],
+    )
 
 
 def _extract_json_blob(text: str) -> dict | None:

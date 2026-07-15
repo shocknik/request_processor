@@ -1,23 +1,41 @@
-# Установка Ollama с хранением моделей на диск D (не C:).
+# Установка / проверка Ollama. Модели по умолчанию — стандартный путь Windows.
 # Запуск: powershell -ExecutionPolicy Bypass -File scripts\install_ollama.ps1
 #
 # После установки:
 #   1) Перезапустите терминал (PATH)
 #   2) ollama pull llama3.2
-#   3) В GUI: Настройки → включить LLM → Проверить Ollama
+#   3) В GUI: Настройки → каталог моделей (если не стандартный) → включить LLM → Проверить Ollama
 
 param(
-    [string]$ModelsDir = "D:\ollama\models"
+    # Стандарт Ollama на Windows: C:\Users\<User>\.ollama\models
+    # Передайте другой путь только если модели лежат не там.
+    [string]$ModelsDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== Ollama: модели на $ModelsDir ===" -ForegroundColor Cyan
+if (-not $ModelsDir) {
+    $ModelsDir = Join-Path $env:USERPROFILE ".ollama\models"
+}
+
+Write-Host "=== Ollama: каталог моделей $ModelsDir ===" -ForegroundColor Cyan
 
 New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
-[Environment]::SetEnvironmentVariable("OLLAMA_MODELS", $ModelsDir, "User")
-$env:OLLAMA_MODELS = $ModelsDir
-Write-Host "OLLAMA_MODELS = $ModelsDir (User env)" -ForegroundColor Green
+
+# Не переопределяем OLLAMA_MODELS, если путь — стандартный ~/.ollama/models
+# (Ollama и так туда ходит). Иначе явно указываем нестандартный каталог.
+$standard = Join-Path $env:USERPROFILE ".ollama\models"
+$isStandard = (Resolve-Path $ModelsDir -ErrorAction SilentlyContinue).Path -eq `
+    (Resolve-Path $standard -ErrorAction SilentlyContinue).Path
+
+if (-not $isStandard) {
+    [Environment]::SetEnvironmentVariable("OLLAMA_MODELS", $ModelsDir, "User")
+    $env:OLLAMA_MODELS = $ModelsDir
+    Write-Host "OLLAMA_MODELS = $ModelsDir (User env, нестандартный путь)" -ForegroundColor Green
+} else {
+    Write-Host "Стандартный путь Ollama — OLLAMA_MODELS не задаём (как у установленной Ollama)." -ForegroundColor Green
+    Write-Host "  $ModelsDir"
+}
 
 $ollamaExe = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollamaExe) {
@@ -37,3 +55,8 @@ Write-Host "Дальше:" -ForegroundColor Cyan
 Write-Host "  ollama pull llama3.2"
 Write-Host "  request-processor assistant-llm-status"
 Write-Host "  request-processor assistant-llm-test `"KCBur(A)-LS 3x2,5`" --enable"
+Write-Host ""
+Write-Host "В GUI → 10. Настройки:"
+Write-Host "  Каталог моделей: $ModelsDir"
+Write-Host "  Модель: llama3.2"
+Write-Host "  URL: http://127.0.0.1:11434"

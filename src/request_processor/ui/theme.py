@@ -359,18 +359,69 @@ def make_secondary_button(parent: tk.Misc, text: str, command, **kwargs) -> tk.B
     )
 
 
-def fit_window_to_screen(root: tk.Tk, *, prefer_w: int = 1200, prefer_h: int = 860) -> None:
-    """Адаптивный размер: ~90% экрана, min для ноутбука."""
+def enable_windows_dpi_awareness() -> None:
+    """Чёткий UI на 100–150% масштабе Windows (до создания Tk)."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+    try:
+        from ctypes import windll
+
+        # 2 = PROCESS_PER_MONITOR_DPI_AWARE_V2 (Win 8.1+)
+        windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            from ctypes import windll
+
+            windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def fit_window_to_screen(
+    root: tk.Tk,
+    *,
+    prefer_w: int = 1200,
+    prefer_h: int = 860,
+    fill: bool = False,
+) -> None:
+    """Адаптивный размер окна под экран.
+
+    * ``fill=True`` (главное окно) — ~94% рабочего пространства на
+      1920×1080 и шире; ``prefer_*`` — нижняя граница, если экран позволяет.
+    * ``fill=False`` (диалоги) — ``prefer_*`` как целевой размер, сжимается
+      на маленьком экране.
+    """
     root.update_idletasks()
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-    usable_h = max(600, sh - 80)
-    usable_w = max(900, sw - 40)
-    w = min(prefer_w, max(960, int(usable_w * 0.92)))
-    h = min(prefer_h, max(680, int(usable_h * 0.90)))
-    w = min(w, usable_w)
-    h = min(h, usable_h)
+    sw = max(1, int(root.winfo_screenwidth()))
+    sh = max(1, int(root.winfo_screenheight()))
+    # Поля под панель задач и края
+    usable_w = max(800, sw - 48)
+    usable_h = max(600, sh - 88)
+
+    if fill:
+        # Большие мониторы: занять почти весь рабочий стол
+        frac_w = 0.94 if sw >= 1600 else 0.92
+        frac_h = 0.92 if sh >= 900 else 0.88
+        # Не уже prefer, если экран позволяет — иначе «плавающее» 1200×860 на FHD
+        w = min(usable_w, max(prefer_w, int(usable_w * frac_w)))
+        h = min(usable_h, max(prefer_h, int(usable_h * frac_h)))
+        min_w = min(1100, usable_w)
+        min_h = min(720, usable_h)
+    else:
+        w = min(prefer_w, usable_w)
+        h = min(prefer_h, usable_h)
+        min_w = min(400, usable_w)
+        min_h = min(300, usable_h)
+
+    w = max(min(w, usable_w), min(min_w, usable_w) if fill else min(320, usable_w))
+    h = max(min(h, usable_h), min(min_h, usable_h) if fill else min(240, usable_h))
     x = max(0, (sw - w) // 2)
-    y = max(0, (usable_h - h) // 2)
+    y = max(0, (sh - h - 48) // 2)
     root.geometry(f"{w}x{h}+{x}+{y}")
-    root.minsize(min(960, usable_w), min(640, usable_h))
+    root.minsize(min_w if fill else min(400, usable_w), min_h if fill else min(300, usable_h))
+    try:
+        root.resizable(True, True)
+    except tk.TclError:
+        pass

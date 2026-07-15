@@ -1098,6 +1098,82 @@ def save_assistant_llm_settings(
         )
 
 
+def prepare_battle_db(
+    db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    backup: bool = True,
+) -> dict[str, Any]:
+    """
+    Готовит БД к боевому запуску с «чистыми» марками и организациями.
+
+    **Сохраняет:**
+    - ``test_items`` — прайс и правила расчёта (fixed/per_core/…)
+    - ``test_mappings`` — фразы требований → коды испытаний
+    - ``app_settings`` — климатика, LLM, пути пакетов, host_id
+    - training/RAG-таблицы (если есть)
+
+    **Очищает:**
+    - ``cable_marks``, ``organizations``
+    - связанные операционные данные: заказы, расчёты, извлечения,
+      заявки, generated_documents, assistant_sessions
+      (иначе остаются «осиротевшие» ссылки на удалённые org/mark)
+
+    Returns:
+        dict с путём backup (если был), счётчиками удалённых строк
+        и сохранёнными test_items / test_mappings.
+    """
+    path = Path(db_path)
+    if not path.exists():
+        raise FileNotFoundError(f"БД не найдена: {path}")
+
+    backup_path: Path | None = None
+    if backup:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = path.with_name(f"{path.stem}.pre_battle_{stamp}{path.suffix}")
+        import shutil
+
+        shutil.copy2(path, backup_path)
+
+    # Порядок: дочерние таблицы → родители (на случай включённых FK)
+    clear_tables = (
+        "calculation_lines",
+        "order_marks",
+        "test_applications",
+        "generated_documents",
+        "orders",
+        "calculations",
+        "document_extractions",
+        "assistant_sessions",
+        "cable_marks",
+        "organizations",
+    )
+
+    deleted: dict[str, int] = {}
+    with get_connection(path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for table in clear_tables:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                continue
+            count = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            conn.execute(f"DELETE FROM {table}")
+            deleted[table] = int(count)
+        conn.execute("PRAGMA foreign_keys = ON")
+        kept_items = conn.execute("SELECT COUNT(*) AS n FROM test_items").fetchone()["n"]
+        kept_maps = conn.execute("SELECT COUNT(*) AS n FROM test_mappings").fetchone()["n"]
+
+    return {
+        "db_path": str(path.resolve()),
+        "backup_path": str(backup_path.resolve()) if backup_path else None,
+        "deleted": deleted,
+        "kept_test_items": int(kept_items),
+        "kept_test_mappings": int(kept_maps),
+    }
+
+
 def push_recent_pack_path(
     pack_dir: str | Path,
     db_path: str | Path = DB_PATH_DEFAULT,

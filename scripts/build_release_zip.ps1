@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Собирает zip-релиз для установки на другой ПК (без .venv и тяжёлых корпусов).
@@ -10,11 +10,17 @@
 .PARAMETER IncludeTrainingCorpus
   Включить data/training/rag_corpus (большой объём). По умолчанию — нет.
 
+.PARAMETER IncludeAppDb
+  Включить data/app.db как есть. Для боя: сначала
+  request-processor prepare-battle-db --yes (прайс остаётся, марки/орг. пустые).
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -IncludeAppDb
 #>
 param(
-    [switch]$IncludeTrainingCorpus
+    [switch]$IncludeTrainingCorpus,
+    [switch]$IncludeAppDb
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,13 +73,27 @@ foreach ($item in $include) {
     }
 }
 
-# data essentials
+# data essentials (без app.db, ocr_cache, training corpus, generated)
 $dataStage = Join-Path $stage "data"
 New-Item -ItemType Directory -Path $dataStage -Force | Out-Null
 foreach ($sub in @("templates", "families")) {
     $src = Join-Path $ProjectRoot "data\$sub"
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $dataStage $sub) -Recurse -Force
+    }
+}
+# Прайс для load-data на чистой БД (если лежит в data/)
+Get-ChildItem (Join-Path $ProjectRoot "data") -Filter "*.xlsx" -ErrorAction SilentlyContinue | ForEach-Object {
+    Copy-Item $_.FullName (Join-Path $dataStage $_.Name) -Force
+    Write-Host "  + data/$($_.Name)"
+}
+if ($IncludeAppDb) {
+    $appDb = Join-Path $ProjectRoot "data\app.db"
+    if (Test-Path $appDb) {
+        Copy-Item $appDb (Join-Path $dataStage "app.db") -Force
+        Write-Host "  + data/app.db (IncludeAppDb)" -ForegroundColor Cyan
+    } else {
+        Write-Host "  WARNING: IncludeAppDb, но data/app.db нет" -ForegroundColor Yellow
     }
 }
 # empty dirs for runtime
@@ -91,65 +111,74 @@ if ($IncludeTrainingCorpus) {
     }
 }
 
-# tools: ensure README about portable Tesseract (do not overwrite make_app_icon.py)
+# tools: ensure README about portable Tesseract
 $toolsDir = Join-Path $stage "tools"
 New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
 $toolsReadme = Join-Path $toolsDir "README.md"
 if (-not (Test-Path $toolsReadme)) {
-@"
-# tools/
-
-- ``make_app_icon.py`` — генерация ``assets/app_icon.ico`` для ярлыка
-- Сюда же можно положить **portable Tesseract**:
-
-```
-tools/Tesseract-OCR/tesseract.exe
-tools/Tesseract-OCR/tessdata/rus.traineddata
-tools/Tesseract-OCR/tessdata/eng.traineddata
-```
-
-Приложение ищет tesseract в этом пути, затем в Program Files.
-
-Установка на целевом ПК:
-1. Распакуйте zip
-2. Установите Python 3.10+ (если нет)
-3. ``powershell -ExecutionPolicy Bypass -File scripts\install.ps1``
-4. ``start_gui.bat``
-"@ | Set-Content -Path $toolsReadme -Encoding UTF8
+    $toolsLines = @(
+        "# tools/",
+        "",
+        "- make_app_icon.py - icon for desktop shortcut",
+        "- portable Tesseract may live here:",
+        "",
+        "  tools/Tesseract-OCR/tesseract.exe",
+        "",
+        "See INSTALL.md and NACHNITE_ZDES.md in release root."
+    )
+    Set-Content -Path $toolsReadme -Value $toolsLines -Encoding UTF8
 }
 
-# INSTALL one-pager
-@"
-# Установка на рабочий ПК
+# Keep full INSTALL.md from repo root. Write start-here guide.
+$startLines = @(
+    "# request-processor v$version - release contents",
+    "",
+    "## Start here (work PC)",
+    "",
+    "1. **INSTALL.md** (root) - install steps, shortcut, Ollama, Word.",
+    "2. **docs/** - application passport:",
+    "   - docs/44 - Pasport prilozheniya (v0.9.1).pdf",
+    "   - docs/44 - Pasport prilozheniya (v0.9.1).md",
+    "   - docs/README.md",
+    "3. Install:",
+    "",
+    "   cd D:\apps\request_processor",
+    "   powershell -ExecutionPolicy Bypass -File scripts\install.ps1",
+    "",
+    "4. If data/app.db is present - load-data is NOT needed (price already in DB).",
+    "5. Run: start_gui.bat or desktop shortcut.",
+    "",
+    "## Archive contents",
+    "",
+    "- src/, scripts/, tests/ - application",
+    "- data/app.db - price + mappings; marks/orgs empty (if IncludeAppDb)",
+    "- data/templates, families - Word templates, YAML families",
+    "- data/*.xlsx - price Excel backup",
+    "- docs/ - passport + README",
+    "- INSTALL.md, README.md - install and overview"
+)
+# Expand version manually
+$startLines = $startLines | ForEach-Object { $_.Replace('$version', $version) }
+$startHerePath = Join-Path $stage "НАЧНИТЕ_ЗДЕСЬ.md"
+Set-Content -Path $startHerePath -Value $startLines -Encoding UTF8
+# Also English-safe name for ZIP tools that mangle Cyrillic
+Set-Content -Path (Join-Path $stage "START_HERE.md") -Value $startLines -Encoding UTF8
 
-1. Распакуйте архив в папку (например ``D:\apps\request_processor``).
-2. Установите **Python 3.10+** с python.org (галочка Add to PATH).
-3. Установите **Tesseract OCR** (rus+eng)  
-   https://github.com/UB-Mannheim/tesseract/wiki  
-   или скопируйте portable в ``tools\Tesseract-OCR\``.
-4. В PowerShell:
-
-``````powershell
-cd D:\apps\request_processor
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1
-``````
-
-5. Запуск: ``start_gui.bat`` или ярлык «Испытания кабелей» на рабочем столе.
-
-## День 1 оператора
-
-- Откройте вкладку **1. Заявка** → Обзор → PDF/Word → **Извлечь** (DPI **400**).
-- Проверьте марки; при подсказках ассистента — **Ассистент → применить**.
-- **Подтвердить заявку** → **2. Расчёт** → **3. КП** → **4. Заказы** (заявка + пакет).
-- Альтернатива: вставьте текст речи заказчика (кнопка «Текст…»).
-
-PyTorch / torch-CV — только эксперимент, default — Tesseract.
-"@ | Set-Content -Path (Join-Path $stage "INSTALL.md") -Encoding UTF8
+$docsStage = Join-Path $stage "docs"
+if (Test-Path $docsStage) {
+    $docsFiles = @(Get-ChildItem $docsStage -Recurse -File)
+    Write-Host ("  docs count: " + $docsFiles.Count) -ForegroundColor Cyan
+    foreach ($f in $docsFiles) {
+        Write-Host ("    + docs/" + $f.Name)
+    }
+} else {
+    Write-Host "  WARNING: docs missing from stage" -ForegroundColor Yellow
+}
 
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-Write-Host "Упаковка $zipPath ..."
+Write-Host ("Packaging " + $zipPath + " ...")
 Compress-Archive -Path $stage -DestinationPath $zipPath -Force
 
 $sizeMb = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
-Write-Host "OK: $zipPath ($sizeMb MB)" -ForegroundColor Green
-Write-Host "Stage: $stage"
+Write-Host ("OK: " + $zipPath + " sizeMB=" + $sizeMb) -ForegroundColor Green
+Write-Host ("Stage: " + $stage)

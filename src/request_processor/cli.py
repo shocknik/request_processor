@@ -118,6 +118,53 @@ def load_data_cmd(price: str, db: str) -> None:
         click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
 
 
+@cli.command("prepare-battle-db")
+@click.option("--db", default="data/app.db", show_default=True)
+@click.option(
+    "--yes",
+    "confirm",
+    is_flag=True,
+    help="Подтвердить очистку без интерактивного вопроса",
+)
+@click.option(
+    "--no-backup",
+    is_flag=True,
+    help="Не создавать копию app.db.pre_battle_*.db",
+)
+def prepare_battle_db_cmd(db: str, confirm: bool, no_backup: bool) -> None:
+    """Очищает марки и организации; прайс (test_items) и test_mappings оставляет.
+
+    Также удаляет заказы/расчёты/извлечения (ссылки на org/mark).
+    Перед очисткой по умолчанию делает backup БД.
+    """
+    from .persistence.sqlite_repo import prepare_battle_db
+
+    if not confirm:
+        click.echo(
+            "Будут удалены: cable_marks, organizations, orders, calculations, "
+            "document_extractions, …\n"
+            "Останутся: test_items (прайс), test_mappings, app_settings.\n"
+            "Повторите с флагом --yes для выполнения."
+        )
+        raise SystemExit(1)
+    try:
+        result = prepare_battle_db(db, backup=not no_backup)
+    except Exception as e:
+        click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+    click.echo(click.style("✓ БД подготовлена к бою", fg="green"))
+    click.echo(f"  db: {result['db_path']}")
+    if result.get("backup_path"):
+        click.echo(f"  backup: {result['backup_path']}")
+    click.echo(
+        f"  сохранено: test_items={result['kept_test_items']}, "
+        f"test_mappings={result['kept_test_mappings']}"
+    )
+    for table, n in (result.get("deleted") or {}).items():
+        if n:
+            click.echo(f"  удалено {table}: {n}")
+
+
 @cli.command("calculate")
 @click.option("--mark", required=True, help="Полная марка кабеля")
 @click.option("--cores", type=int, default=1, show_default=True, help="Количество жил/элементов")

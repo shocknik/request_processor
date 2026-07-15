@@ -64,6 +64,7 @@ from ..extraction.pdf_extractor import (
 from .theme import (
     COLORS,
     apply_fluent_theme,
+    enable_windows_dpi_awareness,
     fit_window_to_screen,
     make_primary_button,
     make_secondary_button,
@@ -157,7 +158,8 @@ class RequestProcessorApp(tk.Tk):
         self.db_path = Path(db_path)
         self.generated_dir = GENERATED_DIR_DEFAULT
         self.title("Обработка заявок на испытания кабелей")
-        fit_window_to_screen(self, prefer_w=1200, prefer_h=860)
+        # 1920×1080 и шире: ~94% экрана (раньше cap 1200×860 — «маленькое» окно)
+        fit_window_to_screen(self, prefer_w=1400, prefer_h=900, fill=True)
         self.configure(bg=COLORS["bg"])
 
         self._tests_by_code: dict[str, dict] = {}
@@ -188,53 +190,188 @@ class RequestProcessorApp(tk.Tk):
         self._install_clipboard_support()
         _log.info("GUI started db=%s screen=%sx%s", self.db_path, self.winfo_screenwidth(), self.winfo_screenheight())
 
+    # Классы виджетов с текстом (bind_class — и текущие, и будущие диалоги).
+    _CLIPBOARD_CLASSES = (
+        "Entry",
+        "TEntry",
+        "Text",
+        "Spinbox",
+        "TSpinbox",
+        "Combobox",
+        "TCombobox",
+    )
+
     def _install_clipboard_support(self) -> None:
-        """Ctrl+C / Ctrl+A и контекстное меню «Копировать» во всех полях ввода."""
-        for widget in self.winfo_children():
-            self._bind_clipboard_recursive(widget)
+        """Стандартные Ctrl+C/X/V/A, Shift+Ins, контекстное меню для всех текстовых полей."""
+        for cls in self._CLIPBOARD_CLASSES:
+            self.bind_class(cls, "<Control-c>", self._evt_copy)
+            self.bind_class(cls, "<Control-C>", self._evt_copy)
+            self.bind_class(cls, "<Control-x>", self._evt_cut)
+            self.bind_class(cls, "<Control-X>", self._evt_cut)
+            self.bind_class(cls, "<Control-v>", self._evt_paste)
+            self.bind_class(cls, "<Control-V>", self._evt_paste)
+            self.bind_class(cls, "<Control-a>", self._evt_select_all)
+            self.bind_class(cls, "<Control-A>", self._evt_select_all)
+            # Русская раскладка: keycode (Windows) для C/X/V/A
+            self.bind_class(cls, "<Control-KeyPress>", self._evt_ctrl_keycode)
+            self.bind_class(cls, "<Shift-Insert>", self._evt_paste)
+            self.bind_class(cls, "<Control-Insert>", self._evt_copy)
+            self.bind_class(cls, "<Shift-Delete>", self._evt_cut)
+            self.bind_class(cls, "<Button-3>", self._evt_context_menu)
+        # Label: ПКМ → копировать весь текст (получатель и др.)
+        self.bind_class("TLabel", "<Button-3>", self._evt_label_copy_menu)
+        self.bind_class("Label", "<Button-3>", self._evt_label_copy_menu)
 
-    def _bind_clipboard_recursive(self, widget: tk.Misc) -> None:
-        cls = widget.winfo_class()
-        if cls in ("Entry", "TEntry", "Text", "Scrolledtext", "Combobox", "TCombobox"):
-            self._bind_clipboard(widget)
-        for child in widget.winfo_children():
-            self._bind_clipboard_recursive(child)
+    def _evt_ctrl_keycode(self, event: tk.Event) -> str | None:
+        """Ctrl+C/X/V/A при русской раскладке (символ не 'c', но keycode тот же)."""
+        # Windows virtual key codes
+        code = int(getattr(event, "keycode", 0) or 0)
+        if code == 67:  # C
+            return self._evt_copy(event)
+        if code == 88:  # X
+            return self._evt_cut(event)
+        if code == 86:  # V
+            return self._evt_paste(event)
+        if code == 65:  # A
+            return self._evt_select_all(event)
+        return None
 
-    def _bind_clipboard(self, widget: tk.Misc) -> None:
-        if getattr(widget, "_clipboard_bound", False):
+    def _evt_copy(self, event: tk.Event) -> str:
+        self._copy_widget_selection(event.widget)
+        return "break"
+
+    def _evt_cut(self, event: tk.Event) -> str:
+        self._cut_widget_selection(event.widget)
+        return "break"
+
+    def _evt_paste(self, event: tk.Event) -> str:
+        self._paste_into_widget(event.widget)
+        return "break"
+
+    def _evt_select_all(self, event: tk.Event) -> str:
+        self._select_all_widget(event.widget)
+        return "break"
+
+    def _evt_context_menu(self, event: tk.Event) -> str:
+        self._show_text_context_menu(event, event.widget)
+        return "break"
+
+    def _evt_label_copy_menu(self, event: tk.Event) -> str | None:
+        widget = event.widget
+        try:
+            text = str(widget.cget("text") or "")
+        except tk.TclError:
+            text = ""
+        if not text.strip():
+            return None
+        menu = tk.Menu(widget, tearoff=0)
+        menu.add_command(
+            label="Копировать",
+            command=lambda t=text: self._clipboard_set(t),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _clipboard_set(self, text: str) -> None:
+        if not text:
             return
-        widget._clipboard_bound = True  # type: ignore[attr-defined]
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update_idletasks()
+        except tk.TclError:
+            pass
 
-        def _copy(_event: tk.Event | None = None) -> str:
-            self._copy_widget_selection(widget)
-            return "break"
+    def _clipboard_get(self) -> str:
+        try:
+            return str(self.clipboard_get())
+        except tk.TclError:
+            return ""
 
-        def _select_all(_event: tk.Event | None = None) -> str:
-            self._select_all_widget(widget)
-            return "break"
-
-        widget.bind("<Control-c>", _copy, add="+")
-        widget.bind("<Control-C>", _copy, add="+")
-        widget.bind("<Control-a>", _select_all, add="+")
-        widget.bind("<Control-A>", _select_all, add="+")
-        widget.bind("<Button-3>", lambda e, w=widget: self._show_copy_menu(e, w), add="+")
+    def _widget_is_editable(self, widget: tk.Misc) -> bool:
+        try:
+            state = str(widget.cget("state"))
+        except tk.TclError:
+            return True
+        return state not in ("disabled", "readonly")
 
     def _copy_widget_selection(self, widget: tk.Misc) -> None:
         text = self._get_widget_selection(widget)
-        if text:
-            self.clipboard_clear()
-            self.clipboard_append(text)
+        if not text:
+            # Нет выделения — копируем всё содержимое поля (удобно для «Производитель»).
+            text = self._get_widget_all_text(widget)
+        self._clipboard_set(text)
+
+    def _cut_widget_selection(self, widget: tk.Misc) -> None:
+        if not self._widget_is_editable(widget):
+            self._copy_widget_selection(widget)
+            return
+        text = self._get_widget_selection(widget)
+        if not text:
+            return
+        self._clipboard_set(text)
+        cls = widget.winfo_class()
+        try:
+            if cls in ("Entry", "TEntry", "Combobox", "TCombobox", "Spinbox", "TSpinbox"):
+                try:
+                    widget.delete("sel.first", "sel.last")
+                except tk.TclError:
+                    pass
+            elif cls in ("Text",):
+                if widget.tag_ranges("sel"):
+                    widget.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass
+
+    def _paste_into_widget(self, widget: tk.Misc) -> None:
+        if not self._widget_is_editable(widget):
+            return
+        clip = self._clipboard_get()
+        if not clip:
+            return
+        cls = widget.winfo_class()
+        try:
+            if cls in ("Entry", "TEntry", "Combobox", "TCombobox", "Spinbox", "TSpinbox"):
+                try:
+                    widget.delete("sel.first", "sel.last")
+                except tk.TclError:
+                    pass
+                widget.insert("insert", clip)
+            elif cls in ("Text",):
+                try:
+                    if widget.tag_ranges("sel"):
+                        widget.delete("sel.first", "sel.last")
+                except tk.TclError:
+                    pass
+                widget.insert("insert", clip)
+        except tk.TclError:
+            pass
+
+    def _get_widget_all_text(self, widget: tk.Misc) -> str:
+        cls = widget.winfo_class()
+        try:
+            if cls in ("Entry", "TEntry", "Combobox", "TCombobox", "Spinbox", "TSpinbox"):
+                return str(widget.get())
+            if cls in ("Text",):
+                return widget.get("1.0", "end-1c")
+        except tk.TclError:
+            return ""
+        return ""
 
     def _get_widget_selection(self, widget: tk.Misc) -> str:
         cls = widget.winfo_class()
         try:
-            if cls in ("Entry", "TEntry", "Combobox", "TCombobox"):
-                if cls == "TCombobox" and str(widget.cget("state")) == "readonly":
-                    return str(widget.get())
-                start = widget.index("sel.first")
-                end = widget.index("sel.last")
-                return str(widget.get())[start:end]
-            if cls in ("Text", "Scrolledtext"):
+            if cls in ("Entry", "TEntry", "Combobox", "TCombobox", "Spinbox", "TSpinbox"):
+                try:
+                    start = widget.index("sel.first")
+                    end = widget.index("sel.last")
+                    return str(widget.get())[int(start) : int(end)]
+                except (tk.TclError, ValueError, TypeError):
+                    return ""
+            if cls in ("Text",):
                 was_disabled = str(widget.cget("state")) == "disabled"
                 if was_disabled:
                     widget.configure(state="normal")
@@ -245,50 +382,94 @@ class RequestProcessorApp(tk.Tk):
                     if was_disabled:
                         widget.configure(state="disabled")
         except tk.TclError:
-            if cls in ("TCombobox", "Combobox"):
-                try:
-                    return str(widget.get())
-                except tk.TclError:
-                    return ""
-            try:
-                return str(widget.get())
-            except tk.TclError:
-                return ""
+            return ""
         return ""
 
     def _select_all_widget(self, widget: tk.Misc) -> None:
         cls = widget.winfo_class()
         try:
-            if cls in ("Entry", "TEntry", "Combobox", "TCombobox"):
+            if cls in ("Entry", "TEntry", "Combobox", "TCombobox", "Spinbox", "TSpinbox"):
                 widget.selection_range(0, "end")
-                widget.icursor("end")
+                try:
+                    widget.icursor("end")
+                except tk.TclError:
+                    pass
+                try:
+                    widget.focus_set()
+                except tk.TclError:
+                    pass
                 return
-            if cls in ("Text", "Scrolledtext"):
+            if cls in ("Text",):
                 was_disabled = str(widget.cget("state")) == "disabled"
                 if was_disabled:
                     widget.configure(state="normal")
                 try:
                     widget.tag_add("sel", "1.0", "end-1c")
+                    widget.mark_set("insert", "1.0")
+                    widget.see("1.0")
+                    widget.focus_set()
                 finally:
                     if was_disabled:
-                        widget.configure(state="disabled")
+                        # оставляем normal для readonly-текста (см. _make_readonly_text)
+                        if getattr(widget, "_rp_readonly", False):
+                            pass
+                        else:
+                            widget.configure(state="disabled")
         except tk.TclError:
             pass
 
-    def _show_copy_menu(self, event: tk.Event, widget: tk.Misc) -> None:
+    def _show_text_context_menu(self, event: tk.Event, widget: tk.Misc) -> None:
+        editable = self._widget_is_editable(widget)
         menu = tk.Menu(widget, tearoff=0)
-        menu.add_command(
-            label="Копировать",
-            command=lambda: self._copy_widget_selection(widget),
-        )
-        menu.add_command(
-            label="Выделить всё",
-            command=lambda: self._select_all_widget(widget),
-        )
+        menu.add_command(label="Вырезать", command=lambda: self._cut_widget_selection(widget))
+        menu.add_command(label="Копировать", command=lambda: self._copy_widget_selection(widget))
+        menu.add_command(label="Вставить", command=lambda: self._paste_into_widget(widget))
+        menu.add_separator()
+        menu.add_command(label="Выделить всё", command=lambda: self._select_all_widget(widget))
+        if not editable:
+            menu.entryconfigure("Вырезать", state="disabled")
+            menu.entryconfigure("Вставить", state="disabled")
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _make_readonly_text(self, parent: tk.Misc, **kwargs) -> scrolledtext.ScrolledText:
+        """Текстовое поле только для чтения, но с выделением и копированием."""
+        kwargs.setdefault("wrap", "word")
+        kwargs.setdefault("font", ("Segoe UI", 10))
+        kwargs.pop("state", None)
+        widget = scrolledtext.ScrolledText(parent, **kwargs)
+        widget._rp_readonly = True  # type: ignore[attr-defined]
+
+        def _block_edit(event: tk.Event) -> str | None:
+            # Разрешаем навигацию и Ctrl-комбинации; ввод — нет.
+            if event.state & 0x4:  # Control
+                return None
+            if event.keysym in (
+                "Left",
+                "Right",
+                "Up",
+                "Down",
+                "Home",
+                "End",
+                "Next",
+                "Prior",
+                "Shift_L",
+                "Shift_R",
+                "Control_L",
+                "Control_R",
+                "Alt_L",
+                "Alt_R",
+                "Escape",
+                "Tab",
+                "ISO_Left_Tab",
+            ):
+                return None
+            return "break"
+
+        widget.bind("<Key>", _block_edit, add="+")
+        return widget
 
     def _accent_button(self, parent: tk.Misc, text: str, command) -> tk.Button:
         """Primary — синий фон, белый текст (всегда читается)."""
@@ -336,6 +517,21 @@ class RequestProcessorApp(tk.Tk):
     def _setup_theme(self) -> None:
         apply_fluent_theme(self)
 
+    def _on_root_configure(self, event: tk.Event) -> None:
+        """Подстроить wraplength инфо-полосы под ширину окна (FHD и шире)."""
+        if event.widget is not self:
+            return
+        label = getattr(self, "parse_info_label", None)
+        if label is None:
+            return
+        # поля: padding parse_bar + accent strip
+        wrap = max(480, int(event.width) - 80)
+        try:
+            if int(label.cget("wraplength") or 0) != wrap:
+                label.configure(wraplength=wrap)
+        except tk.TclError:
+            pass
+
     def _build_ui(self) -> None:
         # Fluent 2: brand strip + white title bar
         tk.Frame(self, bg=COLORS.get("header_bar", COLORS["accent"]), height=3).pack(fill="x")
@@ -375,16 +571,18 @@ class RequestProcessorApp(tk.Tk):
         parse_inner = tk.Frame(parse_bar, bg=COLORS["parse_bg"])
         parse_inner.pack(side="left", fill="x", expand=True)
         self.parse_info_var = tk.StringVar(value="Документ не обработан — начните с вкладки «1. Заявка»")
-        tk.Label(
+        self.parse_info_label = tk.Label(
             parse_inner,
             textvariable=self.parse_info_var,
             bg=COLORS["parse_bg"],
             fg=COLORS["text"],
             font=("Segoe UI", 10),
-            wraplength=1080,
+            wraplength=1600,
             justify="left",
             anchor="w",
-        ).pack(fill="x")
+        )
+        self.parse_info_label.pack(fill="x")
+        self.bind("<Configure>", self._on_root_configure, add="+")
 
         self.status = tk.StringVar(value="Готово")
         status_wrap = tk.Frame(self, bg=COLORS["status_bg"], height=32)
@@ -437,21 +635,6 @@ class RequestProcessorApp(tk.Tk):
         self._build_history_tab()
         self._build_settings_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-
-    def _on_tab_changed(self, _event: tk.Event | None = None) -> None:
-        if not self.notebook:
-            return
-        selected = self.notebook.index(self.notebook.select())
-        if selected == self.notebook.index(self.tab_kp):
-            self._load_kp_calculations()
-        elif selected == self.notebook.index(self.tab_orgs):
-            self._load_orgs_table()
-        elif selected == self.notebook.index(self.tab_orders):
-            self._load_orders_table()
-        elif selected == self.notebook.index(self.tab_compare):
-            self._refresh_compare_list()
-        elif selected == self.notebook.index(self.tab_settings):
-            self._load_mappings_table()
 
     def _build_calc_tab(self) -> None:
         btns = ttk.Frame(self.tab_calc)
@@ -647,10 +830,9 @@ class RequestProcessorApp(tk.Tk):
             text="← К выбору испытаний",
             command=self._show_calc_picker_mode,
         ).pack(anchor="w", pady=(0, 6))
-        self.calc_output = scrolledtext.ScrolledText(
+        self.calc_output = self._make_readonly_text(
             self.calc_result_frame,
             height=14,
-            state="disabled",
             font=("Consolas", 10),
             bg="#f8fafc",
             fg=COLORS["text"],
@@ -784,7 +966,7 @@ class RequestProcessorApp(tk.Tk):
             cursor="hand2",
         )
         self._warn_toggle_btn.pack(side="right")
-        self.validation_warn_detail = scrolledtext.ScrolledText(
+        self.validation_warn_detail = self._make_readonly_text(
             self.validation_warn_frame,
             height=4,
             wrap="word",
@@ -794,7 +976,6 @@ class RequestProcessorApp(tk.Tk):
             relief="flat",
             bd=0,
             highlightthickness=0,
-            state="disabled",
         )
         # detail показывается только при expand
         self.validation_warn_var = self.validation_warn_summary_var  # back-compat alias
@@ -846,21 +1027,21 @@ class RequestProcessorApp(tk.Tk):
             "status",
             "confidence",
         )
-        self.marks_tree = ttk.Treeview(left, columns=cols, show="headings", height=7)
-        for col, title, width in (
-            ("accepted", "✓", 28),
-            ("hint", "💡", 28),
-            ("mark", "Усл. обозначение", 190),
-            ("brand", "Марка", 60),
-            ("cores", "ТПЖ", 36),
-            ("size", "Размер", 52),
-            ("document", "ТУ/ГОСТ", 100),
-            ("status", "!", 28),
-            ("confidence", "%", 36),
+        self.marks_tree = ttk.Treeview(left, columns=cols, show="headings", height=12)
+        for col, title, width, stretch in (
+            ("accepted", "✓", 28, False),
+            ("hint", "💡", 28, False),
+            ("mark", "Усл. обозначение", 260, True),
+            ("brand", "Марка", 80, False),
+            ("cores", "ТПЖ", 40, False),
+            ("size", "Размер", 60, False),
+            ("document", "ТУ/ГОСТ", 140, True),
+            ("status", "!", 28, False),
+            ("confidence", "%", 40, False),
         ):
             self.marks_tree.heading(col, text=title)
             anchor = "center" if col in ("accepted", "hint", "status", "confidence") else "w"
-            self.marks_tree.column(col, width=width, anchor=anchor)
+            self.marks_tree.column(col, width=width, anchor=anchor, stretch=stretch, minwidth=width)
         self.marks_tree.tag_configure("ok", background=COLORS["card"])
         self.marks_tree.tag_configure("warning", background=COLORS["warn_bg"])
         self.marks_tree.tag_configure("error", background=COLORS["error_bg"])
@@ -888,35 +1069,24 @@ class RequestProcessorApp(tk.Tk):
             ("ИНН:", self.draft_customer_inn_var),
             ("Адрес:", self.draft_customer_addr_var),
             ("Производитель:", self.draft_manufacturer_var),
+            ("Получатель (ИЛ):", self.draft_recipient_var),
         )
         for row, (label, var) in enumerate(labels):
             ttk.Label(org_form, text=label, style="Card.TLabel").grid(
                 row=row, column=0, sticky="w", pady=4, padx=(0, 8)
             )
+            # Обычный Entry: Ctrl+C/V/X/A и ПКМ; получатель — тоже (раньше был Label без копирования).
             ttk.Entry(org_form, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
-
-        ttk.Label(org_form, text="Получатель (ИЛ):", style="CardMuted.TLabel").grid(
-            row=len(labels), column=0, sticky="w", pady=(10, 4), padx=(0, 8)
-        )
-        recipient_lbl = ttk.Label(
-            org_form,
-            textvariable=self.draft_recipient_var,
-            style="CardMuted.TLabel",
-            wraplength=340,
-        )
-        recipient_lbl.grid(row=len(labels), column=1, sticky="w", pady=(10, 4))
 
         ttk.Label(right, text="Контекст выбранной марки:", style="CardMuted.TLabel").pack(
             anchor="w", pady=(12, 4)
         )
-        self.mark_context_text = scrolledtext.ScrolledText(
+        self.mark_context_text = self._make_readonly_text(
             right,
             height=4,
-            state="disabled",
             font=("Segoe UI", 9),
             bg="#f8fafc",
             relief="flat",
-            wrap="word",
         )
         self.mark_context_text.pack(fill="both", expand=True)
 
@@ -932,18 +1102,18 @@ class RequestProcessorApp(tk.Tk):
         ttk.Button(toolbar, text="Поиск", command=self._load_cable_marks).pack(side="left")
 
         cols = ("full_mark", "brand", "fire_class", "cores", "element", "size", "document")
-        self.cable_marks_tree = ttk.Treeview(self.tab_marks, columns=cols, show="headings", height=20)
-        for col, title, width in (
-            ("full_mark", "Усл. обозначение", 260),
-            ("brand", "Марка", 80),
-            ("fire_class", "Пожарный класс", 90),
-            ("cores", "ТПЖ", 50),
-            ("element", "Элемент", 70),
-            ("size", "Размер", 80),
-            ("document", "Документ", 180),
+        self.cable_marks_tree = ttk.Treeview(self.tab_marks, columns=cols, show="headings", height=24)
+        for col, title, width, stretch in (
+            ("full_mark", "Усл. обозначение", 320, True),
+            ("brand", "Марка", 90, False),
+            ("fire_class", "Пожарный класс", 100, False),
+            ("cores", "ТПЖ", 50, False),
+            ("element", "Элемент", 80, False),
+            ("size", "Размер", 90, False),
+            ("document", "Документ", 220, True),
         ):
             self.cable_marks_tree.heading(col, text=title)
-            self.cable_marks_tree.column(col, width=width, anchor="w")
+            self.cable_marks_tree.column(col, width=width, anchor="w", stretch=stretch, minwidth=width)
         self.cable_marks_tree.pack(fill="both", expand=True, pady=(8, 0))
         self.cable_marks_tree.bind("<Double-Button-1>", lambda e: self._use_db_mark_in_calc())
         ttk.Button(self.tab_marks, text="→ В расчёт", command=self._use_db_mark_in_calc).pack(
@@ -1111,10 +1281,9 @@ class RequestProcessorApp(tk.Tk):
 
         right = ttk.LabelFrame(paned, text="Информация о заказе", padding=8, style="Card.TLabelframe")
         paned.add(right, weight=1)
-        self.order_details = scrolledtext.ScrolledText(
+        self.order_details = self._make_readonly_text(
             right,
             height=20,
-            state="disabled",
             font=("Segoe UI", 10),
             bg="#f8fafc",
             relief="flat",
@@ -1147,17 +1316,17 @@ class RequestProcessorApp(tk.Tk):
             height=20,
             selectmode="browse",
         )
-        for col, title, width, anchor in (
-            ("name", "Название", 280, "w"),
-            ("inn", "ИНН", 110, "w"),
-            ("org_type", "Тип", 130, "w"),
-            ("accredited", "Аккред.", 70, "center"),
-            ("address", "Адрес", 220, "w"),
-            ("phone", "Телефон", 120, "w"),
-            ("fsa", "Реестр ФСА", 150, "w"),
+        for col, title, width, anchor, stretch in (
+            ("name", "Название", 320, "w", True),
+            ("inn", "ИНН", 110, "w", False),
+            ("org_type", "Тип", 130, "w", False),
+            ("accredited", "Аккред.", 70, "center", False),
+            ("address", "Адрес", 280, "w", True),
+            ("phone", "Телефон", 120, "w", False),
+            ("fsa", "Реестр ФСА", 150, "w", False),
         ):
             self.orgs_tree.heading(col, text=title, anchor=anchor)
-            self.orgs_tree.column(col, width=width, anchor=anchor)
+            self.orgs_tree.column(col, width=width, anchor=anchor, stretch=stretch, minwidth=width)
         self.orgs_tree.pack(fill="both", expand=True)
         self.orgs_tree.bind("<Double-Button-1>", lambda _e: self._edit_selected_organization())
 
@@ -1167,11 +1336,11 @@ class RequestProcessorApp(tk.Tk):
         ttk.Button(toolbar, text="Обновить", command=self._load_history).pack(side="left")
 
         cols = ("id", "created_at", "mark", "total", "source")
-        self.history_tree = ttk.Treeview(self.tab_history, columns=cols, show="headings", height=20)
+        self.history_tree = ttk.Treeview(self.tab_history, columns=cols, show="headings", height=24)
         for col, title, width in (
             ("id", "ID", 50),
             ("created_at", "Дата", 140),
-            ("mark", "Марка", 400),
+            ("mark", "Марка", 520),
             ("total", "С НДС, ₽", 110),
             ("source", "Источник", 80),
         ):
@@ -1288,11 +1457,10 @@ class RequestProcessorApp(tk.Tk):
             text="Выберите 2 снимка (Ctrl+клик) → «Сравнить A/B».",
             style="CardMuted.TLabel",
         ).pack(anchor="w")
-        self.compare_report = scrolledtext.ScrolledText(
+        self.compare_report = self._make_readonly_text(
             right, height=22, wrap="word", font=("Consolas", 9), bg=COLORS["card"]
         )
         self.compare_report.pack(fill="both", expand=True, pady=(6, 0))
-        self._bind_clipboard(self.compare_report)
 
     def _refresh_compare_list(self) -> None:
         if not hasattr(self, "compare_tree"):
@@ -1439,40 +1607,101 @@ class RequestProcessorApp(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        def _wheel_target_is_nested_scroller(widget: tk.Misc) -> bool:
-            """Treeview/Listbox/Text со своим скроллом — не перехватываем колесо."""
-            cur: tk.Misc | None = widget
-            while cur is not None:
-                if cur in (canvas, inner, outer, parent):
-                    return False
-                cls = cur.winfo_class()
-                if cls in ("Treeview", "Listbox", "Text", "TCombobox"):
-                    return True
-                cur = getattr(cur, "master", None)
-            return False
-
-        def _on_mousewheel(event: tk.Event) -> str | None:
-            if _wheel_target_is_nested_scroller(event.widget):
-                return None
-            delta = int(getattr(event, "delta", 0) or 0)
-            if delta == 0:
-                return None
-            canvas.yview_scroll(int(-1 * (delta / 120)), "units")
-            return "break"
-
-        def _bind_wheel(_event: tk.Event | None = None) -> None:
-            canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
-        def _unbind_wheel(_event: tk.Event | None = None) -> None:
-            canvas.unbind_all("<MouseWheel>")
-
-        for w in (canvas, inner, outer):
-            w.bind("<Enter>", _bind_wheel)
-            w.bind("<Leave>", _unbind_wheel)
-
         self._settings_canvas = canvas
         self._settings_scroll_inner = inner
+        self._settings_scroll_outer = outer
+        self._settings_wheel_bound = False
         return inner
+
+    def _widget_is_under(self, widget: tk.Misc | None, ancestor: tk.Misc) -> bool:
+        cur: tk.Misc | None = widget
+        while cur is not None:
+            if cur == ancestor:
+                return True
+            cur = getattr(cur, "master", None)
+        return False
+
+    def _settings_wheel_target_is_nested(self, widget: tk.Misc) -> bool:
+        """Над Treeview/Text/Spinbox — колесо для вложенного скролла, не вкладки."""
+        cur: tk.Misc | None = widget
+        outer = getattr(self, "_settings_scroll_outer", None)
+        while cur is not None:
+            if outer is not None and cur == outer:
+                return False
+            cls = cur.winfo_class()
+            if cls in ("Treeview", "Listbox", "Spinbox", "TSpinbox"):
+                return True
+            if cls == "Text":
+                # Если весь текст уже виден — крутим вкладку, иначе — сам Text.
+                try:
+                    first, last = cur.yview()  # type: ignore[attr-defined]
+                    if float(first) <= 0.001 and float(last) >= 0.999:
+                        return False
+                except (tk.TclError, TypeError, ValueError):
+                    pass
+                return True
+            cur = getattr(cur, "master", None)
+        return False
+
+    def _on_settings_mousewheel(self, event: tk.Event) -> str | None:
+        canvas = getattr(self, "_settings_canvas", None)
+        outer = getattr(self, "_settings_scroll_outer", None)
+        if canvas is None or outer is None:
+            return None
+        # Только когда курсор над вкладкой «Настройки» (не unbind на Leave дочерних).
+        if not self._widget_is_under(event.widget, outer):
+            # Windows: event.widget иногда root — проверяем координаты
+            try:
+                x, y = outer.winfo_pointerxy()
+                under = outer.winfo_containing(x, y)
+                if under is None or not self._widget_is_under(under, outer):
+                    return None
+                widget = under
+            except tk.TclError:
+                return None
+        else:
+            widget = event.widget
+        if self._settings_wheel_target_is_nested(widget):
+            return None
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return None
+        canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+        return "break"
+
+    def _enable_settings_wheel(self) -> None:
+        if getattr(self, "_settings_wheel_bound", False):
+            return
+        self.bind_all("<MouseWheel>", self._on_settings_mousewheel, add="+")
+        self._settings_wheel_bound = True
+
+    def _disable_settings_wheel(self) -> None:
+        if not getattr(self, "_settings_wheel_bound", False):
+            return
+        try:
+            self.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+        self._settings_wheel_bound = False
+
+    def _on_tab_changed(self, _event: tk.Event | None = None) -> None:
+        if not self.notebook:
+            return
+        selected = self.notebook.index(self.notebook.select())
+        # Колесо для длинной вкладки «Настройки» (bind_all, без срыва на дочерних Entry).
+        if selected == self.notebook.index(self.tab_settings):
+            self._enable_settings_wheel()
+            self._load_mappings_table()
+        else:
+            self._disable_settings_wheel()
+            if selected == self.notebook.index(self.tab_kp):
+                self._load_kp_calculations()
+            elif selected == self.notebook.index(self.tab_orgs):
+                self._load_orgs_table()
+            elif selected == self.notebook.index(self.tab_orders):
+                self._load_orders_table()
+            elif selected == self.notebook.index(self.tab_compare):
+                self._refresh_compare_list()
 
     def _build_settings_tab(self) -> None:
         # Прокручиваемый контейнер: иначе map_frame.expand съедает верх (LLM, путь).
@@ -1530,9 +1759,11 @@ class RequestProcessorApp(tk.Tk):
 
         llm_grid = ttk.Frame(llm_frame, style="Card.TFrame")
         llm_grid.pack(fill="x", pady=(10, 0))
+        from ..config import OLLAMA_MODELS_DIR_DEFAULT
+
         self.llm_model_var = tk.StringVar(value="llama3.2")
         self.llm_base_url_var = tk.StringVar(value="http://127.0.0.1:11434")
-        self.llm_models_dir_var = tk.StringVar(value="D:/ollama/models")
+        self.llm_models_dir_var = tk.StringVar(value=OLLAMA_MODELS_DIR_DEFAULT)
         self.llm_timeout_var = tk.StringVar(value="60")
         for row, (label, var, width) in enumerate(
             (
@@ -1557,8 +1788,12 @@ class RequestProcessorApp(tk.Tk):
         )
         ttk.Label(
             llm_frame,
-            text="По умолчанию выключено. Модели храните на D: (OLLAMA_MODELS). "
-            "Установка: scripts/install_ollama.ps1",
+            text=(
+                "По умолчанию выключено. Стандартный путь моделей Windows: "
+                "%USERPROFILE%\\.ollama\\models "
+                "(напр. C:\\Users\\User\\.ollama\\models). "
+                "Модель: llama3.2 → ollama pull llama3.2"
+            ),
             style="CardMuted.TLabel",
             wraplength=720,
         ).pack(anchor="w", pady=(8, 0))
@@ -1698,10 +1933,9 @@ class RequestProcessorApp(tk.Tk):
         map_scroll.pack(side="right", fill="y")
         self.mappings_tree.bind("<Double-1>", lambda _e: self._edit_mapping_dialog())
 
-        hint = scrolledtext.ScrolledText(
+        hint = self._make_readonly_text(
             body,
             height=4,
-            state="disabled",
             font=("Segoe UI", 10),
             bg="#f8fafc",
             relief="flat",
@@ -1924,9 +2158,12 @@ class RequestProcessorApp(tk.Tk):
         return quantities
 
     def _set_text(self, widget: scrolledtext.ScrolledText, content: str) -> None:
+        """Записать текст; readonly-поля (_rp_readonly) остаются копируемыми."""
         widget.configure(state="normal")
         widget.delete("1.0", "end")
         widget.insert("1.0", content)
+        if getattr(widget, "_rp_readonly", False):
+            return
         widget.configure(state="disabled")
 
     def _normalize_mark_lookup(self, mark: str) -> str:
@@ -2495,7 +2732,8 @@ class RequestProcessorApp(tk.Tk):
             self.validation_warn_detail.configure(state="normal")
             self.validation_warn_detail.delete("1.0", "end")
             self.validation_warn_detail.insert("1.0", detail)
-            self.validation_warn_detail.configure(state="disabled")
+            if not getattr(self.validation_warn_detail, "_rp_readonly", False):
+                self.validation_warn_detail.configure(state="disabled")
             # height fixed: не более 4–5 видимых строк + внутренний scroll
             lines_show = min(5, max(3, min(n, 5)))
             self.validation_warn_detail.configure(height=lines_show)
@@ -3831,7 +4069,6 @@ class RequestProcessorApp(tk.Tk):
         ).pack(anchor="w", padx=12, pady=(12, 4))
         text_box = scrolledtext.ScrolledText(dialog, height=18, font=("Segoe UI", 10), wrap="word")
         text_box.pack(fill="both", expand=True, padx=12, pady=4)
-        self._bind_clipboard(text_box)
 
         def run_parse() -> None:
             raw = text_box.get("1.0", "end").strip()
@@ -4623,12 +4860,16 @@ class RequestProcessorApp(tk.Tk):
         save_climatic_settings(settings, self.db_path)
         if hasattr(self, "llm_enabled_var"):
             try:
+                from ..config import OLLAMA_MODELS_DIR_DEFAULT
+
                 llm = AssistantLlmSettings(
                     enabled=self.llm_enabled_var.get(),
                     provider="ollama" if self.llm_enabled_var.get() else "off",
                     model=self.llm_model_var.get().strip() or "llama3.2",
                     base_url=self.llm_base_url_var.get().strip() or "http://127.0.0.1:11434",
-                    ollama_models_dir=self.llm_models_dir_var.get().strip() or "D:/ollama/models",
+                    ollama_models_dir=(
+                        self.llm_models_dir_var.get().strip() or OLLAMA_MODELS_DIR_DEFAULT
+                    ),
                     timeout_seconds=float(self.llm_timeout_var.get().replace(",", ".")),
                 )
             except ValueError:
@@ -4711,13 +4952,21 @@ class RequestProcessorApp(tk.Tk):
             messagebox.showerror("Импорт опыта", str(exc))
 
     def _test_ollama_connection(self) -> None:
+        from ..assistant.llm_provider import normalize_ollama_base_url
+
         if hasattr(self, "llm_enabled_var"):
             try:
+                base = normalize_ollama_base_url(self.llm_base_url_var.get())
+                self.llm_base_url_var.set(base)
+                from ..config import OLLAMA_MODELS_DIR_DEFAULT
+
                 llm = AssistantLlmSettings(
                     enabled=True,
                     model=self.llm_model_var.get().strip() or "llama3.2",
-                    base_url=self.llm_base_url_var.get().strip() or "http://127.0.0.1:11434",
-                    ollama_models_dir=self.llm_models_dir_var.get().strip() or "D:/ollama/models",
+                    base_url=base,
+                    ollama_models_dir=(
+                        self.llm_models_dir_var.get().strip() or OLLAMA_MODELS_DIR_DEFAULT
+                    ),
                     timeout_seconds=float(self.llm_timeout_var.get().replace(",", ".")),
                 )
             except ValueError:
@@ -4725,15 +4974,20 @@ class RequestProcessorApp(tk.Tk):
                 return
         else:
             llm = get_assistant_llm_settings(self.db_path)
-        health = check_ollama_health(llm)
+        # Долгая проверка + автозапуск serve — не блокируем UI сообщением «висит».
+        self.status.set("Проверка Ollama…")
+        self.update_idletasks()
+        health = check_ollama_health(llm, try_start=True)
         if health.ok:
-            models_preview = ", ".join(health.models[:5]) if health.models else "—"
+            models_preview = ", ".join(health.models[:8]) if health.models else "—"
             messagebox.showinfo(
                 "Ollama",
                 f"{health.message}\n\nМодели: {models_preview}",
             )
+            self.status.set("Ollama доступна")
         else:
             messagebox.showerror("Ollama", health.message)
+            self.status.set("Ollama недоступна")
 
     def _browse_pack_base_dir(self) -> None:
         from tkinter import filedialog
@@ -5107,6 +5361,7 @@ class RequestProcessorApp(tk.Tk):
 
 
 def main() -> None:
+    enable_windows_dpi_awareness()
     setup_logging(level="INFO")
     app = RequestProcessorApp()
     app.mainloop()

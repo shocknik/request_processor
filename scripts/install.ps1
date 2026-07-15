@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Установка request-processor на рабочий ПК (Windows).
@@ -113,20 +113,38 @@ foreach ($d in $dataDirs) {
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
 
-# Tesseract
-$tessCandidates = @(
-    (Join-Path $ProjectRoot "tools\Tesseract-OCR\tesseract.exe"),
-    "C:\Program Files\Tesseract-OCR\tesseract.exe",
-    "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
-)
-$tess = $tessCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+# Tesseract (пути на рабочем ПК часто другие — env или portable)
+$tess = $null
+foreach ($envKey in @("TESSERACT_CMD", "TESSERACT_PATH")) {
+    $envVal = [Environment]::GetEnvironmentVariable($envKey, "Process")
+    if (-not $envVal) { $envVal = [Environment]::GetEnvironmentVariable($envKey, "User") }
+    if (-not $envVal) { $envVal = [Environment]::GetEnvironmentVariable($envKey, "Machine") }
+    if ($envVal -and (Test-Path $envVal)) {
+        $tess = $envVal
+        break
+    }
+}
+if (-not $tess) {
+    $tessCandidates = @(
+        (Join-Path $ProjectRoot "tools\Tesseract-OCR\tesseract.exe"),
+        "C:\Program Files\Tesseract-OCR\tesseract.exe",
+        "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        "D:\Tesseract-OCR\tesseract.exe",
+        "D:\Apps\Tesseract-OCR\tesseract.exe",
+        "D:\Program Files\Tesseract-OCR\tesseract.exe"
+    )
+    $tess = $tessCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
 if ($tess) {
     Write-Host "Tesseract: $tess" -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "WARNING: Tesseract OCR не найден." -ForegroundColor Yellow
-    Write-Host "  Для сканов PDF установите Tesseract (rus+eng) и/или положите portable в:"
-    Write-Host "  $ProjectRoot\tools\Tesseract-OCR\tesseract.exe"
+    Write-Host "  Варианты (пути на рабочем ПК могут отличаться от dev):"
+    Write-Host "  1) Установить Tesseract (rus+eng) и добавить в PATH"
+    Write-Host "  2) Portable: $ProjectRoot\tools\Tesseract-OCR\tesseract.exe"
+    Write-Host "  3) Переменная пользователя TESSERACT_CMD = полный путь к tesseract.exe"
+    Write-Host "     [Environment]::SetEnvironmentVariable('TESSERACT_CMD', 'D:\path\tesseract.exe', 'User')"
     Write-Host "  https://github.com/UB-Mannheim/tesseract/wiki"
     Write-Host ""
 }
@@ -145,15 +163,43 @@ if (-not $SkipShortcut) {
     }
 }
 
+$priceHint = Join-Path $ProjectRoot "data\Обновленная стоимость на 2026 год.xlsx"
+$appDb = Join-Path $ProjectRoot "data\app.db"
+$ollamaDefault = Join-Path $env:USERPROFILE ".ollama\models"
 Write-Host ""
 Write-Host "=== Готово ===" -ForegroundColor Green
 Write-Host "Запуск GUI:"
 Write-Host "  $ProjectRoot\start_gui.bat"
-Write-Host "или:"
-Write-Host "  .\.venv\Scripts\request-processor-gui.exe"
+Write-Host "или ярлык на рабочем столе («Обработка заявок на испытания кабелей»)"
+Write-Host ""
+Write-Host "Ярлык вручную (если не создался):"
+Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1"
+Write-Host ""
+if (Test-Path $appDb) {
+    Write-Host "БД data\app.db уже есть."
+    Write-Host "  Боевой старт с текущим прайсом (очистить только марки/орг.):"
+    Write-Host "    .\.venv\Scripts\request-processor.exe prepare-battle-db --yes" -ForegroundColor Cyan
+    Write-Host "  (прайс test_items и test_mappings сохраняются; backup app.db.pre_battle_*.db)"
+} else {
+    Write-Host "Чистая база после install:"
+    Write-Host "  • organizations, cable_marks, orders — пустые"
+    Write-Host "  • test_mappings — стартовый набор"
+    Write-Host "  • test_items — демо. Загрузите прайс:"
+    if (Test-Path $priceHint) {
+        Write-Host "    .\.venv\Scripts\request-processor.exe load-data --price `"$priceHint`"" -ForegroundColor Cyan
+    } else {
+        Write-Host "    .\.venv\Scripts\request-processor.exe load-data --price data\ВАШ_ПРАЙС.xlsx" -ForegroundColor Yellow
+    }
+}
+Write-Host ""
+Write-Host "Ollama (опционально):"
+Write-Host "  • URL: http://127.0.0.1:11434"
+Write-Host "  • Каталог моделей (стандарт): $ollamaDefault"
+Write-Host "  • Модель: ollama pull llama3.2"
+Write-Host "  • GUI → 10. Настройки → Проверить Ollama"
 Write-Host ""
 Write-Host "Рекомендации оператора:"
-Write-Host "  • DPI для сканов: 400 (по умолчанию в GUI)"
-Write-Host "  • torch-CV / EasyOCR: только эксперимент (хуже Tesseract на текущих сканах)"
-Write-Host "  • После правок марок — «Подтвердить заявку» (идёт в обучение)"
+Write-Host "  • Word (.docx) — основной путь; PDF-сканы: DPI 400"
+Write-Host "  • Организации и марки — проверять вручную, затем «Подтвердить заявку»"
+Write-Host "  • Раз в неделю: Настройки → Экспорт опыта (zip) → разработчику"
 Write-Host ""
