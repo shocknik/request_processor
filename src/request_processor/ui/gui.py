@@ -1507,9 +1507,13 @@ class RequestProcessorApp(tk.Tk):
         if not prog:
             self.program_info_var.set("Не найдено")
             return
+        marks_preview = (prog.get("cable_mark_text") or "").replace("\n", " · ")
+        if len(marks_preview) > 100:
+            marks_preview = marks_preview[:100] + "…"
         self.program_info_var.set(
-            f"ТУ: {prog.get('tu_ref') or '—'}  ·  "
-            f"{(prog.get('source_path') or '')[-60:]}"
+            f"Марки: {marks_preview or '—'}  |  "
+            f"ТУ: {prog.get('tu_ref') or '—'}  |  "
+            f"{(prog.get('source_path') or '')[-50:]}"
         )
         for it in prog.get("items") or []:
             self.program_items_tree.insert(
