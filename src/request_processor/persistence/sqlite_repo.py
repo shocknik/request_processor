@@ -1795,6 +1795,219 @@ def list_cable_marks(
         return [dict(row) for row in rows]
 
 
+def delete_cable_mark(
+    mark_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Удаляет марку из справочника.
+
+    Если force=False и марка в order_marks — отказ (blocked).
+    Если force=True — обнуляет cable_mark_id в order_marks, затем удаляет.
+    """
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, full_mark FROM cable_marks WHERE id = ?", (mark_id,)
+        ).fetchone()
+        if not row:
+            return {"ok": False, "reason": "not_found"}
+        refs = conn.execute(
+            "SELECT COUNT(*) AS n FROM order_marks WHERE cable_mark_id = ?",
+            (mark_id,),
+        ).fetchone()["n"]
+        if refs and not force:
+            return {
+                "ok": False,
+                "reason": "in_use",
+                "refs": int(refs),
+                "full_mark": row["full_mark"],
+            }
+        if refs and force:
+            conn.execute(
+                "UPDATE order_marks SET cable_mark_id = NULL WHERE cable_mark_id = ?",
+                (mark_id,),
+            )
+        conn.execute("DELETE FROM cable_marks WHERE id = ?", (mark_id,))
+        return {"ok": True, "full_mark": row["full_mark"], "unlinked": int(refs)}
+
+
+def delete_calculation(
+    calc_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any]:
+    """Удаляет расчёт и его строки. order_marks.calculation_id → NULL."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, mark FROM calculations WHERE id = ?", (calc_id,)
+        ).fetchone()
+        if not row:
+            return {"ok": False, "reason": "not_found"}
+        conn.execute(
+            "UPDATE order_marks SET calculation_id = NULL WHERE calculation_id = ?",
+            (calc_id,),
+        )
+        conn.execute("DELETE FROM calculation_lines WHERE calculation_id = ?", (calc_id,))
+        conn.execute(
+            "UPDATE generated_documents SET calculation_id = NULL WHERE calculation_id = ?",
+            (calc_id,),
+        )
+        conn.execute("DELETE FROM calculations WHERE id = ?", (calc_id,))
+        return {"ok": True, "mark": row["mark"]}
+
+
+def delete_generated_document(
+    doc_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    delete_file: bool = False,
+) -> dict[str, Any]:
+    """Удаляет запись КП/документа из generated_documents (опц. файл с диска)."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, doc_type, file_path FROM generated_documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            return {"ok": False, "reason": "not_found"}
+        path = row["file_path"]
+        conn.execute("DELETE FROM generated_documents WHERE id = ?", (doc_id,))
+    removed_file = False
+    if delete_file and path:
+        try:
+            p = Path(path)
+            if p.is_file():
+                p.unlink()
+                removed_file = True
+        except OSError:
+            pass
+    return {
+        "ok": True,
+        "doc_type": row["doc_type"],
+        "file_path": path,
+        "file_removed": removed_file,
+    }
+
+
+def delete_order(
+    order_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    cascade: bool = False,
+) -> dict[str, Any]:
+    """Удаляет заказ.
+
+    cascade=False: отказ, если есть order_marks / applications / generated.
+    cascade=True: удаляет дочерние записи (не трогает calculations целиком —
+    только связи order_marks); файлы на диске не удаляет.
+    """
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, customer_name FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+        if not row:
+            return {"ok": False, "reason": "not_found"}
+        marks_n = conn.execute(
+            "SELECT COUNT(*) AS n FROM order_marks WHERE order_id = ?", (order_id,)
+        ).fetchone()["n"]
+        apps_n = conn.execute(
+            "SELECT COUNT(*) AS n FROM test_applications WHERE order_id = ?",
+            (order_id,),
+        ).fetchone()["n"]
+        docs_n = conn.execute(
+            "SELECT COUNT(*) AS n FROM generated_documents WHERE order_id = ?",
+            (order_id,),
+        ).fetchone()["n"]
+        children = int(marks_n) + int(apps_n) + int(docs_n)
+        if children and not cascade:
+            return {
+                "ok": False,
+                "reason": "has_children",
+                "order_marks": int(marks_n),
+                "applications": int(apps_n),
+                "generated": int(docs_n),
+                "customer_name": row["customer_name"],
+            }
+        conn.execute("DELETE FROM order_marks WHERE order_id = ?", (order_id,))
+        conn.execute("DELETE FROM test_applications WHERE order_id = ?", (order_id,))
+        conn.execute(
+            "UPDATE generated_documents SET order_id = NULL WHERE order_id = ?",
+            (order_id,),
+        )
+        conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
+        return {
+            "ok": True,
+            "customer_name": row["customer_name"],
+            "removed_marks": int(marks_n),
+            "removed_applications": int(apps_n),
+            "unlinked_generated": int(docs_n),
+        }
+
+
+def delete_organization(
+    org_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Удаляет организацию. force: обнуляет FK в orders/order_marks/extractions."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, name FROM organizations WHERE id = ?", (org_id,)
+        ).fetchone()
+        if not row:
+            return {"ok": False, "reason": "not_found"}
+        o_refs = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM orders
+            WHERE customer_org_id = ? OR manufacturer_org_id = ?
+            """,
+            (org_id, org_id),
+        ).fetchone()["n"]
+        m_refs = conn.execute(
+            "SELECT COUNT(*) AS n FROM order_marks WHERE manufacturer_org_id = ?",
+            (org_id,),
+        ).fetchone()["n"]
+        e_refs = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM document_extractions
+            WHERE customer_org_id = ? OR manufacturer_org_id = ?
+            """,
+            (org_id, org_id),
+        ).fetchone()["n"]
+        total = int(o_refs) + int(m_refs) + int(e_refs)
+        if total and not force:
+            return {
+                "ok": False,
+                "reason": "in_use",
+                "refs": total,
+                "name": row["name"],
+            }
+        if force:
+            conn.execute(
+                "UPDATE orders SET customer_org_id = NULL WHERE customer_org_id = ?",
+                (org_id,),
+            )
+            conn.execute(
+                "UPDATE orders SET manufacturer_org_id = NULL WHERE manufacturer_org_id = ?",
+                (org_id,),
+            )
+            conn.execute(
+                "UPDATE order_marks SET manufacturer_org_id = NULL WHERE manufacturer_org_id = ?",
+                (org_id,),
+            )
+            conn.execute(
+                "UPDATE document_extractions SET customer_org_id = NULL WHERE customer_org_id = ?",
+                (org_id,),
+            )
+            conn.execute(
+                "UPDATE document_extractions SET manufacturer_org_id = NULL WHERE manufacturer_org_id = ?",
+                (org_id,),
+            )
+        conn.execute("DELETE FROM organizations WHERE id = ?", (org_id,))
+        return {"ok": True, "name": row["name"], "unlinked": total}
+
+
 def _seed_demo_tests(db_path: str | Path) -> None:
     """Добавляет демо-тесты с реалистичными параметрами."""
     demo = [

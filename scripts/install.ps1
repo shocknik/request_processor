@@ -170,10 +170,11 @@ Write-Host ""
 Write-Host "=== Готово ===" -ForegroundColor Green
 Write-Host "Запуск GUI:"
 Write-Host "  $ProjectRoot\start_gui.bat"
-Write-Host "или ярлык на рабочем столе («Обработка заявок на испытания кабелей»)"
+Write-Host "или ярлык на рабочем столе: Lab_request"
 Write-Host ""
 Write-Host "Ярлык вручную (если не создался):"
 Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1"
+Write-Host "  (имя: Lab_request.lnk)"
 Write-Host ""
 if (Test-Path $appDb) {
     Write-Host "БД data\app.db уже есть."

@@ -42,20 +42,31 @@ def setup_logging(
     logger.handlers.clear()
     logger.propagate = False
 
+    # tag= в extra опционален: logger.info("msg", extra={"tag": "Старт"})
     fmt = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        fmt="%(asctime)s | %(levelname)-7s | %(name)s | [%(tag)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    class _TagFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            if not hasattr(record, "tag"):
+                record.tag = "-"  # type: ignore[attr-defined]
+            return True
+
+    tag_filter = _TagFilter()
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
+    fh.addFilter(tag_filter)
     logger.addHandler(fh)
 
     if console:
         ch = logging.StreamHandler(sys.stderr)
         ch.setLevel(level)
         ch.setFormatter(fmt)
+        ch.addFilter(tag_filter)
         logger.addHandler(ch)
 
     # Подключаем дочерние логгеры extraction/ui/…

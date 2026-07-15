@@ -1344,6 +1344,31 @@ def save_parse_snapshot_cmd(json_path: str, label: str, notes: str, dpi: Optiona
     click.echo(f"  marks={snap.metrics.marks_count}  quality={snap.metrics.quality_score}  engine={snap.ocr_engine}")
 
 
+@cli.command("export-protocol-meta")
+@click.option("--order-id", type=int, required=True, help="ID заказа")
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    type=click.Path(),
+    help="Путь к JSON (по умолчанию data/generated/protocol_meta_order…json)",
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def export_protocol_meta_cmd(order_id: int, output: Optional[str], db: str) -> None:
+    """JSON-каркас протокола для protocol_generator (без измеренных значений)."""
+    from .generation.protocol_meta_export import export_protocol_meta_for_order
+
+    path = export_protocol_meta_for_order(
+        order_id,
+        output_path=output,
+        db_path=db,
+    )
+    click.echo(click.style(f"✓ JSON: {path}", fg="green"))
+    click.echo("Дальше (на машине с protocol_generator):")
+    click.echo(f'  cd D:\\My_projects\\protocol_generator')
+    click.echo(f'  .\\venv\\Scripts\\python.exe main.py "{path}"')
+
+
 @cli.command("export-battle-experience")
 @click.option(
     "--output",

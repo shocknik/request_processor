@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -23,12 +24,6 @@ from ..calculation.test_rules import (
     rule_type_label,
 )
 from ..logging_setup import get_logger, setup_logging
-from ..parse_compare import (
-    compare_snapshots,
-    list_snapshots,
-    load_snapshot,
-    save_snapshot_from_extraction,
-)
 from ..parsing.cable_mark_parser import parse_cable_mark_record
 from ..calculation.cost_calculator import calculate_cost, format_breakdown
 from ..validation.extraction_validator import apply_operator_edits, validate_extraction
@@ -51,15 +46,11 @@ from ..extraction.test_type_extractor import (
     format_test_type_label,
 )
 from ..assistant.feedback import AssistantFeedbackEvent, append_assistant_feedback
-from ..assistant.llm_provider import check_ollama_health
-from ..assistant.mark_corrector import get_mark_corrector, suggest_mark_correction
 from ..assistant.models import AssistantContext
 from ..extraction.pdf_extractor import (
     DEFAULT_OCR_DPI,
     EASYOCR_OCR_DPI,
     SCAN_OCR_DPI,
-    extract_from_document,
-    extract_from_text,
 )
 from .theme import (
     COLORS,
@@ -71,10 +62,8 @@ from .theme import (
 )
 
 _log = get_logger("ui.gui")
-from ..generation.application_generator import generate_application_from_order
-from ..generation.document_pack import build_document_pack
+# generation / extract / ollama / parse_compare — lazy (ускорение холодного старта)
 from ..generation.kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
-from ..generation.protocol_generator import generate_protocol_draft_from_order
 from ..persistence.sqlite_repo import (
     DB_PATH_DEFAULT,
     GENERATED_DIR_DEFAULT,
@@ -109,6 +98,11 @@ from ..persistence.sqlite_repo import (
     add_test_mapping,
     update_test_mapping,
     delete_test_mapping,
+    delete_cable_mark,
+    delete_calculation,
+    delete_order,
+    delete_organization,
+    delete_generated_document,
     record_mapping_usage,
 )
 
@@ -154,10 +148,11 @@ class ExtractionDraft:
 class RequestProcessorApp(tk.Tk):
     def __init__(self, db_path: Path = DB_PATH_DEFAULT) -> None:
         super().__init__()
+        t0 = time.perf_counter()
         setup_logging(level="INFO")
         self.db_path = Path(db_path)
         self.generated_dir = GENERATED_DIR_DEFAULT
-        self.title("Обработка заявок на испытания кабелей")
+        self.title("Lab_request")
         # 1920×1080 и шире: ~94% экрана (раньше cap 1200×860 — «маленькое» окно)
         fit_window_to_screen(self, prefer_w=1400, prefer_h=900, fill=True)
         self.configure(bg=COLORS["bg"])
@@ -174,10 +169,26 @@ class RequestProcessorApp(tk.Tk):
         self._compare_snapshots_cache: list[dict] = []
         # кэш подсказок ассистента: index → suggested text (для колонки 💡)
         self._assistant_hints: dict[int, str] = {}
+        self._pdf_opts_expanded = False
 
+        def _phase(name: str, t_prev: float) -> float:
+            now = time.perf_counter()
+            _log.info(
+                "%s: %.0f ms",
+                name,
+                (now - t_prev) * 1000,
+                extra={"tag": "Старт"},
+            )
+            return now
+
+        t = _phase("init shell", t0)
         self._ensure_db()
+        t = _phase("ensure_db", t)
         self._setup_theme()
+        t = _phase("theme", t)
         self._build_ui()
+        t = _phase("build_ui", t)
+        # Минимальный стартовый набор; сравнение снимков — при первом открытии вкладки
         self._load_history()
         self._load_tests()
         self._load_cable_marks()
@@ -186,9 +197,17 @@ class RequestProcessorApp(tk.Tk):
         self._load_organizations()
         self._refresh_parse_info_panel()
         self._load_orders_table()
-        self._refresh_compare_list()
+        self._compare_list_loaded = False
+        t = _phase("load_data", t)
         self._install_clipboard_support()
-        _log.info("GUI started db=%s screen=%sx%s", self.db_path, self.winfo_screenwidth(), self.winfo_screenheight())
+        _log.info(
+            "GUI ready total=%.0f ms db=%s screen=%sx%s",
+            (time.perf_counter() - t0) * 1000,
+            self.db_path,
+            self.winfo_screenwidth(),
+            self.winfo_screenheight(),
+            extra={"tag": "Старт"},
+        )
 
     # Классы виджетов с текстом (bind_class — и текущие, и будущие диалоги).
     _CLIPBOARD_CLASSES = (
@@ -542,7 +561,7 @@ class RequestProcessorApp(tk.Tk):
         header.pack(fill="x")
         tk.Label(
             header,
-            text="Испытания кабельной продукции",
+            text="Lab_request",
             bg=COLORS["header_bg"],
             fg=COLORS["header_text"],
             font=("Segoe UI Semibold", 18, "bold"),
@@ -612,6 +631,7 @@ class RequestProcessorApp(tk.Tk):
         self.tab_tests = ttk.Frame(self.notebook, padding=10)
         self.tab_history = ttk.Frame(self.notebook, padding=10)
         self.tab_settings = ttk.Frame(self.notebook, padding=10)
+        self.tab_journal = ttk.Frame(self.notebook, padding=10)
 
         self.notebook.add(self.tab_pdf, text="  1. Заявка  ")
         self.notebook.add(self.tab_calc, text="  2. Расчёт  ")
@@ -623,6 +643,7 @@ class RequestProcessorApp(tk.Tk):
         self.notebook.add(self.tab_tests, text="  8. Справочник  ")
         self.notebook.add(self.tab_history, text="  9. История  ")
         self.notebook.add(self.tab_settings, text="  10. Настройки  ")
+        self.notebook.add(self.tab_journal, text="  11. Журнал  ")
 
         self._build_pdf_tab()
         self._build_calc_tab()
@@ -634,6 +655,7 @@ class RequestProcessorApp(tk.Tk):
         self._build_tests_tab()
         self._build_history_tab()
         self._build_settings_tab()
+        self._build_journal_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _build_calc_tab(self) -> None:
@@ -881,28 +903,32 @@ class RequestProcessorApp(tk.Tk):
         ttk.Entry(top, textvariable=self.pdf_path_var).pack(side="left", fill="x", expand=True, ipady=3)
         ttk.Button(top, text="Обзор…", command=self._browse_pdf).pack(side="left", padx=6)
         self._accent_button(top, "Извлечь", self._run_extract_pdf).pack(side="left", padx=(0, 4))
-        self._secondary_button(top, "Текст…", self._run_extract_free_text).pack(side="left", padx=(0, 4))
         self.confirm_btn_top = self._accent_button(
             top, "Подтвердить заявку", self._confirm_extraction
         )
         self.confirm_btn_top.pack(side="left", padx=(4, 0))
-        self._secondary_button(top, "Снимок", self._save_parse_snapshot).pack(side="left", padx=(6, 0))
+        more = ttk.Menubutton(top, text="Ещё ▾")
+        more_menu = tk.Menu(more, tearoff=0)
+        more_menu.add_command(label="Текст…", command=self._run_extract_free_text)
+        more_menu.add_command(label="Снимок парсинга", command=self._save_parse_snapshot)
+        more_menu.add_separator()
+        more_menu.add_command(label="Параметры OCR / сохранения…", command=self._toggle_pdf_opts)
+        more["menu"] = more_menu
+        more.pack(side="left", padx=(8, 0))
 
+        # OCR и флаги сохранения — свёрнуты по умолчанию (меньше визуального шума)
         self.pdf_opts_frame = ttk.Frame(self.tab_pdf)
-        self.pdf_opts_frame.pack(fill="x", pady=8)
         opts = self.pdf_opts_frame
         self.ocr_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="OCR для сканов", variable=self.ocr_var).pack(side="left")
-        # A/B spike 35v: EasyOCR = PyTorch CV backend (opt-in, not default)
         self.ocr_pytorch_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             opts,
-            text="torch-CV эксперимент (хуже default)",
+            text="torch-CV (эксперимент)",
             variable=self.ocr_pytorch_var,
             command=self._on_ocr_engine_toggle,
         ).pack(side="left", padx=(10, 0))
         ttk.Label(opts, text="DPI:", style="Muted.TLabel").pack(side="left", padx=(12, 2))
-        # DPI = пикселей на дюйм при растеризации PDF → OCR (выше = чётче, медленнее)
         self.ocr_dpi_var = tk.IntVar(value=SCAN_OCR_DPI)  # default 400
         self.ocr_dpi_combo = ttk.Combobox(
             opts,
@@ -912,11 +938,6 @@ class RequestProcessorApp(tk.Tk):
             state="readonly",
         )
         self.ocr_dpi_combo.pack(side="left")
-        ttk.Label(
-            opts,
-            text="(выше → чётче, дольше)",
-            style="Muted.TLabel",
-        ).pack(side="left", padx=(4, 0))
         self.confirm_only_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opts,
@@ -925,11 +946,11 @@ class RequestProcessorApp(tk.Tk):
             command=self._on_confirm_only_toggle,
         ).pack(side="left", padx=(8, 0))
         self.save_marks_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Сохранять марки в БД", variable=self.save_marks_var).pack(
+        ttk.Checkbutton(opts, text="Марки в БД сразу", variable=self.save_marks_var).pack(
             side="left", padx=(12, 0)
         )
         self.save_orgs_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Сохранять организации в БД", variable=self.save_orgs_var).pack(
+        ttk.Checkbutton(opts, text="Орг. в БД сразу", variable=self.save_orgs_var).pack(
             side="left", padx=(8, 0)
         )
 
@@ -1100,6 +1121,9 @@ class RequestProcessorApp(tk.Tk):
         self.marks_search_var = tk.StringVar()
         ttk.Entry(toolbar, textvariable=self.marks_search_var, width=32).pack(side="left", padx=8, ipady=2)
         ttk.Button(toolbar, text="Поиск", command=self._load_cable_marks).pack(side="left")
+        ttk.Button(toolbar, text="Удалить…", command=self._delete_selected_cable_mark).pack(
+            side="left", padx=(12, 0)
+        )
 
         cols = ("full_mark", "brand", "fire_class", "cores", "element", "size", "document")
         self.cable_marks_tree = ttk.Treeview(self.tab_marks, columns=cols, show="headings", height=24)
@@ -1168,7 +1192,21 @@ class RequestProcessorApp(tk.Tk):
         action = ttk.Frame(self.tab_kp)
         action.pack(fill="x", pady=(0, 8))
 
+        ttk.Label(action, text="Стиль бланка:", style="Muted.TLabel").pack(side="left", padx=(0, 4))
+        from ..generation.lab_profile import KP_STYLES, load_lab_profile
+
+        self.kp_style_var = tk.StringVar(value=load_lab_profile().kp_style)
+        ttk.Combobox(
+            action,
+            textvariable=self.kp_style_var,
+            values=list(KP_STYLES),
+            width=10,
+            state="readonly",
+        ).pack(side="left", padx=(0, 10))
         self._accent_button(action, "Сформировать КП", self._run_generate_kp).pack(side="left")
+        self._secondary_button(
+            action, "3 образца бланка", self._generate_kp_style_previews
+        ).pack(side="left", padx=(8, 0))
         ttk.Button(action, text="Выбрать все", command=self._select_all_kp_calcs).pack(
             side="left", padx=(8, 0)
         )
@@ -1228,22 +1266,25 @@ class RequestProcessorApp(tk.Tk):
         self._accent_button(toolbar, "Пакет документов", self._build_order_document_pack).pack(
             side="left", padx=(8, 0)
         )
-        self._secondary_button(toolbar, "Макет протокола", self._generate_order_protocol).pack(
+        self._secondary_button(
+            toolbar, "JSON → protocol_generator", self._export_order_protocol_meta
+        ).pack(side="left", padx=(8, 0))
+        self._secondary_button(toolbar, "Обновить", self._load_orders_table).pack(
             side="left", padx=(8, 0)
         )
-        self._secondary_button(toolbar, "Открыть КП", self._open_selected_order_kp).pack(
+        ttk.Button(toolbar, text="Удалить заказ…", command=self._delete_selected_order).pack(
             side="left", padx=(8, 0)
         )
-        self._secondary_button(toolbar, "Открыть заявку", self._open_selected_order_application).pack(
-            side="left", padx=(6, 0)
-        )
-        self._secondary_button(toolbar, "Печать КП", self._print_selected_order_kp).pack(
-            side="left", padx=(6, 0)
-        )
-        self._secondary_button(toolbar, "Печать заявку", self._print_selected_order_application).pack(
-            side="left", padx=(6, 0)
-        )
-        self._secondary_button(toolbar, "Обновить", self._load_orders_table).pack(side="left", padx=(6, 0))
+        orders_more = ttk.Menubutton(toolbar, text="Ещё ▾")
+        om = tk.Menu(orders_more, tearoff=0)
+        om.add_command(label="Макет протокола (простой)", command=self._generate_order_protocol)
+        om.add_command(label="Открыть КП", command=self._open_selected_order_kp)
+        om.add_command(label="Открыть заявку", command=self._open_selected_order_application)
+        om.add_separator()
+        om.add_command(label="Печать КП", command=self._print_selected_order_kp)
+        om.add_command(label="Печать заявки", command=self._print_selected_order_application)
+        orders_more["menu"] = om
+        orders_more.pack(side="left", padx=(8, 0))
         ttk.Label(
             toolbar,
             text="Клик — детали; двойной клик — открыть КП",
@@ -1299,6 +1340,9 @@ class RequestProcessorApp(tk.Tk):
         ttk.Button(toolbar, text="Редактировать…", command=self._edit_selected_organization).pack(
             side="left", padx=6
         )
+        ttk.Button(toolbar, text="Удалить…", command=self._delete_selected_organization).pack(
+            side="left", padx=6
+        )
         self.orgs_search_var = tk.StringVar()
         self.orgs_search_var.trace_add("write", lambda *_: self._load_orgs_table())
         ttk.Entry(toolbar, textvariable=self.orgs_search_var, width=36).pack(
@@ -1330,10 +1374,79 @@ class RequestProcessorApp(tk.Tk):
         self.orgs_tree.pack(fill="both", expand=True)
         self.orgs_tree.bind("<Double-Button-1>", lambda _e: self._edit_selected_organization())
 
+    def _build_journal_tab(self) -> None:
+        toolbar = ttk.Frame(self.tab_journal)
+        toolbar.pack(fill="x", pady=(0, 8))
+        ttk.Button(toolbar, text="Обновить", command=self._load_journal_tail).pack(side="left")
+        ttk.Label(
+            toolbar,
+            text="Хвост data/logs/app_YYYY-MM-DD.log (удобно читать оператору)",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=12)
+        self.journal_text = self._make_readonly_text(
+            self.tab_journal,
+            height=28,
+            font=("Consolas", 9),
+            bg="#0f172a",
+            fg="#e2e8f0",
+            wrap="none",
+        )
+        # dark console-like
+        try:
+            self.journal_text.configure(bg="#0f172a", fg="#e2e8f0", insertbackground="#e2e8f0")
+        except tk.TclError:
+            pass
+        self.journal_text.pack(fill="both", expand=True)
+
+    def _load_journal_tail(self, lines: int = 250) -> None:
+        if not hasattr(self, "journal_text"):
+            return
+        from ..config import LOGS_DIR
+        from datetime import date
+
+        log_path = LOGS_DIR / f"app_{date.today().isoformat()}.log"
+        if not log_path.is_file():
+            self._set_text(self.journal_text, f"Файл лога пока пуст:\n{log_path}")
+            return
+        try:
+            raw = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            tail = raw[-lines:] if len(raw) > lines else raw
+            self._set_text(
+                self.journal_text,
+                f"# {log_path}  (последние {len(tail)} строк)\n\n" + "\n".join(tail),
+            )
+        except OSError as exc:
+            self._set_text(self.journal_text, f"Не удалось прочитать лог:\n{exc}")
+
+    def _generate_kp_style_previews(self) -> None:
+        try:
+            from ..generation.kp_generator import render_kp_style_previews
+
+            paths = render_kp_style_previews()
+            folder = paths[0].parent if paths else None
+            self.status.set(f"Образцы КП: {len(paths)} шт.")
+            msg = "Сгенерированы бланки (выберите стиль в lab_profile.yaml → kp_style):\n\n"
+            msg += "\n".join(f"  • {p.name}" for p in paths)
+            if folder:
+                msg += f"\n\nПапка:\n{folder}"
+            messagebox.showinfo("Образцы КП", msg)
+            if folder:
+                try:
+                    import os
+
+                    os.startfile(str(folder))
+                except OSError:
+                    pass
+        except Exception as exc:
+            messagebox.showerror("Образцы КП", str(exc))
+
     def _build_history_tab(self) -> None:
         toolbar = ttk.Frame(self.tab_history)
         toolbar.pack(fill="x")
         ttk.Button(toolbar, text="Обновить", command=self._load_history).pack(side="left")
+        ttk.Button(toolbar, text="Удалить расчёт…", command=self._delete_selected_calculation).pack(
+            side="left", padx=(12, 0)
+        )
 
         cols = ("id", "created_at", "mark", "total", "source")
         self.history_tree = ttk.Treeview(self.tab_history, columns=cols, show="headings", height=24)
@@ -1465,6 +1578,8 @@ class RequestProcessorApp(tk.Tk):
     def _refresh_compare_list(self) -> None:
         if not hasattr(self, "compare_tree"):
             return
+        from ..parse_compare import list_snapshots
+
         self._compare_snapshots_cache = list_snapshots(limit=100)
         for item in self.compare_tree.get_children():
             self.compare_tree.delete(item)
@@ -1505,6 +1620,8 @@ class RequestProcessorApp(tk.Tk):
         except Exception:
             dpi = None
         try:
+            from ..parse_compare import save_snapshot_from_extraction
+
             snap = save_snapshot_from_extraction(
                 draft.result,
                 label=label.strip() or "",
@@ -1536,6 +1653,8 @@ class RequestProcessorApp(tk.Tk):
             messagebox.showinfo("Сравнение", "Выберите ровно 2 снимка (Ctrl+клик).")
             return
         try:
+            from ..parse_compare import compare_snapshots, load_snapshot
+
             a = load_snapshot(sel[0])
             b = load_snapshot(sel[1])
             report = compare_snapshots(a, b)
@@ -1701,7 +1820,15 @@ class RequestProcessorApp(tk.Tk):
             elif selected == self.notebook.index(self.tab_orders):
                 self._load_orders_table()
             elif selected == self.notebook.index(self.tab_compare):
-                self._refresh_compare_list()
+                if not getattr(self, "_compare_list_loaded", False):
+                    self._refresh_compare_list()
+                    self._compare_list_loaded = True
+                else:
+                    self._refresh_compare_list()
+            elif hasattr(self, "tab_journal") and selected == self.notebook.index(
+                self.tab_journal
+            ):
+                self._load_journal_tail()
 
     def _build_settings_tab(self) -> None:
         # Прокручиваемый контейнер: иначе map_frame.expand съедает верх (LLM, путь).
@@ -2639,6 +2766,7 @@ class RequestProcessorApp(tk.Tk):
         self._assistant_hints = {}
         if not self._extraction_draft:
             return
+        from ..assistant.mark_corrector import get_mark_corrector
         corrector = get_mark_corrector(self.db_path)
         ctx = AssistantContext(
             document_text=self._extraction_draft.result.text[:4000]
@@ -2974,6 +3102,7 @@ class RequestProcessorApp(tk.Tk):
         if mark.document:
             lines.append(f"ТУ/ГОСТ: {mark.document}")
         try:
+            from ..assistant.mark_corrector import suggest_mark_correction, get_mark_corrector
             suggestion = suggest_mark_correction(mark.mark, db_path=self.db_path)
             if suggestion.changed:
                 lines.append(
@@ -2985,6 +3114,7 @@ class RequestProcessorApp(tk.Tk):
                 lines.append("  → «Принять 💡» / «Отклонить 💡» или диалог «Ассистент»")
             else:
                 lines.append("\nАссистент: без правок")
+            from ..assistant.mark_corrector import get_mark_corrector
             alts = get_mark_corrector(self.db_path).candidates(mark.mark, limit=3)
             if alts and (not suggestion.changed or alts[0][0] != suggestion.suggested):
                 lines.append("  Похожие в БД:")
@@ -3042,6 +3172,7 @@ class RequestProcessorApp(tk.Tk):
             messagebox.showinfo("Ассистент", "Выберите марку с 💡 в таблице.")
             return
         idx = int(sel[0])
+        from ..assistant.mark_corrector import suggest_mark_correction, get_mark_corrector
         suggestion = suggest_mark_correction(
             self._extraction_draft.marks[idx].mark, db_path=self.db_path
         )
@@ -3080,6 +3211,7 @@ class RequestProcessorApp(tk.Tk):
             return
         idx = int(sel[0])
         mark = self._extraction_draft.marks[idx]
+        from ..assistant.mark_corrector import suggest_mark_correction, get_mark_corrector
         suggestion = suggest_mark_correction(mark.mark, db_path=self.db_path)
         if not suggestion.changed:
             messagebox.showinfo("Ассистент", "Подсказки нет — отклонять нечего.")
@@ -3105,6 +3237,7 @@ class RequestProcessorApp(tk.Tk):
             messagebox.showinfo("Ассистент", "Сначала извлеките заявку (файл или текст).")
             return
 
+        from ..assistant.mark_corrector import get_mark_corrector
         corrector = get_mark_corrector(self.db_path)
         items: list[tuple[int, str, object]] = []
         checked = 0
@@ -4043,6 +4176,7 @@ class RequestProcessorApp(tk.Tk):
                 n_suggest = 0
                 for m in draft.marks:
                     try:
+                        from ..assistant.mark_corrector import suggest_mark_correction, get_mark_corrector
                         if suggest_mark_correction(m.mark, db_path=self.db_path).changed:
                             n_suggest += 1
                     except Exception:  # noqa: BLE001
@@ -4081,6 +4215,7 @@ class RequestProcessorApp(tk.Tk):
 
             def work() -> None:
                 try:
+                    from ..extraction.pdf_extractor import extract_from_text
                     result = extract_from_text(raw, source_label="customer_speech")
                     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     virtual = Path(f"text_customer_{stamp}.txt")
@@ -4185,6 +4320,7 @@ class RequestProcessorApp(tk.Tk):
                     ocr_engine,
                     dpi,
                 )
+                from ..extraction.pdf_extractor import extract_from_document
                 result = extract_from_document(
                     Path(doc_path),
                     use_ocr=self.ocr_var.get(),
@@ -4372,6 +4508,11 @@ class RequestProcessorApp(tk.Tk):
             order_id: int | None = None
             error: str | None = None
             try:
+                style = (
+                    self.kp_style_var.get().strip()
+                    if hasattr(self, "kp_style_var")
+                    else None
+                )
                 saved_path = generate_kp_from_db(
                     customer=customer,
                     subject=subject,
@@ -4379,6 +4520,7 @@ class RequestProcessorApp(tk.Tk):
                     output_path=out_file,
                     db_path=self.db_path,
                     note=note,
+                    style=style,
                 )
                 order_id = create_order_from_kp(
                     customer_name=customer,
@@ -4571,6 +4713,56 @@ class RequestProcessorApp(tk.Tk):
             return None
         return path
 
+    def _export_order_protocol_meta(self) -> None:
+        """JSON без измерений для D:\\My_projects\\protocol_generator."""
+        order_id = self._get_selected_order_id()
+        if order_id is None:
+            messagebox.showinfo("JSON протокола", "Выберите заказ.")
+            return
+        self.status.set("Экспорт JSON для protocol_generator…")
+        self.update_idletasks()
+
+        def work() -> None:
+            path: Path | None = None
+            error: str | None = None
+            try:
+                from ..generation.protocol_meta_export import export_protocol_meta_for_order
+
+                path = export_protocol_meta_for_order(order_id, db_path=self.db_path)
+            except Exception as exc:
+                error = str(exc)
+
+            def done() -> None:
+                if error or path is None:
+                    self.status.set("Ошибка экспорта JSON")
+                    messagebox.showerror("JSON протокола", error or "unknown")
+                    return
+                self.status.set(f"JSON: {path.name}")
+                _log.info(
+                    "protocol meta exported order=%s path=%s",
+                    order_id,
+                    path,
+                    extra={"tag": "Протокол"},
+                )
+                messagebox.showinfo(
+                    "JSON для protocol_generator",
+                    f"Сохранено (без измеренных значений):\n{path}\n\n"
+                    "На машине с protocol_generator:\n"
+                    f'  cd D:\\My_projects\\protocol_generator\n'
+                    f'  .\\venv\\Scripts\\python.exe main.py "{path}"\n\n'
+                    "Или: scripts\\run_protocol_from_json.ps1",
+                )
+                try:
+                    import os
+
+                    os.startfile(str(path.parent))
+                except OSError:
+                    pass
+
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _generate_order_application(self) -> None:
         order_id = self._get_selected_order_id()
         if order_id is None:
@@ -4583,6 +4775,7 @@ class RequestProcessorApp(tk.Tk):
             saved_path: Path | None = None
             error: str | None = None
             try:
+                from ..generation.application_generator import generate_application_from_order
                 saved_path = generate_application_from_order(
                     order_id,
                     db_path=self.db_path,
@@ -4625,6 +4818,7 @@ class RequestProcessorApp(tk.Tk):
             saved_path: Path | None = None
             error: str | None = None
             try:
+                from ..generation.protocol_generator import generate_protocol_draft_from_order
                 saved_path = generate_protocol_draft_from_order(
                     order_id, db_path=self.db_path
                 )
@@ -4675,6 +4869,7 @@ class RequestProcessorApp(tk.Tk):
             pack: dict | None = None
             error: str | None = None
             try:
+                from ..generation.document_pack import build_document_pack
                 pack = build_document_pack(
                     order_id,
                     output_dir=opts["output_dir"],
@@ -4816,6 +5011,7 @@ class RequestProcessorApp(tk.Tk):
             self.cable_marks_tree.insert(
                 "",
                 "end",
+                iid=str(row["id"]),
                 values=(
                     row["full_mark"],
                     row["brand"],
@@ -4826,6 +5022,108 @@ class RequestProcessorApp(tk.Tk):
                     (row.get("document") or "")[:50],
                 ),
             )
+
+    def _toggle_pdf_opts(self) -> None:
+        """Показать/скрыть блок OCR и флагов сохранения."""
+        if not hasattr(self, "pdf_opts_frame"):
+            return
+        if self._pdf_opts_expanded:
+            self.pdf_opts_frame.pack_forget()
+            self._pdf_opts_expanded = False
+            return
+        try:
+            self.pdf_opts_frame.pack(fill="x", pady=8, before=self._pdf_mid_pane)
+        except (tk.TclError, AttributeError):
+            self.pdf_opts_frame.pack(fill="x", pady=8)
+        self._pdf_opts_expanded = True
+
+    def _delete_selected_cable_mark(self) -> None:
+        sel = self.cable_marks_tree.selection()
+        if not sel:
+            messagebox.showinfo("Марки", "Выберите марку в таблице.")
+            return
+        mark_id = int(sel[0])
+        vals = self.cable_marks_tree.item(sel[0], "values")
+        label = vals[0] if vals else str(mark_id)
+        if not messagebox.askyesno(
+            "Удалить марку",
+            f"Удалить из справочника?\n\n{label}\n\n"
+            "Если марка есть в заказах — связи будут отвязаны.",
+        ):
+            return
+        result = delete_cable_mark(mark_id, self.db_path, force=True)
+        if result.get("ok"):
+            self._load_cable_marks()
+            self.status.set(f"Марка удалена: {result.get('full_mark', label)}")
+            _log.info("deleted cable_mark id=%s", mark_id, extra={"tag": "БД"})
+        else:
+            messagebox.showerror("Марки", f"Не удалось удалить: {result.get('reason')}")
+
+    def _delete_selected_calculation(self) -> None:
+        sel = self.history_tree.selection()
+        if not sel:
+            messagebox.showinfo("История", "Выберите расчёт.")
+            return
+        vals = self.history_tree.item(sel[0], "values")
+        calc_id = int(vals[0])
+        mark = vals[2] if len(vals) > 2 else ""
+        if not messagebox.askyesno(
+            "Удалить расчёт",
+            f"Удалить расчёт №{calc_id}?\n{mark}\n\nСвязи в заказах будут отвязаны.",
+        ):
+            return
+        result = delete_calculation(calc_id, self.db_path)
+        if result.get("ok"):
+            self._load_history()
+            self._load_kp_calculations()
+            self.status.set(f"Расчёт №{calc_id} удалён")
+            _log.info("deleted calculation id=%s", calc_id, extra={"tag": "БД"})
+        else:
+            messagebox.showerror("История", f"Не удалось: {result.get('reason')}")
+
+    def _delete_selected_order(self) -> None:
+        sel = self.orders_tree.selection()
+        if not sel:
+            messagebox.showinfo("Заказы", "Выберите заказ.")
+            return
+        order_id = int(sel[0])
+        if not messagebox.askyesno(
+            "Удалить заказ",
+            f"Удалить заказ №{order_id}?\n\n"
+            "Каскадно: позиции заказа, заявки на испытания;\n"
+            "записи generated отвяжутся. Файлы КП на диске и расчёты\n"
+            "в «Истории» не удаляются автоматически.",
+        ):
+            return
+        result = delete_order(order_id, self.db_path, cascade=True)
+        if result.get("ok"):
+            self._load_orders_table()
+            self._set_text(self.order_details, "")
+            self.status.set(f"Заказ №{order_id} удалён")
+            _log.info("deleted order id=%s", order_id, extra={"tag": "БД"})
+        else:
+            messagebox.showerror("Заказы", f"Не удалось: {result.get('reason')}")
+
+    def _delete_selected_organization(self) -> None:
+        sel = self.orgs_tree.selection()
+        if not sel:
+            messagebox.showinfo("Организации", "Выберите организацию.")
+            return
+        org_id = int(sel[0])
+        vals = self.orgs_tree.item(sel[0], "values")
+        name = vals[0] if vals else str(org_id)
+        if not messagebox.askyesno(
+            "Удалить организацию",
+            f"Удалить?\n\n{name}\n\nСвязи в заказах/извлечениях будут отвязаны.",
+        ):
+            return
+        result = delete_organization(org_id, self.db_path, force=True)
+        if result.get("ok"):
+            self._load_organizations()
+            self.status.set(f"Организация удалена: {result.get('name', name)}")
+            _log.info("deleted organization id=%s", org_id, extra={"tag": "БД"})
+        else:
+            messagebox.showerror("Организации", f"Не удалось: {result.get('reason')}")
 
     def _load_settings(self) -> None:
         settings = get_climatic_settings(self.db_path) or ClimaticTestSettings()
@@ -4977,6 +5275,7 @@ class RequestProcessorApp(tk.Tk):
         # Долгая проверка + автозапуск serve — не блокируем UI сообщением «висит».
         self.status.set("Проверка Ollama…")
         self.update_idletasks()
+        from ..assistant.llm_provider import check_ollama_health
         health = check_ollama_health(llm, try_start=True)
         if health.ok:
             models_preview = ", ".join(health.models[:8]) if health.models else "—"
@@ -5361,9 +5660,16 @@ class RequestProcessorApp(tk.Tk):
 
 
 def main() -> None:
+    t0 = time.perf_counter()
     enable_windows_dpi_awareness()
     setup_logging(level="INFO")
+    _log.info("main(): starting Lab_request", extra={"tag": "Старт"})
     app = RequestProcessorApp()
+    _log.info(
+        "mainloop in %.0f ms",
+        (time.perf_counter() - t0) * 1000,
+        extra={"tag": "Старт"},
+    )
     app.mainloop()
 
 

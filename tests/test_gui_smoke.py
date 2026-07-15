@@ -25,7 +25,7 @@ def gui_app(tmp_path):
 def test_gui_starts_and_has_notebook(gui_app: RequestProcessorApp) -> None:
     assert gui_app.notebook is not None
     tabs = gui_app.notebook.tabs()
-    assert len(tabs) == 10
+    assert len(tabs) == 11
 
 
 def test_gui_tab_titles(gui_app: RequestProcessorApp) -> None:
@@ -35,6 +35,7 @@ def test_gui_tab_titles(gui_app: RequestProcessorApp) -> None:
     assert "3. КП" in titles
     assert "4. Заказы" in titles
     assert "5. Сравнение" in titles
+    assert "11. Журнал" in titles
 
 
 def test_gui_extraction_state_initial(gui_app: RequestProcessorApp) -> None:

@@ -1,0 +1,14 @@
+# Скопируйте в data/lab_profile.yaml и заполните (data/ не в git).
+# Пути к логотипу — относительно корня проекта или абсолютные.
+
+name: "ООО «Испытательный центр»"
+tagline: "Испытательный центр кабельной продукции"
+address: ""
+phone: ""
+email: ""
+accreditation: ""
+website: ""
+# Логотип КП (локальный файл, не коммитить)
+logo_path: "data/logo_cable_test_new_4.jpg"
+# classic | modern | compact  — варианты бланка КП
+kp_style: classic
