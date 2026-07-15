@@ -1500,6 +1500,52 @@ def add_test_alias_cmd(alias: str, canonical: str, code: Optional[str], db: str)
     click.echo(click.style(f"✓ alias id={i}", fg="green"))
 
 
+@cli.command("import-norm-text")
+@click.option("--file", "file_path", required=True, type=click.Path(exists=True))
+@click.option("--kind", default="tu", show_default=True, help="tu|gost|iec|other")
+@click.option("--max-clauses", default=80, show_default=True, type=int)
+@click.option("--db", default="data/app.db", show_default=True)
+def import_norm_text_cmd(file_path: str, kind: str, max_clauses: int, db: str) -> None:
+    """Импорт пунктов требований из локального .txt ТУ (raw_text, не git)."""
+    from .generation.norm_text_import import import_norm_from_text_file
+    from .persistence.sqlite_repo import migrate_db
+
+    migrate_db(db)
+    try:
+        result = import_norm_from_text_file(
+            file_path, kind=kind, db_path=db, max_clauses=max_clauses
+        )
+    except Exception as e:
+        click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+    click.echo(click.style(f"✓ {result['doc_id']}", fg="green"))
+    click.echo(f"  clauses≈{result['clauses']}  id={result['norm_document_id']}")
+
+
+@cli.command("import-aliases-yaml")
+@click.option(
+    "--file",
+    "file_path",
+    default="data/knowledge/manufacturer_v1/test_synonyms.yaml",
+    show_default=True,
+    type=click.Path(),
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def import_aliases_yaml_cmd(file_path: str, db: str) -> None:
+    """Импорт test_synonyms.yaml → test_aliases (локальный knowledge, не git)."""
+    from pathlib import Path as P
+
+    from .generation.norm_text_import import import_aliases_from_synonyms_yaml
+    from .persistence.sqlite_repo import migrate_db
+
+    migrate_db(db)
+    if not P(file_path).is_file():
+        click.echo(f"Файл не найден: {file_path}", err=True)
+        raise SystemExit(1)
+    n = import_aliases_from_synonyms_yaml(file_path, db_path=db)
+    click.echo(click.style(f"✓ импортировано/обновлено aliases: {n}", fg="green"))
+
+
 @cli.command("export-protocol-meta")
 @click.option("--order-id", type=int, required=True, help="ID заказа")
 @click.option(

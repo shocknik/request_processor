@@ -1333,11 +1333,15 @@ def match_program_items_to_price(
             continue
         name = (item.get("name") or "").strip()
         code: str | None = None
-        # exact / substring in price names
         nl = name.lower()
-        if nl in price_names:
+        # S5 aliases first
+        alias_hit = resolve_test_alias(name, db_path=db_path)
+        if alias_hit and alias_hit.get("price_test_code"):
+            code = str(alias_hit["price_test_code"])
+        # exact / substring in price names
+        if not code and nl in price_names:
             code = price_names[nl]
-        else:
+        if not code:
             for pname, pcode in price_names.items():
                 if nl and (nl in pname or pname in nl) and len(nl) >= 8:
                     code = pcode

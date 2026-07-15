@@ -50,6 +50,32 @@ request-processor add-test-alias --alias "сопротивление ТПЖ" --c
 `migrate-db` (в `update.ps1`) создаст таблицы **без** потери заказов.  
 См. [UPDATE.md](UPDATE.md).
 
+## Импорт из локального корпуса (S5.1)
+
+### Текст ТУ → requirements
+
+```powershell
+request-processor import-norm-text --file "data\knowledge\manufacturer_v1\raw_text\16.К99-058-2014.txt"
+request-processor list-requirements
+```
+
+GUI: вкладка **10. Программы** → блок «Нормы и синонимы» → **Импорт ТУ .txt…**
+
+Эвристика: строки `1.4.1 Описание…` с ключевыми словами (испытан, сопротивл…).  
+Это **каркас**, не юридически полный разбор.
+
+### YAML синонимов → aliases
+
+```powershell
+request-processor import-aliases-yaml --file "data\knowledge\manufacturer_v1\test_synonyms.yaml"
+request-processor list-test-aliases
+```
+
+Aliases участвуют в:
+- `map_requirements_to_tests` (подсказки испытаний из текста);
+- `match-program-price` (сопоставление позиций программы).
+
 ## Не в git
 
-Корпус `rag_corpus/**` — только на диске. В репозиторий уходит схема, seed-примеры и документация.
+Корпус `rag_corpus/**`, `data/knowledge/**` — только на диске.  
+В репозиторий: схема, seed, код импорта, документация.

@@ -177,6 +177,25 @@ def map_requirements_to_tests(
 
     merged: dict[str, TestSuggestion] = {}
 
+    # SQLite test_aliases (S5) — быстрые ручные/seed синонимы
+    if db_path is not None:
+        try:
+            from ..persistence.sqlite_repo import resolve_test_alias
+
+            hit = resolve_test_alias(text, db_path=db_path)
+            if hit and hit.get("price_test_code"):
+                resolved = resolve_test_code(str(hit["price_test_code"]), db_path)
+                merged[resolved] = TestSuggestion(
+                    code=resolved,
+                    name=_resolve_test_name(resolved, db_path),
+                    confidence=0.91,
+                    source="database",
+                    matched_pattern=str(hit.get("alias_norm") or "")[:120],
+                    note=f"alias → {hit.get('canonical_name') or ''}",
+                )
+        except Exception:
+            pass
+
     # Knowledge base synonyms (data/knowledge/…/test_synonyms.yaml)
     try:
         from ..knowledge.synonyms import resolve_test_phrase
@@ -184,14 +203,16 @@ def map_requirements_to_tests(
         kb_code, kb_conf = resolve_test_phrase(text)
         if kb_code and kb_conf >= 0.75:
             resolved = resolve_test_code(kb_code, db_path)
-            merged[resolved] = TestSuggestion(
-                code=resolved,
-                name=_resolve_test_name(resolved, db_path),
-                confidence=kb_conf,
-                source="knowledge_synonym",
-                matched_pattern=text[:120],
-                note="KB test_synonyms",
-            )
+            existing = merged.get(resolved)
+            if existing is None or kb_conf > existing.confidence:
+                merged[resolved] = TestSuggestion(
+                    code=resolved,
+                    name=_resolve_test_name(resolved, db_path),
+                    confidence=kb_conf,
+                    source="knowledge_synonym",
+                    matched_pattern=text[:120],
+                    note="KB test_synonyms",
+                )
     except Exception:
         pass
 

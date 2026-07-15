@@ -1444,6 +1444,29 @@ class RequestProcessorApp(tk.Tk):
             anchor="w", pady=(6, 0)
         )
 
+        # S5: нормы / aliases — компактная полоса под таблицей
+        norm_bar = ttk.LabelFrame(
+            self.tab_programs,
+            text="Нормы и синонимы (S5)",
+            padding=8,
+            style="Card.TLabelframe",
+        )
+        norm_bar.pack(fill="x", pady=(8, 0))
+        ttk.Button(
+            norm_bar, text="Импорт ТУ .txt…", command=self._import_norm_text_dialog
+        ).pack(side="left")
+        ttk.Button(
+            norm_bar, text="Aliases из YAML…", command=self._import_aliases_yaml_dialog
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(norm_bar, text="Список норм", command=self._show_norms_summary).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Label(
+            norm_bar,
+            text="Корпус ТУ локально (raw_text), не в git · migrate создаёт seed",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=12)
+
     def _load_programs_table(self) -> None:
         if not hasattr(self, "programs_tree"):
             return
@@ -1500,6 +1523,89 @@ class RequestProcessorApp(tk.Tk):
                     it.get("price_test_code") or "—",
                 ),
             )
+
+    def _import_norm_text_dialog(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Текст ТУ / ГОСТ (.txt)",
+            filetypes=[("Текст", "*.txt"), ("Все", "*.*")],
+            initialdir=str(
+                Path(__file__).resolve().parents[3]
+                / "data"
+                / "knowledge"
+                / "manufacturer_v1"
+                / "raw_text"
+            ),
+        )
+        if not path:
+            return
+        try:
+            from ..generation.norm_text_import import import_norm_from_text_file
+
+            result = import_norm_from_text_file(path, db_path=self.db_path)
+            messagebox.showinfo(
+                "Нормы",
+                f"{result['doc_id']}\nПунктов (эвристика): {result['clauses']}",
+            )
+            self.status.set(f"Норма: {result['doc_id']} ({result['clauses']} п.)")
+            _log.info(
+                "norm import %s clauses=%s",
+                result["doc_id"],
+                result["clauses"],
+                extra={"tag": "Нормы"},
+            )
+        except Exception as exc:
+            messagebox.showerror("Нормы", str(exc))
+
+    def _import_aliases_yaml_dialog(self) -> None:
+        default = (
+            Path(__file__).resolve().parents[3]
+            / "data"
+            / "knowledge"
+            / "manufacturer_v1"
+            / "test_synonyms.yaml"
+        )
+        path = filedialog.askopenfilename(
+            title="YAML синонимов",
+            filetypes=[("YAML", "*.yaml;*.yml"), ("Все", "*.*")],
+            initialdir=str(default.parent) if default.parent.is_dir() else None,
+        )
+        if not path:
+            path = str(default) if default.is_file() else ""
+        if not path:
+            return
+        try:
+            from ..generation.norm_text_import import import_aliases_from_synonyms_yaml
+
+            n = import_aliases_from_synonyms_yaml(path, db_path=self.db_path)
+            messagebox.showinfo("Aliases", f"Импортировано/обновлено: {n}")
+            self.status.set(f"Aliases: {n}")
+        except Exception as exc:
+            messagebox.showerror("Aliases", str(exc))
+
+    def _show_norms_summary(self) -> None:
+        from ..persistence.sqlite_repo import (
+            list_norm_documents,
+            list_requirements,
+            list_test_aliases,
+        )
+
+        docs = list_norm_documents(db_path=self.db_path)
+        reqs = list_requirements(limit=5, db_path=self.db_path)
+        aliases = list_test_aliases(limit=8, db_path=self.db_path)
+        lines = [f"Норм: {len(docs)}", ""]
+        for d in docs[:12]:
+            lines.append(f"  [{d['kind']}] {d['doc_id']}: {d['title'][:50]}")
+        lines.append("")
+        lines.append("Примеры требований:")
+        for r in reqs:
+            lines.append(f"  {r['doc_id']} п.{r['clause']}: {(r.get('title') or '')[:40]}")
+        lines.append("")
+        lines.append("Aliases:")
+        for a in aliases:
+            lines.append(
+                f"  {a['alias_norm'][:28]} → {a.get('price_test_code') or a['canonical_name'][:24]}"
+            )
+        messagebox.showinfo("Нормы / aliases", "\n".join(lines) or "Пусто — migrate-db")
 
     def _import_program_docx(self) -> None:
         path = filedialog.askopenfilename(
