@@ -125,6 +125,22 @@ request-processor prepare-battle-db --yes
 
 ---
 
+## Обновление без удаления программы
+
+**Не сносите папку.** Используйте `scripts/update.ps1` — сохранит `data/app.db` и опыт.
+
+Подробно: **[docs/UPDATE.md](docs/UPDATE.md)**.
+
+```powershell
+cd D:\apps\request_processor
+powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath "D:\inbox\request_processor_….zip"
+```
+
+Или: распаковать новый zip **в другую папку** → `-SourceRoot` на неё.  
+Backup БД: `data\backups\update_*\app.db`.
+
+---
+
 ## Ollama на рабочем ПК (ваш путь)
 
 Уже установлено, модели:

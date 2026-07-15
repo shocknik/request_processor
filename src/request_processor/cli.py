@@ -1445,6 +1445,61 @@ def match_program_price_cmd(program_id: int, db: str) -> None:
     click.echo(f"matched={stats['matched']} unmatched={stats['unmatched']}")
 
 
+@cli.command("list-norm-documents")
+@click.option("--kind", default=None, help="tu|gost|iec|pmi|other")
+@click.option("--db", default="data/app.db", show_default=True)
+def list_norm_documents_cmd(kind: Optional[str], db: str) -> None:
+    """Нормативные документы (S5, задел базы требований)."""
+    from .persistence.sqlite_repo import list_norm_documents, migrate_db
+
+    migrate_db(db)
+    for r in list_norm_documents(kind=kind, db_path=db):
+        click.echo(f"{r['id']:>3}  {r['kind']:6}  {r['doc_id']:28}  {r['title'][:50]}")
+
+
+@cli.command("list-requirements")
+@click.option("--doc-id", "norm_id", default=None, type=int, help="id norm_documents")
+@click.option("--db", default="data/app.db", show_default=True)
+def list_requirements_cmd(norm_id: Optional[int], db: str) -> None:
+    """Пункты требований (примеры + будущий импорт из ТУ)."""
+    from .persistence.sqlite_repo import list_requirements, migrate_db
+
+    migrate_db(db)
+    for r in list_requirements(norm_document_id=norm_id, db_path=db):
+        click.echo(
+            f"{r['doc_id']:24}  п.{(r.get('clause') or '—'):8}  "
+            f"{(r.get('title') or '')[:50]}"
+        )
+
+
+@cli.command("list-test-aliases")
+@click.option("--db", default="data/app.db", show_default=True)
+def list_test_aliases_cmd(db: str) -> None:
+    """Синонимы названий испытаний → канон / код прайса."""
+    from .persistence.sqlite_repo import list_test_aliases, migrate_db
+
+    migrate_db(db)
+    for r in list_test_aliases(db_path=db):
+        click.echo(
+            f"{r['alias_norm'][:30]:30} → {r['canonical_name'][:40]:40}  "
+            f"code={r.get('price_test_code') or '—'}"
+        )
+
+
+@cli.command("add-test-alias")
+@click.option("--alias", required=True)
+@click.option("--canonical", required=True, help="Каноническое имя")
+@click.option("--code", default=None, help="Код test_items")
+@click.option("--db", default="data/app.db", show_default=True)
+def add_test_alias_cmd(alias: str, canonical: str, code: Optional[str], db: str) -> None:
+    """Добавить синоним испытания."""
+    from .persistence.sqlite_repo import add_test_alias, migrate_db
+
+    migrate_db(db)
+    i = add_test_alias(alias, canonical, price_test_code=code, db_path=db)
+    click.echo(click.style(f"✓ alias id={i}", fg="green"))
+
+
 @cli.command("export-protocol-meta")
 @click.option("--order-id", type=int, required=True, help="ID заказа")
 @click.option(

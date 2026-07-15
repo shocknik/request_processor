@@ -396,12 +396,14 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     _migrate_organizations_columns(db_path)
     _migrate_training_tables(db_path)
     _migrate_test_programs(db_path)
+    _migrate_norm_requirements(db_path)
     _migrate_calculation_lines_quantity(db_path)
     apply_price_catalog_fixes(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
     sync_default_test_mappings(db_path)
     sync_mappings_from_test_item_names(db_path)
+    seed_example_norm_requirements(db_path)
 
 
 def _migrate_training_tables(db_path: str | Path = DB_PATH_DEFAULT) -> None:
@@ -550,6 +552,255 @@ def _migrate_test_programs(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 ON test_program_items(program_id);
             """
         )
+
+
+def _migrate_norm_requirements(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """S5: нормативные документы, требования, aliases (задел под ПИ по ТУ)."""
+    with get_connection(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS norm_documents (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id          TEXT NOT NULL UNIQUE,
+                title           TEXT NOT NULL,
+                kind            TEXT NOT NULL DEFAULT 'tu',
+                -- kind: tu | gost | iec | pmi | other
+                file_path       TEXT,
+                notes           TEXT,
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS requirements (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                norm_document_id INTEGER NOT NULL
+                    REFERENCES norm_documents(id) ON DELETE CASCADE,
+                clause          TEXT NOT NULL,
+                title           TEXT,
+                body            TEXT,
+                created_at      TEXT NOT NULL,
+                UNIQUE(norm_document_id, clause)
+            );
+            CREATE INDEX IF NOT EXISTS idx_requirements_doc
+                ON requirements(norm_document_id);
+
+            CREATE TABLE IF NOT EXISTS requirement_test_links (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                requirement_id  INTEGER NOT NULL
+                    REFERENCES requirements(id) ON DELETE CASCADE,
+                price_test_code TEXT,
+                program_item_hint TEXT,
+                note            TEXT,
+                UNIQUE(requirement_id, price_test_code)
+            );
+
+            CREATE TABLE IF NOT EXISTS test_aliases (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                alias_norm      TEXT NOT NULL UNIQUE,
+                canonical_name  TEXT NOT NULL,
+                price_test_code TEXT,
+                source          TEXT DEFAULT 'manual',
+                created_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_test_aliases_code
+                ON test_aliases(price_test_code);
+            """
+        )
+
+
+def seed_example_norm_requirements(db_path: str | Path = DB_PATH_DEFAULT) -> int:
+    """1–2 примера норм (идемпотентно), чтобы UI/CLI не были пустыми."""
+    now = datetime.now().isoformat()
+    examples = [
+        {
+            "doc_id": "TU-16.K99-058-2014",
+            "title": "ТУ 16.К99-058-2014 (пример структуры)",
+            "kind": "tu",
+            "clauses": [
+                ("1.4.1", "Электрическое сопротивление жил", "resistance_core"),
+                ("1.4.5", "Испытание напряжением", None),
+            ],
+        },
+        {
+            "doc_id": "GOST-7229-76",
+            "title": "ГОСТ 7229-76 (метод, пример)",
+            "kind": "gost",
+            "clauses": [
+                ("—", "Метод определения электрического сопротивления ТПЖ", "resistance_core"),
+            ],
+        },
+    ]
+    added = 0
+    with get_connection(db_path) as conn:
+        for ex in examples:
+            cur = conn.execute(
+                """
+                INSERT INTO norm_documents (doc_id, title, kind, file_path, notes, created_at)
+                VALUES (?, ?, ?, NULL, 'seed example S5', ?)
+                ON CONFLICT(doc_id) DO NOTHING
+                """,
+                (ex["doc_id"], ex["title"], ex["kind"], now),
+            )
+            if cur.rowcount:
+                added += 1
+            row = conn.execute(
+                "SELECT id FROM norm_documents WHERE doc_id = ?", (ex["doc_id"],)
+            ).fetchone()
+            if not row:
+                continue
+            nd_id = int(row["id"])
+            for clause, title, code in ex["clauses"]:
+                conn.execute(
+                    """
+                    INSERT INTO requirements
+                        (norm_document_id, clause, title, body, created_at)
+                    VALUES (?, ?, ?, NULL, ?)
+                    ON CONFLICT(norm_document_id, clause) DO NOTHING
+                    """,
+                    (nd_id, clause, title, now),
+                )
+                if code:
+                    req = conn.execute(
+                        """
+                        SELECT id FROM requirements
+                        WHERE norm_document_id = ? AND clause = ?
+                        """,
+                        (nd_id, clause),
+                    ).fetchone()
+                    if req:
+                        conn.execute(
+                            """
+                            INSERT INTO requirement_test_links
+                                (requirement_id, price_test_code, program_item_hint, note)
+                            VALUES (?, ?, ?, 'seed')
+                            ON CONFLICT(requirement_id, price_test_code) DO NOTHING
+                            """,
+                            (int(req["id"]), code, title),
+                        )
+        # aliases examples
+        for alias, canon, code in (
+            ("сопротивление жил", "Электрическое сопротивление ТПЖ", "resistance_core"),
+            ("r жилы", "Электрическое сопротивление ТПЖ", "resistance_core"),
+            ("испытание U", "Испытание напряжением", None),
+        ):
+            conn.execute(
+                """
+                INSERT INTO test_aliases
+                    (alias_norm, canonical_name, price_test_code, source, created_at)
+                VALUES (?, ?, ?, 'seed', ?)
+                ON CONFLICT(alias_norm) DO NOTHING
+                """,
+                (alias.lower(), canon, code, now),
+            )
+    return added
+
+
+def list_norm_documents(
+    *,
+    kind: str | None = None,
+    limit: int = 100,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    q = "SELECT * FROM norm_documents"
+    params: list[Any] = []
+    if kind:
+        q += " WHERE kind = ?"
+        params.append(kind)
+    q += " ORDER BY kind, doc_id LIMIT ?"
+    params.append(limit)
+    with get_connection(db_path) as conn:
+        return [dict(r) for r in conn.execute(q, params).fetchall()]
+
+
+def list_requirements(
+    *,
+    norm_document_id: int | None = None,
+    limit: int = 200,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    q = """
+        SELECT r.*, n.doc_id, n.title AS doc_title, n.kind
+        FROM requirements r
+        JOIN norm_documents n ON n.id = r.norm_document_id
+    """
+    params: list[Any] = []
+    if norm_document_id is not None:
+        q += " WHERE r.norm_document_id = ?"
+        params.append(norm_document_id)
+    q += " ORDER BY n.doc_id, r.clause LIMIT ?"
+    params.append(limit)
+    with get_connection(db_path) as conn:
+        return [dict(r) for r in conn.execute(q, params).fetchall()]
+
+
+def list_test_aliases(
+    *,
+    limit: int = 200,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM test_aliases ORDER BY alias_norm LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_test_alias(
+    alias: str,
+    canonical_name: str,
+    *,
+    price_test_code: str | None = None,
+    source: str = "manual",
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    now = datetime.now().isoformat()
+    alias_norm = alias.strip().lower()
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO test_aliases
+                (alias_norm, canonical_name, price_test_code, source, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(alias_norm) DO UPDATE SET
+                canonical_name = excluded.canonical_name,
+                price_test_code = COALESCE(excluded.price_test_code, test_aliases.price_test_code)
+            """,
+            (
+                alias_norm,
+                canonical_name.strip(),
+                (price_test_code or "").strip() or None,
+                source,
+                now,
+            ),
+        )
+        if cur.lastrowid:
+            return int(cur.lastrowid)
+        row = conn.execute(
+            "SELECT id FROM test_aliases WHERE alias_norm = ?", (alias_norm,)
+        ).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def resolve_test_alias(
+    phrase: str,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    """Ищет alias по точному совпадению или вхождению."""
+    p = (phrase or "").strip().lower()
+    if not p:
+        return None
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM test_aliases WHERE alias_norm = ?", (p,)
+        ).fetchone()
+        if row:
+            return dict(row)
+        rows = conn.execute("SELECT * FROM test_aliases").fetchall()
+        for r in rows:
+            a = r["alias_norm"]
+            if a and (a in p or p in a) and len(a) >= 4:
+                return dict(r)
+    return None
 
 
 def _migrate_orders_columns(db_path: str | Path = DB_PATH_DEFAULT) -> None:

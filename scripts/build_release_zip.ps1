@@ -59,6 +59,7 @@ $include = @(
     "start_gui_debug.bat",
     ".gitignore"
 )
+# update.ps1 входит в scripts/ — на целевом ПК: scripts\update.ps1
 
 foreach ($item in $include) {
     $src = Join-Path $ProjectRoot $item
