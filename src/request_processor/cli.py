@@ -1344,6 +1344,107 @@ def save_parse_snapshot_cmd(json_path: str, label: str, notes: str, dpi: Optiona
     click.echo(f"  marks={snap.metrics.marks_count}  quality={snap.metrics.quality_score}  engine={snap.ocr_engine}")
 
 
+@cli.command("import-test-program")
+@click.option("--file", "file_path", required=True, type=click.Path(exists=True), help="DOCX программы")
+@click.option("--db", default="data/app.db", show_default=True)
+@click.option("--no-match-price", is_flag=True, help="Не сопоставлять с прайсом")
+def import_test_program_cmd(file_path: str, db: str, no_match_price: bool) -> None:
+    """Импорт программы испытаний из Word (.docx) в БД."""
+    from .generation.program_importer import import_program_from_docx
+    from .persistence.sqlite_repo import migrate_db
+
+    migrate_db(db)
+    try:
+        result = import_program_from_docx(
+            file_path, db_path=db, match_price=not no_match_price
+        )
+    except Exception as e:
+        click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+    click.echo(click.style(f"✓ Программа id={result['program_id']}", fg="green"))
+    click.echo(f"  name:  {result['name'][:80]}")
+    click.echo(f"  type:  {result.get('test_type') or '—'}")
+    click.echo(f"  mark:  {result.get('cable_mark_text') or '—'}")
+    click.echo(f"  tu:    {result.get('tu_ref') or '—'}")
+    click.echo(
+        f"  items: {result['items_count']}  "
+        f"(price matched={result['matched']}, unmatched={result['unmatched']})"
+    )
+
+
+@cli.command("list-test-programs")
+@click.option("--search", default=None)
+@click.option("--limit", default=50, show_default=True, type=int)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_test_programs_cmd(search: Optional[str], limit: int, db: str) -> None:
+    """Список программ испытаний в БД."""
+    from .persistence.sqlite_repo import list_test_programs, migrate_db
+
+    migrate_db(db)
+    rows = list_test_programs(search=search, limit=limit, db_path=db)
+    if not rows:
+        click.echo("Программ нет. import-test-program --file …")
+        return
+    for r in rows:
+        click.echo(
+            f"{r['id']:>4}  items={r.get('items_count', 0):>3}  "
+            f"{(r.get('test_type') or '—')[:20]:20}  {(r.get('name') or '')[:60]}"
+        )
+
+
+@cli.command("show-test-program")
+@click.option("--id", "program_id", required=True, type=int)
+@click.option("--db", default="data/app.db", show_default=True)
+def show_test_program_cmd(program_id: int, db: str) -> None:
+    """Показать программу и позиции."""
+    from .persistence.sqlite_repo import get_test_program, migrate_db
+
+    migrate_db(db)
+    prog = get_test_program(program_id, db_path=db)
+    if not prog:
+        click.echo("Не найдено", err=True)
+        raise SystemExit(1)
+    click.echo(f"#{prog['id']} {prog['name']}")
+    click.echo(f"  type={prog.get('test_type')}  mark={prog.get('cable_mark_text')}")
+    click.echo(f"  tu={prog.get('tu_ref')}")
+    click.echo(f"  source={prog.get('source_path')}")
+    for it in prog.get("items") or []:
+        click.echo(
+            f"  {it['sort_order']:>3}. {it['name'][:55]:55}  "
+            f"req={it.get('requirement_clause') or '—':12}  "
+            f"meth={it.get('method_clause') or '—':12}  "
+            f"price={it.get('price_test_code') or '—'}"
+        )
+
+
+@cli.command("delete-test-program")
+@click.option("--id", "program_id", required=True, type=int)
+@click.option("--db", default="data/app.db", show_default=True)
+@click.option("--yes", is_flag=True)
+def delete_test_program_cmd(program_id: int, db: str, yes: bool) -> None:
+    """Удалить программу испытаний."""
+    from .persistence.sqlite_repo import delete_test_program, migrate_db
+
+    if not yes:
+        click.echo("Повторите с --yes")
+        raise SystemExit(1)
+    migrate_db(db)
+    ok = delete_test_program(program_id, db_path=db)
+    click.echo("✓ удалено" if ok else "не найдено")
+
+
+@cli.command("match-program-price")
+@click.option("--id", "program_id", required=True, type=int)
+@click.option("--db", default="data/app.db", show_default=True)
+def match_program_price_cmd(program_id: int, db: str) -> None:
+    """Сопоставить позиции программы с кодами прайса."""
+    from .persistence.sqlite_repo import match_program_items_to_price, migrate_db
+
+    migrate_db(db)
+    stats = match_program_items_to_price(program_id, db_path=db)
+    click.echo(f"matched={stats['matched']} unmatched={stats['unmatched']}")
+
+
 @cli.command("export-protocol-meta")
 @click.option("--order-id", type=int, required=True, help="ID заказа")
 @click.option(

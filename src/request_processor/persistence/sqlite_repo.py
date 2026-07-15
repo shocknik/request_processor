@@ -395,11 +395,13 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     _migrate_orders_columns(db_path)
     _migrate_organizations_columns(db_path)
     _migrate_training_tables(db_path)
+    _migrate_test_programs(db_path)
     _migrate_calculation_lines_quantity(db_path)
     apply_price_catalog_fixes(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
     sync_default_test_mappings(db_path)
+    sync_mappings_from_test_item_names(db_path)
 
 
 def _migrate_training_tables(db_path: str | Path = DB_PATH_DEFAULT) -> None:
@@ -508,6 +510,44 @@ def _migrate_training_tables(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 feedback        TEXT,
                 created_at      TEXT NOT NULL
             );
+            """
+        )
+
+
+def _migrate_test_programs(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """Программы испытаний (S4): заголовок + позиции."""
+    with get_connection(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS test_programs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT NOT NULL,
+                test_type       TEXT,
+                cable_mark_text TEXT,
+                tu_ref          TEXT,
+                source_path     TEXT,
+                notes           TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_test_programs_name ON test_programs(name);
+
+            CREATE TABLE IF NOT EXISTS test_program_items (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                program_id           INTEGER NOT NULL
+                    REFERENCES test_programs(id) ON DELETE CASCADE,
+                sort_order           INTEGER NOT NULL DEFAULT 0,
+                name                 TEXT NOT NULL,
+                requirement_doc      TEXT,
+                requirement_clause   TEXT,
+                method_doc           TEXT,
+                method_clause        TEXT,
+                price_test_code      TEXT,
+                meta_json            TEXT,
+                UNIQUE(program_id, sort_order, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_test_program_items_prog
+                ON test_program_items(program_id);
             """
         )
 
@@ -842,6 +882,225 @@ def sync_default_test_mappings(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 """,
                 (pattern.lower(), test_code, note, now),
             )
+
+
+def sync_mappings_from_test_item_names(db_path: str | Path = DB_PATH_DEFAULT) -> int:
+    """Добавляет маппинги «название из прайса → code» (для явных перечней в письмах).
+
+    Идемпотентно. Возвращает число **новых** строк.
+    """
+    now = datetime.now().isoformat()
+    added = 0
+    with get_connection(db_path) as conn:
+        rows = conn.execute("SELECT code, name FROM test_items").fetchall()
+        for row in rows:
+            code = (row["code"] or "").strip()
+            name = (row["name"] or "").strip()
+            if not code or not name or len(name) < 4:
+                continue
+            pattern = name.lower()
+            cur = conn.execute(
+                """
+                INSERT INTO test_mappings (requirement_pattern, test_code, note, usage_count, created_at)
+                VALUES (?, ?, ?, 0, ?)
+                ON CONFLICT(requirement_pattern) DO NOTHING
+                """,
+                (pattern, code, "auto: имя из прайса", now),
+            )
+            if cur.rowcount:
+                added += 1
+            # короткий паттерн без «определение/измерение/проверка»
+            short = re.sub(
+                r"^(определение|измерение|проверка|испытание)\s+",
+                "",
+                pattern,
+                flags=re.IGNORECASE,
+            ).strip()
+            if short and short != pattern and len(short) >= 6:
+                cur2 = conn.execute(
+                    """
+                    INSERT INTO test_mappings (requirement_pattern, test_code, note, usage_count, created_at)
+                    VALUES (?, ?, ?, 0, ?)
+                    ON CONFLICT(requirement_pattern) DO NOTHING
+                    """,
+                    (short, code, "auto: короткое имя прайса", now),
+                )
+                if cur2.rowcount:
+                    added += 1
+    return added
+
+
+# --- Программы испытаний (S4) ---
+
+
+def create_test_program(
+    *,
+    name: str,
+    test_type: str | None = None,
+    cable_mark_text: str | None = None,
+    tu_ref: str | None = None,
+    source_path: str | None = None,
+    notes: str | None = None,
+    items: list[dict[str, Any]] | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Создаёт программу и позиции. items: dict с name, requirement_*, method_*, price_test_code."""
+    now = datetime.now().isoformat()
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO test_programs
+                (name, test_type, cable_mark_text, tu_ref, source_path, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                name.strip(),
+                (test_type or "").strip() or None,
+                (cable_mark_text or "").strip() or None,
+                (tu_ref or "").strip() or None,
+                source_path,
+                notes,
+                now,
+                now,
+            ),
+        )
+        program_id = int(cur.lastrowid)
+        for i, it in enumerate(items or []):
+            conn.execute(
+                """
+                INSERT INTO test_program_items
+                    (program_id, sort_order, name, requirement_doc, requirement_clause,
+                     method_doc, method_clause, price_test_code, meta_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    program_id,
+                    int(it.get("sort_order", i + 1)),
+                    str(it.get("name") or "").strip() or f"Пункт {i + 1}",
+                    it.get("requirement_doc"),
+                    it.get("requirement_clause"),
+                    it.get("method_doc"),
+                    it.get("method_clause"),
+                    it.get("price_test_code"),
+                    json.dumps(it.get("meta") or {}, ensure_ascii=False)
+                    if it.get("meta")
+                    else None,
+                ),
+            )
+        return program_id
+
+
+def list_test_programs(
+    *,
+    search: str | None = None,
+    limit: int = 100,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    query = """
+        SELECT p.*,
+               (SELECT COUNT(*) FROM test_program_items i WHERE i.program_id = p.id) AS items_count
+        FROM test_programs p
+    """
+    params: list[Any] = []
+    if search:
+        query += " WHERE p.name LIKE ? OR IFNULL(p.cable_mark_text,'') LIKE ? OR IFNULL(p.tu_ref,'') LIKE ?"
+        params.extend([f"%{search}%"] * 3)
+    query += " ORDER BY p.updated_at DESC LIMIT ?"
+    params.append(limit)
+    with get_connection(db_path) as conn:
+        return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def get_test_program(
+    program_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM test_programs WHERE id = ?", (program_id,)
+        ).fetchone()
+        if not row:
+            return None
+        items = conn.execute(
+            """
+            SELECT * FROM test_program_items
+            WHERE program_id = ?
+            ORDER BY sort_order, id
+            """,
+            (program_id,),
+        ).fetchall()
+        data = dict(row)
+        data["items"] = [dict(i) for i in items]
+        return data
+
+
+def delete_test_program(
+    program_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> bool:
+    with get_connection(db_path) as conn:
+        conn.execute("DELETE FROM test_program_items WHERE program_id = ?", (program_id,))
+        cur = conn.execute("DELETE FROM test_programs WHERE id = ?", (program_id,))
+        return cur.rowcount > 0
+
+
+def update_program_item_price_code(
+    item_id: int,
+    price_test_code: str | None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> bool:
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE test_program_items SET price_test_code = ? WHERE id = ?",
+            ((price_test_code or "").strip() or None, item_id),
+        )
+        return cur.rowcount > 0
+
+
+def match_program_items_to_price(
+    program_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, int]:
+    """Проставляет price_test_code по test_mappings / имени прайса.
+
+    Returns: {matched, unmatched}
+    """
+    from ..mapping.requirement_mapper import map_requirements_to_tests
+
+    prog = get_test_program(program_id, db_path=db_path)
+    if not prog:
+        return {"matched": 0, "unmatched": 0}
+    matched = 0
+    unmatched = 0
+    price_names = {
+        (r["name"] or "").strip().lower(): r["code"]
+        for r in list_test_items(limit=500, db_path=db_path)
+    }
+    for item in prog["items"]:
+        if item.get("price_test_code"):
+            matched += 1
+            continue
+        name = (item.get("name") or "").strip()
+        code: str | None = None
+        # exact / substring in price names
+        nl = name.lower()
+        if nl in price_names:
+            code = price_names[nl]
+        else:
+            for pname, pcode in price_names.items():
+                if nl and (nl in pname or pname in nl) and len(nl) >= 8:
+                    code = pcode
+                    break
+        if not code:
+            suggestions = map_requirements_to_tests(name, db_path=db_path)
+            if suggestions:
+                code = suggestions[0].code
+        if code:
+            update_program_item_price_code(int(item["id"]), code, db_path=db_path)
+            matched += 1
+        else:
+            unmatched += 1
+    return {"matched": matched, "unmatched": unmatched}
 
 
 def list_test_mappings(
