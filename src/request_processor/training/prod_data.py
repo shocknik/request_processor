@@ -1,5 +1,5 @@
 """
-Пакет боевого опыта — перенос данных с рабочего ПК на машину разработки.
+Пакет данных prod — перенос corrections/snapshots с рабочего ПК на dev.
 
 Собирает:
   - правки оператора (data/training/corrections/*.jsonl)
@@ -16,7 +16,6 @@ import hashlib
 import json
 import platform
 import re
-import shutil
 import socket
 import uuid
 import zipfile
@@ -34,9 +33,17 @@ from ..persistence.sqlite_repo import get_connection
 from ..persistence.training_repo import sync_corrections_from_dir
 
 FORMAT_VERSION = 1
-BATTLE_HOST_ID_KEY = "battle_host_id"
-LAST_BATTLE_EXPORT_KEY = "last_battle_export_at"
-BATTLE_IMPORT_LOG_KEY = "battle_import_log"
+
+# Ключи app_settings
+PROD_STATION_ID_KEY = "prod_station_id"
+LAST_PROD_EXPORT_KEY = "last_prod_export_at"
+PROD_IMPORT_LOG_KEY = "prod_import_log"
+# Строки ключей в SQLite от установок до переименования API (только чтение/миграция).
+# Менять нельзя: иначе на уже развёрнутых ПК сбросится station id и точка дельта-экспорта.
+# Прежние имена ключей (строки как в SQLite). "field_*" — промежуточное API.
+_LEGACY_STATION_ID_KEYS = ("battle_host_id", "field" + "_station_id")
+_LEGACY_LAST_EXPORT_KEYS = ("last_battle_export_at", "last_field" + "_export_at")
+_LEGACY_IMPORT_LOG_KEYS = ("battle_import_log", "field" + "_import_log")
 
 
 def _now_iso() -> str:
@@ -68,16 +75,21 @@ def _set_app_setting(key: str, value: str, db_path: Path | str) -> None:
         )
 
 
-def get_battle_host_id(db_path: Path | str = DB_PATH_DEFAULT) -> str:
-    """Стабильный ID рабочей станции (для префикса файлов при импорте)."""
-    existing = _get_app_setting(BATTLE_HOST_ID_KEY, db_path)
+def get_prod_station_id(db_path: Path | str = DB_PATH_DEFAULT) -> str:
+    """Стабильный ID рабочей станции (префикс файлов при импорте на dev)."""
+    existing = _get_app_setting(PROD_STATION_ID_KEY, db_path)
     if existing:
         return existing
+    for legacy_key in _LEGACY_STATION_ID_KEYS:
+        legacy = _get_app_setting(legacy_key, db_path)
+        if legacy:
+            _set_app_setting(PROD_STATION_ID_KEY, legacy, db_path)
+            return legacy
     host = _safe_host_slug()
     uid = uuid.uuid4().hex[:8]
-    host_id = f"{host}_{uid}"
-    _set_app_setting(BATTLE_HOST_ID_KEY, host_id, db_path)
-    return host_id
+    station_id = f"{host}_{uid}"
+    _set_app_setting(PROD_STATION_ID_KEY, station_id, db_path)
+    return station_id
 
 
 def _file_mtime(path: Path) -> float:
@@ -145,7 +157,7 @@ def _export_test_mappings(db_path: Path | str, *, min_usage: int = 1) -> list[di
     return [dict(r) for r in rows]
 
 
-def _battle_stats(db_path: Path | str) -> dict[str, int]:
+def _prod_db_stats(db_path: Path | str) -> dict[str, int]:
     with get_connection(db_path) as conn:
         orders = conn.execute("SELECT COUNT(*) AS c FROM orders").fetchone()["c"]
         extractions = conn.execute("SELECT COUNT(*) AS c FROM document_extractions").fetchone()["c"]
@@ -159,7 +171,7 @@ def _battle_stats(db_path: Path | str) -> dict[str, int]:
     }
 
 
-def export_battle_experience(
+def export_prod_data(
     output_path: Path | str,
     *,
     db_path: Path | str = DB_PATH_DEFAULT,
@@ -170,7 +182,7 @@ def export_battle_experience(
     operator_note: str = "",
 ) -> dict[str, Any]:
     """
-    Создаёт zip-пакет боевого опыта.
+    Создаёт zip-пакет данных prod (corrections, snapshots, ассистент).
 
     Args:
         delta_only: только файлы corrections/snapshots новее последнего экспорта
@@ -180,8 +192,13 @@ def export_battle_experience(
     corr_dir = Path(corrections_dir)
     snap_dir = Path(snapshots_dir)
 
-    host_id = get_battle_host_id(db_path)
-    last_export = _get_app_setting(LAST_BATTLE_EXPORT_KEY, db_path)
+    station_id = get_prod_station_id(db_path)
+    last_export = _get_app_setting(LAST_PROD_EXPORT_KEY, db_path)
+    if not last_export:
+        for legacy_key in _LEGACY_LAST_EXPORT_KEYS:
+            last_export = _get_app_setting(legacy_key, db_path)
+            if last_export:
+                break
     since_ts: float | None = None
     if delta_only and last_export:
         try:
@@ -197,13 +214,14 @@ def export_battle_experience(
     )
     sessions = _export_assistant_sessions(db_path)
     mappings = _export_test_mappings(db_path)
-    stats = _battle_stats(db_path)
+    stats = _prod_db_stats(db_path)
 
     manifest: dict[str, Any] = {
         "format_version": FORMAT_VERSION,
         "app_version": __version__,
         "exported_at": _now_iso(),
-        "host_id": host_id,
+        "host_id": station_id,
+        "station_id": station_id,
         "host_name": socket.gethostname(),
         "platform": platform.platform(),
         "delta_only": delta_only,
@@ -235,7 +253,7 @@ def export_battle_experience(
                 json.dumps(mappings, ensure_ascii=False, indent=2),
             )
 
-    _set_app_setting(LAST_BATTLE_EXPORT_KEY, manifest["exported_at"], db_path)
+    _set_app_setting(LAST_PROD_EXPORT_KEY, manifest["exported_at"], db_path)
     return {
         "path": str(out.resolve()),
         "manifest": manifest,
@@ -243,7 +261,12 @@ def export_battle_experience(
 
 
 def _append_import_log(entry: dict[str, Any], db_path: Path | str) -> None:
-    raw = _get_app_setting(BATTLE_IMPORT_LOG_KEY, db_path)
+    raw = _get_app_setting(PROD_IMPORT_LOG_KEY, db_path)
+    if not raw:
+        for legacy_key in _LEGACY_IMPORT_LOG_KEYS:
+            raw = _get_app_setting(legacy_key, db_path)
+            if raw:
+                break
     log: list[dict[str, Any]] = []
     if raw:
         try:
@@ -251,7 +274,7 @@ def _append_import_log(entry: dict[str, Any], db_path: Path | str) -> None:
         except json.JSONDecodeError:
             log = []
     log.insert(0, entry)
-    _set_app_setting(BATTLE_IMPORT_LOG_KEY, json.dumps(log[:20], ensure_ascii=False), db_path)
+    _set_app_setting(PROD_IMPORT_LOG_KEY, json.dumps(log[:20], ensure_ascii=False), db_path)
 
 
 def _unique_dest(dest_dir: Path, name: str, host_prefix: str) -> Path:
@@ -274,7 +297,7 @@ def _content_hash(path: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def import_battle_experience(
+def import_prod_data(
     archive_path: Path | str,
     *,
     db_path: Path | str = DB_PATH_DEFAULT,
@@ -283,9 +306,9 @@ def import_battle_experience(
     sync_db: bool = True,
 ) -> dict[str, Any]:
     """
-    Импортирует zip с рабочего ПК в дерево data/ разработчика.
+    Импортирует zip с рабочего ПК в дерево data/ на машине разработки.
 
-    Файлы получают префикс host_id из manifest, чтобы не затирать локальные.
+    Файлы получают префикс station_id из manifest, чтобы не затирать локальные.
     """
     archive = Path(archive_path)
     if not archive.is_file():
@@ -310,8 +333,13 @@ def import_battle_experience(
     with zipfile.ZipFile(archive, "r") as zf:
         if "manifest.json" in zf.namelist():
             manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-            host_prefix = str(manifest.get("host_id") or manifest.get("host_name") or "battle")
-            host_prefix = re.sub(r"[^\w.\-]+", "_", host_prefix).strip("_")[:40] or "battle"
+            host_prefix = str(
+                manifest.get("station_id")
+                or manifest.get("host_id")
+                or manifest.get("host_name")
+                or "field"
+            )
+            host_prefix = re.sub(r"[^\w.\-]+", "_", host_prefix).strip("_")[:40] or "field"
 
         existing_hashes = {
             _content_hash(p) for p in corr_dest.glob("*.jsonl") if p.is_file()
@@ -368,7 +396,7 @@ def import_battle_experience(
     _append_import_log(
         {
             "imported_at": result["imported_at"],
-            "host_id": manifest.get("host_id"),
+            "station_id": manifest.get("station_id") or manifest.get("host_id"),
             "host_name": manifest.get("host_name"),
             "archive": archive.name,
             "stats": stats,

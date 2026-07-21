@@ -118,7 +118,7 @@ def load_data_cmd(price: str, db: str) -> None:
         click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
 
 
-@cli.command("prepare-battle-db")
+@cli.command("prepare-prod-db")
 @click.option("--db", default="data/app.db", show_default=True)
 @click.option(
     "--yes",
@@ -129,15 +129,16 @@ def load_data_cmd(price: str, db: str) -> None:
 @click.option(
     "--no-backup",
     is_flag=True,
-    help="Не создавать копию app.db.pre_battle_*.db",
+    help="Не создавать копию app.db.pre_prod_*.db",
 )
-def prepare_battle_db_cmd(db: str, confirm: bool, no_backup: bool) -> None:
+def prepare_prod_db_cmd(db: str, confirm: bool, no_backup: bool) -> None:
     """Очищает марки и организации; прайс (test_items) и test_mappings оставляет.
 
-    Также удаляет заказы/расчёты/извлечения (ссылки на org/mark).
+    Для prod-установки на рабочем ПК: чистые справочники марок/орг.,
+    прайс без изменений. Также удаляет заказы/расчёты/извлечения (ссылки на org/mark).
     Перед очисткой по умолчанию делает backup БД.
     """
-    from .persistence.sqlite_repo import prepare_battle_db
+    from .persistence.sqlite_repo import prepare_prod_db
 
     if not confirm:
         click.echo(
@@ -148,11 +149,11 @@ def prepare_battle_db_cmd(db: str, confirm: bool, no_backup: bool) -> None:
         )
         raise SystemExit(1)
     try:
-        result = prepare_battle_db(db, backup=not no_backup)
+        result = prepare_prod_db(db, backup=not no_backup)
     except Exception as e:
         click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
         raise SystemExit(1) from e
-    click.echo(click.style("✓ БД подготовлена к бою", fg="green"))
+    click.echo(click.style("✓ БД подготовлена к prod", fg="green"))
     click.echo(f"  db: {result['db_path']}")
     if result.get("backup_path"):
         click.echo(f"  backup: {result['backup_path']}")
@@ -1571,37 +1572,37 @@ def export_protocol_meta_cmd(order_id: int, output: Optional[str], db: str) -> N
     click.echo(f'  .\\venv\\Scripts\\python.exe main.py "{path}"')
 
 
-@cli.command("export-battle-experience")
+@cli.command("export-prod-data")
 @click.option(
     "--output",
     "-o",
     default=None,
     type=click.Path(),
-    help="Путь к .zip (по умолчанию data/training/exports/battle_<host>_<дата>.zip)",
+    help="Путь к .zip (по умолчанию data/training/exports/prod_data_<station>_<дата>.zip)",
 )
 @click.option("--db", default="data/app.db", show_default=True)
 @click.option("--full", is_flag=True, help="Весь архив, не только дельта с прошлого экспорта")
 @click.option("--note", default="", help="Комментарий оператора в manifest")
-def export_battle_experience_cmd(
+def export_prod_data_cmd(
     output: Optional[str],
     db: str,
     full: bool,
     note: str,
 ) -> None:
-    """Экспорт боевого опыта (правки, снимки, ассистент) для машины разработки."""
+    """Экспорт данных prod (правки, снимки, ассистент) на машину разработки."""
     from datetime import datetime
 
-    from .training.battle_experience import export_battle_experience, get_battle_host_id
+    from .training.prod_data import export_prod_data, get_prod_station_id
 
     migrate_db(db)
-    host = get_battle_host_id(db)
+    station = get_prod_station_id(db)
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     out = (
         Path(output)
         if output
-        else Path("data/training/exports") / f"battle_{host}_{stamp}.zip"
+        else Path("data/training/exports") / f"prod_data_{station}_{stamp}.zip"
     )
-    result = export_battle_experience(
+    result = export_prod_data(
         out,
         db_path=db,
         delta_only=not full,
@@ -1609,28 +1610,31 @@ def export_battle_experience_cmd(
     )
     m = result["manifest"]
     click.echo(click.style(f"✓ Пакет: {result['path']}", fg="green"))
-    click.echo(f"  host: {m.get('host_id')}  delta: {m.get('delta_only')}")
+    click.echo(
+        f"  station: {m.get('station_id') or m.get('host_id')}  delta: {m.get('delta_only')}"
+    )
     for k, v in (m.get("counts") or {}).items():
         click.echo(f"  {k}: {v}")
 
 
-@cli.command("import-battle-experience")
+@cli.command("import-prod-data")
 @click.argument("archive", type=click.Path(exists=True, dir_okay=False))
 @click.option("--db", default="data/app.db", show_default=True)
 @click.option("--no-sync", is_flag=True, help="Не вызывать sync-corrections в БД")
-def import_battle_experience_cmd(archive: str, db: str, no_sync: bool) -> None:
-    """Импорт пакета боевого опыта с рабочего ПК."""
-    from .training.battle_experience import import_battle_experience
+def import_prod_data_cmd(archive: str, db: str, no_sync: bool) -> None:
+    """Импорт пакета данных prod с рабочего ПК."""
+    from .training.prod_data import import_prod_data
 
     migrate_db(db)
-    result = import_battle_experience(
+    result = import_prod_data(
         archive,
         db_path=db,
         sync_db=not no_sync,
     )
     m = result.get("manifest") or {}
+    station = m.get("station_id") or m.get("host_id")
     click.echo(click.style("✓ Импорт завершён", fg="green"))
-    click.echo(f"  источник: {m.get('host_name')} ({m.get('host_id')})")
+    click.echo(f"  источник: {m.get('host_name')} ({station})")
     click.echo(f"  экспорт:  {m.get('exported_at')}")
     for k, v in result["stats"].items():
         click.echo(f"  {k}: {v}")

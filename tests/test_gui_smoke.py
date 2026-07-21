@@ -25,7 +25,14 @@ def gui_app(tmp_path):
 def test_gui_starts_and_has_notebook(gui_app: RequestProcessorApp) -> None:
     assert gui_app.notebook is not None
     tabs = gui_app.notebook.tabs()
-    assert len(tabs) == 12
+    assert len(tabs) == 11
+    # v0.10: sidebar navigation + hidden notebook tabs
+    assert getattr(gui_app, "sidebar", None) is not None
+    assert hasattr(gui_app, "page_header")
+    assert hasattr(gui_app, "step_indicator")
+    assert hasattr(gui_app, "upload_panel")
+    assert hasattr(gui_app, "bottom_bar")
+    assert hasattr(gui_app, "render_request_state")
 
 
 def test_gui_tab_titles(gui_app: RequestProcessorApp) -> None:
@@ -34,9 +41,33 @@ def test_gui_tab_titles(gui_app: RequestProcessorApp) -> None:
     assert "2. Расчёт" in titles
     assert "3. КП" in titles
     assert "4. Заказы" in titles
-    assert "5. Сравнение" in titles
-    assert "10. Программы" in titles
-    assert "12. Журнал" in titles
+    assert "Сравнение" in titles
+    assert "Программы" in titles
+    assert "Справочник" in titles
+    assert "Журнал" not in titles
+
+
+def test_gui_sidebar_navigation(gui_app: RequestProcessorApp) -> None:
+    """Сайдбар переключает notebook; menubar API (select) тоже работает."""
+    gui_app.go_section("orders")
+    assert gui_app.notebook.index(gui_app.notebook.select()) == gui_app.notebook.index(
+        gui_app.tab_orders
+    )
+    gui_app.notebook.select(gui_app.tab_kp)
+    gui_app.update_idletasks()
+    # после select сайдбар синхронизируется в _on_tab_changed
+    assert gui_app.notebook.index(gui_app.notebook.select()) == gui_app.notebook.index(
+        gui_app.tab_kp
+    )
+
+
+def test_request_page_state_empty(gui_app: RequestProcessorApp) -> None:
+    from request_processor.ui.state import RequestPageState
+
+    assert gui_app._request_page_state == RequestPageState.EMPTY
+    assert gui_app.bottom_bar.primary_btn.cget("text") == "Извлечь данные"
+    # empty state поверх таблицы
+    assert hasattr(gui_app, "marks_empty")
 
 
 def test_gui_extraction_state_initial(gui_app: RequestProcessorApp) -> None:

@@ -1,6 +1,8 @@
 # Архитектура Lab_request: что уже есть (S1–S5)
 
-Краткая карта для оператора и разработчика. Детали — в отдельных docs/.
+Краткая карта для оператора и разработчика. Детали — в отдельных docs/ и Obsidian.
+
+**Статус на 2026-07-16:** S1 ✅ · S2 (КП/логи/урок) в доработке · S3–S5 каркас ✅ · prod-установка W:\request_processor
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -8,10 +10,10 @@
 │                                                             │
 │  1 Заявка → extract (docx/pdf) → human confirm              │
 │  2 Расчёт ← прайс test_items + test_mappings + aliases      │
-│  3 КП ← lab_profile + logo + styles                         │
+│  3 КП ← lab_profile + logo + styles classic|modern|compact  │
 │  4 Заказы → пакет / JSON protocol_meta                      │
-│  10 Программы ← import DOCX PMI                             │
-│  12 Журнал ← logs                                           │
+│  Марки | Орг | Справочник | Программы | История | …         │
+│  Логи: Сервис → Просмотр логов / папка data/logs            │
 │                                                             │
 │  data/app.db  (сохраняется при update.ps1)                  │
 └───────────────────────────┬─────────────────────────────────┘
@@ -23,14 +25,25 @@
                       DOCX протокол
 ```
 
-| Спринт | Содержание | Документ |
-|--------|------------|----------|
-| S1 | UX, Lab_request, удаления, старт | INSTALL, UPDATE |
-| S2 | КП стили, лого, Журнал, Урок ИИ 0 | lab_profile.example |
-| S3 | JSON → protocol_generator | PROTOCOL_GENERATOR_BRIDGE |
-| S4 | Программы DOCX | TEST_PROGRAMS |
-| S5 | Каркас норм + aliases | REQUIREMENTS_BASE |
-| Ops | Обновление без сноса | **UPDATE.md** |
+| Спринт | Содержание | Статус | Документ |
+|--------|------------|--------|----------|
+| S1 | UX, Lab_request, удаления, старт, логи-теги | ✅ | INSTALL, UPDATE, UI_ARCHITECTURE |
+| S2 | КП лого/стили, просмотр логов, Урок ИИ 0 | 🟡 | lab_profile.example, Obsidian |
+| S3 | JSON → protocol_generator | ✅ каркас | PROTOCOL_GENERATOR_BRIDGE |
+| S4 | Программы DOCX | ✅ каркас | TEST_PROGRAMS |
+| S5 | Каркас норм + aliases | ✅ seed | REQUIREMENTS_BASE |
+| Ops | Обновление без сноса, seed прайса, ярлык | ✅ | UPDATE.md |
+
+## UI-пакет (после декомпозиции)
+
+```
+ui/gui.py → entry
+ui/app.py → RequestProcessorApp
+ui/shell/  menubar, app_shell
+ui/tabs/   pdf, calc, kp, orders, …
+ui/widgets/ clipboard
+ui/state.py, theme.py
+```
 
 ## Принципы
 
@@ -38,4 +51,5 @@
 2. **Код** обновляется zip/update.ps1.  
 3. **protocol_generator** не правим — только JSON.  
 4. **LLM** opt-in, human-in-the-loop.  
-5. **rag_corpus** локально, не git.
+5. **rag_corpus** локально, не git.  
+6. **Логи:** `app_*`, `scripts_*`, `tests_*` в `data/logs/`.

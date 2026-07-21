@@ -1,8 +1,8 @@
 # Установка на рабочий ПК (Windows) — v0.9.1
 
-Цель: GUI **без IDE**, **прайс и правила расчёта как сейчас**, марки и организации — **с нуля** в бою.
+Цель: GUI **без IDE**, **прайс и правила расчёта как сейчас**, марки и организации — **с нуля** в prod.
 
-Полная инструкция (Obsidian): **«43 - Боевой запуск…»**, паспорт: **«44 - Паспорт приложения…»**.
+Полная инструкция (Obsidian): **«43 - Развёртывание на рабочий ПК…»**, паспорт: **«44 - Паспорт приложения…»**.
 
 ---
 
@@ -14,14 +14,14 @@
 |---|-----|-------------------|
 | 1 | Актуальный код / zip | `git pull` или уже есть `dist\request_processor_0.9.1_*.zip` |
 | 2 | Проверить прайс в БД | GUI → «7. Справочник» / CLI: в `test_items` полный прайс |
-| 3 | **Очистить только марки и организации** (прайс остаётся) | см. ниже `prepare-battle-db` |
+| 3 | **Очистить только марки и организации** (прайс остаётся) | см. ниже `prepare-prod-db` |
 | 4 | Собрать zip **с** подготовленной БД | `build_release_zip.ps1 -IncludeAppDb` |
 | 5 | Скопировать zip на рабочий ПК | флешка / сеть |
 
 ```powershell
 cd D:\My_projects\request_processor
 # backup + очистка cable_marks / organizations (+ заказы/расчёты-ссылки)
-.\.venv\Scripts\request-processor.exe prepare-battle-db --yes
+.\.venv\Scripts\request-processor.exe prepare-prod-db --yes
 # zip с data\app.db (прайс внутри, марки/орг. пустые)
 powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -IncludeAppDb
 ```
@@ -34,11 +34,11 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -IncludeA
 | 2 | Tesseract + `rus` + `eng` | Нужен для **PDF-сканов**. Для **Word .docx** OCR не обязателен |
 | 3 | Распаковать zip | например `D:\apps\request_processor` |
 | 4 | Установка | `powershell -ExecutionPolicy Bypass -File scripts\install.ps1` |
-| 5 | **Не** перезатирать прайс `load-data`, если в zip уже был `data\app.db` после `prepare-battle-db` | Прайс уже в БД |
+| 5 | **Не** перезатирать прайс `load-data`, если в zip уже был `data\app.db` после `prepare-prod-db` | Прайс уже в БД |
 | 6 | Ярлык на рабочий стол | создаётся install.ps1; вручную — см. § «Ярлык» |
 | 7 | Ollama (опц.) | уже стоит: путь `C:\Users\User\.ollama\models`, модель `llama3.2` |
 | 8 | 1–2 реальные заявки Word/PDF | проверить марки и организации глазами |
-| 9 | Раз в неделю | **10. Настройки** → **Экспорт опыта (zip)** → разработчику |
+| 9 | Раз в неделю | **10. Настройки** → **Экспорт данных prod (zip)** → разработчику |
 
 ---
 
@@ -107,7 +107,7 @@ Windows DPI awareness включается при запуске (чёткий �
 
 ## БД: что оставить, что очистить
 
-| Данные | При боевом старте |
+| Данные | При prod |
 |--------|-------------------|
 | **test_items** (прайс, base_cost, правила) | **оставить** |
 | **test_mappings** (фразы → испытания) | **оставить** |
@@ -117,8 +117,8 @@ Windows DPI awareness включается при запуске (чёткий �
 | orders / calculations / extractions | очищаются вместе (ссылки на mark/org) |
 
 ```powershell
-request-processor prepare-battle-db --yes
-# → backup: data\app.db.pre_battle_YYYYMMDD_HHMMSS.db
+request-processor prepare-prod-db --yes
+# → backup: data\app.db.pre_prod_YYYYMMDD_HHMMSS.db
 ```
 
 Правила расчёта (`fixed`, `per_core`, `per_group`, `time_based`) — **в коде**, не в «мусорных» таблицах; прайс в `test_items` определяет цены и привязку.
@@ -208,18 +208,18 @@ start_gui.bat
 3. Ассистент 💡 — Принять / Отклонить  
 4. **Подтвердить заявку**  
 5. **2. Расчёт** → **3. КП** → **4. Заказы** → пакет  
-6. Раз в неделю: **Экспорт опыта** → zip разработчику  
+6. Раз в неделю: **Экспорт данных prod** → zip разработчику  
 
 ---
 
-## Боевой опыт (кратко)
+## Данные prod (кратко)
 
 | | |
 |--|--|
 | **Что** | zip: corrections, parse_snapshots, assistant, test_mappings_used, manifest |
 | **Зачем** | перенос правок на dev без полной app.db и PDF |
-| **Как** | GUI «10. Настройки» → Экспорт / CLI `export-battle-experience` |
-| **На dev** | `import-battle-experience` + `sync-corrections` |
+| **Как** | GUI «10. Настройки» → Экспорт / CLI `export-prod-data` |
+| **На dev** | `import-prod-data` + `sync-corrections` |
 
 Подробно — заметка **44** (паспорт) и **41**.
 

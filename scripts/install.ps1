@@ -33,6 +33,10 @@ if (-not $ProjectRoot) {
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
 Set-Location $ProjectRoot
 
+. (Join-Path $PSScriptRoot "_common_log.ps1")
+Initialize-RpLog -ProjectRoot $ProjectRoot -ScriptName "install"
+Write-RpLog "install start WithOcrExtra=$WithOcrExtra SkipShortcut=$SkipShortcut" -Level INFO
+
 Write-Host "=== request-processor: установка ===" -ForegroundColor Cyan
 Write-Host "Корень: $ProjectRoot"
 
@@ -76,7 +80,7 @@ if (-not (Test-Path $venvPy)) {
     Write-Host "Создаю venv..."
     & $py.Exe -m venv $venvDir
     if (-not (Test-Path $venvPy)) {
-        Write-Error "Не удалось создать .venv"
+        Write-RpLog "venv create failed" -Level ERROR; Write-Error "Не удалось создать .venv"
         exit 1
     }
 } else {
@@ -98,7 +102,7 @@ $extraSpec = if ($extras.Count -gt 0) { ".[" + ($extras -join ",") + "]" } else 
 Write-Host "Устанавливаю пакет: pip install -e `"$extraSpec`""
 & $venvPy -m pip install -e $extraSpec
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "pip install завершился с ошибкой"
+    Write-RpLog "pip install failed exit=$LASTEXITCODE" -Level ERROR; Write-Error "pip install завершился с ошибкой"
     exit 1
 }
 
@@ -149,17 +153,23 @@ if ($tess) {
     Write-Host ""
 }
 
-# DB init
+# DB init (+ full price catalog seed if test_items empty)
 Write-Host "Инициализация БД..."
-& $venvPy -c "from request_processor.persistence.sqlite_repo import init_db; init_db(); print('DB OK')"
+Write-RpLog "init_db begin" -Level INFO
+& $venvPy -c "from request_processor.persistence.sqlite_repo import init_db, ensure_price_catalog, get_all_test_items; init_db(); r=ensure_price_catalog(); n=len(get_all_test_items()); print('DB OK tests=%s source=%s' % (n, r.get('source')))"
 if ($LASTEXITCODE -ne 0) {
+    Write-RpLog "init_db failed exit=$LASTEXITCODE" -Level WARNING
     Write-Host "WARNING: init_db не прошёл (можно запустить GUI — создаст сама)" -ForegroundColor Yellow
+} else {
+    Write-RpLog "init_db OK" -Level INFO
 }
 
 if (-not $SkipShortcut) {
     $shortcutScript = Join-Path $PSScriptRoot "create_desktop_shortcut.ps1"
     if (Test-Path $shortcutScript) {
+        Write-RpLog "running create_desktop_shortcut.ps1" -Level INFO
         & powershell -ExecutionPolicy Bypass -File $shortcutScript
+        if ($LASTEXITCODE -ne 0) { Write-RpLog "shortcut script exit=$LASTEXITCODE" -Level WARNING }
     }
 }
 
@@ -167,6 +177,7 @@ $priceHint = Join-Path $ProjectRoot "data\Обновленная стоимос�
 $appDb = Join-Path $ProjectRoot "data\app.db"
 $ollamaDefault = Join-Path $env:USERPROFILE ".ollama\models"
 Write-Host ""
+Write-RpLog "install finished OK" -Level INFO
 Write-Host "=== Готово ===" -ForegroundColor Green
 Write-Host "Запуск GUI:"
 Write-Host "  $ProjectRoot\start_gui.bat"
@@ -178,18 +189,19 @@ Write-Host "  (имя: Lab_request.lnk)"
 Write-Host ""
 if (Test-Path $appDb) {
     Write-Host "БД data\app.db уже есть."
-    Write-Host "  Боевой старт с текущим прайсом (очистить только марки/орг.):"
-    Write-Host "    .\.venv\Scripts\request-processor.exe prepare-battle-db --yes" -ForegroundColor Cyan
-    Write-Host "  (прайс test_items и test_mappings сохраняются; backup app.db.pre_battle_*.db)"
+    Write-Host "  Prod-установка с текущим прайсом (очистить только марки/орг.):"
+    Write-Host "    .\.venv\Scripts\request-processor.exe prepare-prod-db --yes" -ForegroundColor Cyan
+    Write-Host "  (прайс test_items и test_mappings сохраняются; backup app.db.pre_prod_*.db)"
 } else {
     Write-Host "Чистая база после install:"
     Write-Host "  • organizations, cable_marks, orders — пустые"
-    Write-Host "  • test_mappings — стартовый набор"
-    Write-Host "  • test_items — демо. Загрузите прайс:"
+    Write-Host "  • test_items — полный прайс из seed/xlsx (ensure_price_catalog)"
+    Write-Host "  • test_mappings — стартовый набор + seed"
+    Write-Host "  При необходимости обновить прайс из Excel:"
     if (Test-Path $priceHint) {
         Write-Host "    .\.venv\Scripts\request-processor.exe load-data --price `"$priceHint`"" -ForegroundColor Cyan
     } else {
-        Write-Host "    .\.venv\Scripts\request-processor.exe load-data --price data\ВАШ_ПРАЙС.xlsx" -ForegroundColor Yellow
+        Write-Host "    .\.venv\Scripts\request-processor.exe load-data --price data\PRICE.xlsx" -ForegroundColor Yellow
     }
 }
 Write-Host ""

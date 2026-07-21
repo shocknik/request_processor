@@ -55,6 +55,9 @@ from ..calculation.test_rules import DEFAULT_PRICE_XLSX, infer_rule_type
 
 # Корень проекта (не зависит от текущей рабочей директории при запуске GUI/CLI)
 from ..config import DB_PATH_DEFAULT, GENERATED_DIR_DEFAULT, PROJECT_ROOT
+from ..logging_setup import get_logger
+
+_log = get_logger("persistence")
 
 
 def resolve_db_path(db_path: str | Path = DB_PATH_DEFAULT) -> Path:
@@ -252,8 +255,15 @@ def init_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
         conn.executescript(schema)
 
     migrate_db(db_path)
-    _seed_demo_tests(db_path)
+    price = ensure_price_catalog(db_path)
     _seed_default_settings(db_path)
+    _log.info(
+        "init_db path=%s price_source=%s tests=%s",
+        db_path,
+        price.get("source"),
+        price.get("after"),
+        extra={"tag": "БД"},
+    )
     print(f"База данных инициализирована: {db_path}")
 
 
@@ -401,6 +411,8 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     apply_price_catalog_fixes(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
+    # Восстановить полный прайс, если БД «пустая» (частый кейс чистого install без -IncludeAppDb)
+    ensure_price_catalog(db_path)
     sync_default_test_mappings(db_path)
     sync_mappings_from_test_item_names(db_path)
     seed_example_norm_requirements(db_path)
@@ -1612,18 +1624,18 @@ def save_assistant_llm_settings(
         )
 
 
-def prepare_battle_db(
+def prepare_prod_db(
     db_path: str | Path = DB_PATH_DEFAULT,
     *,
     backup: bool = True,
 ) -> dict[str, Any]:
     """
-    Готовит БД к боевому запуску с «чистыми» марками и организациями.
+    Готовит БД к prod (рабочий ПК) с «чистыми» марками и организациями.
 
     **Сохраняет:**
     - ``test_items`` — прайс и правила расчёта (fixed/per_core/…)
     - ``test_mappings`` — фразы требований → коды испытаний
-    - ``app_settings`` — климатика, LLM, пути пакетов, host_id
+    - ``app_settings`` — климатика, LLM, пути пакетов, station_id
     - training/RAG-таблицы (если есть)
 
     **Очищает:**
@@ -1643,7 +1655,7 @@ def prepare_battle_db(
     backup_path: Path | None = None
     if backup:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = path.with_name(f"{path.stem}.pre_battle_{stamp}{path.suffix}")
+        backup_path = path.with_name(f"{path.stem}.pre_prod_{stamp}{path.suffix}")
         import shutil
 
         shutil.copy2(path, backup_path)
@@ -1922,29 +1934,216 @@ def upsert_organization(
         return int(cursor.lastrowid or 0)
 
 
+def find_similar_organizations(
+    name: str,
+    *,
+    min_ratio: float = 0.82,
+    limit: int = 8,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    """
+    Кандидаты-дубликаты по нормализованному имени (SequenceMatcher + substring).
+
+    Каждый элемент: {id, name, name_normalized, org_type, inn, score}.
+    Exact match (score=1.0) идёт первым.
+    """
+    from difflib import SequenceMatcher
+
+    raw = (name or "").strip()
+    if len(raw) < 2:
+        return []
+    key = normalize_org_name(raw)
+    if not key:
+        return []
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, name, name_normalized, org_type, inn FROM organizations"
+        ).fetchall()
+
+    scored: list[dict[str, Any]] = []
+    for row in rows:
+        other_key = (row["name_normalized"] or normalize_org_name(row["name"] or "")).strip()
+        if not other_key:
+            continue
+        if other_key == key:
+            score = 1.0
+        else:
+            score = SequenceMatcher(None, key, other_key).ratio()
+            if key in other_key or other_key in key:
+                score = max(score, 0.88)
+        if score >= min_ratio:
+            scored.append(
+                {
+                    "id": int(row["id"]),
+                    "name": row["name"],
+                    "name_normalized": other_key,
+                    "org_type": row["org_type"],
+                    "inn": row["inn"],
+                    "score": round(score, 3),
+                }
+            )
+    scored.sort(key=lambda x: (-x["score"], x["name"] or ""))
+    return scored[:limit]
+
+
+def create_organization(
+    *,
+    name: str,
+    address: str | None = None,
+    postal_code: str | None = None,
+    phone: str | None = None,
+    email: str | None = None,
+    inn: str | None = None,
+    kpp: str | None = None,
+    is_accredited: bool = False,
+    fsa_registry_number: str | None = None,
+    org_type: str = "unknown",
+    source: str | None = "manual",
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Создаёт организацию (CRUD «+ Добавить»). Без fuzzy — вызывающий решает."""
+    extract = OrganizationExtract(
+        name=name.strip(),
+        address=address,
+        legal_address=address,
+        actual_address=address,
+        postal_code=postal_code,
+        phone=phone,
+        email=email,
+        inn=inn,
+        kpp=kpp,
+        is_accredited=is_accredited,
+        fsa_registry_number=fsa_registry_number,
+        org_type=org_type if org_type in (
+            "manufacturer",
+            "certification_body",
+            "testing_center",
+            "dealer",
+            "unknown",
+        ) else "unknown",
+        role="unknown",
+        confidence=1.0,
+    )
+    return upsert_organization(extract, source=source, db_path=db_path)
+
+
 def save_organizations_from_extraction(
     organizations: list[OrganizationExtract],
     *,
     source: str | None = None,
+    customer_name: str | None = None,
+    manufacturer_name: str | None = None,
+    customer_inn: str | None = None,
+    customer_address: str | None = None,
+    skip_own_lab: bool = True,
     db_path: str | Path = DB_PATH_DEFAULT,
 ) -> dict[str, int | None]:
-    """Сохраняет организации из заявки; возвращает id заказчика и производителя."""
+    """
+    Сохраняет организации из заявки; возвращает id заказчика и производителя.
+
+    - Наша ИЛ (lab_profile / Кабель-Тест) **не** пишется в справочник и **не**
+      становится customer/manufacturer.
+    - customer_name / manufacturer_name из GUI (после правок оператора) —
+      приоритетнее списка extract, если роли в extract пустые.
+    - Нет fallback manufacturer_id = customer_id (ломало направления: ИЛ = «производитель»).
+    """
+    from ..generation.lab_profile import is_own_lab_name
+
     customer_id: int | None = None
     manufacturer_id: int | None = None
 
-    for org in organizations:
-        org_id = upsert_organization(org, source=source, db_path=db_path)
-        if org.role == "customer" and customer_id is None:
-            customer_id = org_id
-        if org.role == "manufacturer" and manufacturer_id is None:
-            manufacturer_id = org_id
+    def _skip(org: OrganizationExtract) -> bool:
+        if not skip_own_lab:
+            return False
+        if is_own_lab_name(org.name):
+            return True
+        if org.org_type == "testing_center" and is_own_lab_name(org.name):
+            return True
+        return False
 
-    if customer_id is None and organizations:
-        customer_id = upsert_organization(organizations[0], source=source, db_path=db_path)
-    if manufacturer_id is None and len(organizations) > 1:
-        manufacturer_id = upsert_organization(organizations[1], source=source, db_path=db_path)
-    elif manufacturer_id is None and customer_id is not None:
-        manufacturer_id = customer_id
+    # 1) Явные строки GUI — надёжный источник ролей после human-in-the-loop
+    cust = (customer_name or "").strip()
+    mfg = (manufacturer_name or "").strip()
+    if cust and not (skip_own_lab and is_own_lab_name(cust)):
+        cust_org = OrganizationExtract(
+            name=cust,
+            inn=customer_inn,
+            address=customer_address,
+            legal_address=customer_address,
+            actual_address=customer_address,
+            org_type="certification_body"
+            if re.search(r"сертификац|фаер|fire\s*lab", cust, re.I)
+            else "unknown",
+            role="customer",
+            confidence=0.95,
+        )
+        # если в extract уже есть customer с тем же именем — подтянуть тип/телефон
+        for o in organizations:
+            if o.role == "customer" and normalize_org_name(o.name) == normalize_org_name(cust):
+                cust_org = o.model_copy(
+                    update={
+                        "name": cust,
+                        "inn": customer_inn or o.inn,
+                        "address": customer_address or o.address,
+                        "role": "customer",
+                    }
+                )
+                break
+            if o.org_type == "certification_body" and normalize_org_name(
+                o.name
+            ) == normalize_org_name(cust):
+                cust_org = o.model_copy(
+                    update={
+                        "name": cust,
+                        "inn": customer_inn or o.inn,
+                        "address": customer_address or o.address,
+                        "role": "customer",
+                    }
+                )
+                break
+        customer_id = upsert_organization(cust_org, source=source, db_path=db_path)
+
+    if mfg and not (skip_own_lab and is_own_lab_name(mfg)):
+        mfg_org = OrganizationExtract(
+            name=mfg,
+            org_type="manufacturer",
+            role="manufacturer",
+            confidence=0.95,
+        )
+        for o in organizations:
+            if o.role == "manufacturer" and normalize_org_name(o.name) == normalize_org_name(
+                mfg
+            ):
+                mfg_org = o.model_copy(update={"name": mfg, "role": "manufacturer"})
+                break
+        manufacturer_id = upsert_organization(mfg_org, source=source, db_path=db_path)
+
+    # 2) Остальные из extract (не ИЛ; роли customer/manufacturer если ещё не заданы)
+    for org in organizations:
+        if _skip(org):
+            continue
+        if org.role not in ("customer", "manufacturer", "dealer") and org.org_type not in (
+            "manufacturer",
+            "certification_body",
+            "dealer",
+        ):
+            # testing_center чужой — можно сохранить справочно, без ролей заказа
+            if org.org_type == "testing_center":
+                continue
+        org_id = upsert_organization(org, source=source, db_path=db_path)
+        if org.role == "customer" and customer_id is None and not is_own_lab_name(org.name):
+            customer_id = org_id
+        if org.role == "manufacturer" and manufacturer_id is None and not is_own_lab_name(
+            org.name
+        ):
+            manufacturer_id = org_id
+        if (
+            customer_id is None
+            and org.org_type == "certification_body"
+            and not is_own_lab_name(org.name)
+        ):
+            customer_id = org_id
 
     return {"customer_org_id": customer_id, "manufacturer_org_id": manufacturer_id}
 
@@ -2522,36 +2721,226 @@ def delete_organization(
         return {"ok": True, "name": row["name"], "unlinked": total}
 
 
-def _seed_demo_tests(db_path: str | Path) -> None:
-    """Добавляет демо-тесты с реалистичными параметрами."""
-    demo = [
-        TestItem(
-            code="resistance_core",
-            name="Электрическое сопротивление ТПЖ",
-            base_cost=400,
-            category="Электрические параметры НЧ",
-            rule_type="per_core",
-        ),
-        TestItem(
-            code="insulation_resistance",
-            name="Электрическое сопротивление изоляции ТПЖ",
-            base_cost=600,
-            category="Электрические параметры НЧ",
-            rule_type="per_core",
-        ),
-        TestItem(
-            code="voltage_test",
-            name="Испытание напряжением",
-            base_cost=400,
-            category="Электрические параметры НЧ",
-        ),
-    ]
+# Минимальный размер «полного» прайса (xlsx/seed ≈ 60). Ниже — считаем каталог урезанным.
+_PRICE_CATALOG_MIN_COUNT = 20
+_PRICE_SEED_JSON = Path(__file__).resolve().parent / "price_catalog_seed.json"
+_MAPPINGS_SEED_JSON = Path(__file__).resolve().parent / "test_mappings_seed.json"
 
+
+def _find_price_xlsx() -> Path | None:
+    """Ищет xlsx прайса рядом с проектом (кириллическое имя допустимо)."""
+    data = Path(PROJECT_ROOT) / "data"
+    if not data.is_dir():
+        return None
+    preferred = data / "Обновленная стоимость на 2026 год.xlsx"
+    if preferred.is_file():
+        return preferred
+    for p in sorted(data.glob("*.xlsx")):
+        return p
+    return None
+
+
+def load_price_catalog_from_seed(
+    db_path: str | Path = DB_PATH_DEFAULT,
+    seed_path: str | Path | None = None,
+) -> int:
+    """Загружает test_items из встроенного JSON (релиз без xlsx / без app.db)."""
+    path = Path(seed_path) if seed_path else _PRICE_SEED_JSON
+    if not path.is_file():
+        return 0
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        return 0
+    count = 0
+    for row in raw:
+        if not isinstance(row, dict) or not row.get("code"):
+            continue
+        item = TestItem(
+            code=str(row["code"]),
+            name=str(row.get("name") or row["code"]),
+            base_cost=float(row.get("base_cost") or 0),
+            category=row.get("category"),
+            method=row.get("method"),
+            rule_type=row.get("rule_type") or "fixed",  # type: ignore[arg-type]
+            rule_params=row.get("rule_params") or {},
+        )
+        insert_test_item(item, db_path)
+        count += 1
+    return count
+
+
+def load_test_mappings_from_seed(
+    db_path: str | Path = DB_PATH_DEFAULT,
+    seed_path: str | Path | None = None,
+) -> int:
+    """Дополняет test_mappings из JSON (идемпотентно по requirement_pattern)."""
+    path = Path(seed_path) if seed_path else _MAPPINGS_SEED_JSON
+    if not path.is_file():
+        return 0
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        return 0
+    now = datetime.now().isoformat()
+    added = 0
+    with get_connection(db_path) as conn:
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            pattern = (row.get("requirement_pattern") or "").strip().lower()
+            code = (row.get("test_code") or "").strip()
+            if not pattern or not code:
+                continue
+            cur = conn.execute(
+                """
+                INSERT INTO test_mappings (requirement_pattern, test_code, note, usage_count, created_at)
+                VALUES (?, ?, ?, 0, ?)
+                ON CONFLICT(requirement_pattern) DO NOTHING
+                """,
+                (pattern, code, row.get("note"), now),
+            )
+            if cur.rowcount:
+                added += 1
+    return added
+
+
+def ensure_price_catalog(db_path: str | Path = DB_PATH_DEFAULT) -> dict[str, Any]:
+    """
+    Гарантирует полный справочник испытаний в test_items.
+
+    На чистой установке без -IncludeAppDb раньше попадали только 3 демо-кода
+    (resistance_core …) — на рабочем ПК «пропадал» почти весь Справочник.
+
+    Порядок:
+    1) если записей уже >= порога — только sync климатики;
+    2) иначе xlsx из data/ (если есть);
+    3) иначе встроенный price_catalog_seed.json;
+    4) в крайнем случае — 3 демо-позиции.
+    """
     existing = get_all_test_items(db_path)
-    if len(existing) < 5:
-        for item in demo:
+    n = len(existing)
+    result: dict[str, Any] = {
+        "before": n,
+        "loaded": 0,
+        "source": None,
+        "after": n,
+    }
+    if n >= _PRICE_CATALOG_MIN_COUNT:
+        sync_climatic_tests(db_path)
+        result["source"] = "already_full"
+        _log.debug(
+            "ensure_price_catalog skip (already_full) n=%s path=%s",
+            n,
+            db_path,
+            extra={"tag": "Прайс"},
+        )
+        return result
+
+    _log.warning(
+        "ensure_price_catalog: catalog thin n=%s < %s path=%s — restoring",
+        n,
+        _PRICE_CATALOG_MIN_COUNT,
+        db_path,
+        extra={"tag": "Прайс"},
+    )
+
+    # Убрать старые EN-демо-коды, если они остались вместо реального прайса
+    demo_codes = ("resistance_core", "insulation_resistance", "voltage_test")
+    with get_connection(db_path) as conn:
+        for code in demo_codes:
+            conn.execute("DELETE FROM test_items WHERE code = ?", (code,))
+
+    xlsx = _find_price_xlsx()
+    if xlsx is not None:
+        try:
+            result["loaded"] = load_price_list_from_xlsx(xlsx, db_path)
+            result["source"] = f"xlsx:{xlsx.name}"
+            _log.info(
+                "price loaded from xlsx=%s count=%s",
+                xlsx,
+                result["loaded"],
+                extra={"tag": "Прайс"},
+            )
+        except Exception as exc:
+            _log.exception(
+                "price xlsx load failed path=%s: %s",
+                xlsx,
+                exc,
+                extra={"tag": "Прайс"},
+            )
+            result["loaded"] = 0
+            result["source"] = None
+
+    if result["loaded"] < _PRICE_CATALOG_MIN_COUNT:
+        seeded = load_price_catalog_from_seed(db_path)
+        if seeded:
+            result["loaded"] = seeded
+            result["source"] = "seed_json"
+            _log.info(
+                "price loaded from seed_json count=%s",
+                seeded,
+                extra={"tag": "Прайс"},
+            )
+
+    if result["loaded"] == 0 and len(get_all_test_items(db_path)) < 5:
+        for item in (
+            TestItem(
+                code="электрическое_сопротивление_тпж",
+                name="Электрическое сопротивление ТПЖ",
+                base_cost=400,
+                category="Электрические параметры НЧ",
+                rule_type="per_core",
+            ),
+            TestItem(
+                code="электрическое_сопротивление_изоляции_тпж",
+                name="Электрическое сопротивление изоляции ТПЖ",
+                base_cost=600,
+                category="Электрические параметры НЧ",
+                rule_type="per_core",
+            ),
+            TestItem(
+                code="испытание_напряжением",
+                name="Испытание напряжением",
+                base_cost=400,
+                category="Электрические параметры НЧ",
+            ),
+        ):
             insert_test_item(item, db_path)
+            result["loaded"] += 1
+        result["source"] = "demo_fallback"
+        _log.warning(
+            "price demo_fallback only count=%s",
+            result["loaded"],
+            extra={"tag": "Прайс"},
+        )
+
     sync_climatic_tests(db_path)
+    apply_price_catalog_fixes(db_path)
+    # Маппинги: если почти пусто — подтянуть seed
+    with get_connection(db_path) as conn:
+        map_n = conn.execute("SELECT COUNT(*) AS n FROM test_mappings").fetchone()["n"]
+    if int(map_n) < 30:
+        added_m = load_test_mappings_from_seed(db_path)
+        _log.info(
+            "test_mappings seed added=%s (was %s)",
+            added_m,
+            map_n,
+            extra={"tag": "Прайс"},
+        )
+
+    result["after"] = len(get_all_test_items(db_path))
+    _log.info(
+        "ensure_price_catalog done before=%s after=%s source=%s",
+        result["before"],
+        result["after"],
+        result["source"],
+        extra={"tag": "Прайс"},
+    )
+    return result
+
+
+def _seed_demo_tests(db_path: str | Path) -> None:
+    """Обратная совместимость: полный прайс через ensure_price_catalog."""
+    ensure_price_catalog(db_path)
 
 
 def insert_test_item(item: TestItem, db_path: str | Path = DB_PATH_DEFAULT) -> int:

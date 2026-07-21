@@ -37,8 +37,9 @@ def _norm_name(name: str) -> str:
             1,
         ),
         (
+            # Направление: заказчик = орган по сертификации, изготовитель = завод
             "direction_sample.json",
-            "кирскабель",
+            "петербург",
             "кирскабель",
             2,
         ),
@@ -75,9 +76,13 @@ def test_extract_organizations_roles_direction() -> None:
     assert "customer" in roles
     assert "manufacturer" in roles
     customer = pick_customer_name(orgs)
-    assert "кирскабель" in _norm_name(customer)
+    manufacturer = pick_manufacturer_name(orgs)
+    # ОС (Тест-С.-Петербург) = заказчик; Кирскабель = производитель; ИЛ ≠ customer
+    assert "петербург" in _norm_name(customer) or "тест" in _norm_name(customer)
+    assert "кирскабель" in _norm_name(manufacturer)
     assert not _is_non_customer_org(next(o for o in orgs if o.name == customer))
     assert any(o.org_type == "testing_center" for o in orgs)
+    assert any(o.org_type == "certification_body" for o in orgs)
     assert any(o.org_type == "certification_body" for o in orgs)
 
 

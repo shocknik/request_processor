@@ -25,9 +25,10 @@ _ROLE_LABELS: dict[str, OrganizationRole] = {
     "завод": "manufacturer",
     "дилер": "dealer",
     "поставщик": "dealer",
-    "орган по сертификации": "certification_body",
-    "испытательный центр": "testing_center",
-    "испытательная лаборатория": "testing_center",
+    # тип (OS/ИЛ) задаётся org_type; role — customer/manufacturer/unknown
+    "орган по сертификации": "customer",
+    "испытательный центр": "unknown",
+    "испытательная лаборатория": "unknown",
 }
 
 _ORG_TYPE_KEYWORDS: list[tuple[OrgType, re.Pattern[str]]] = [
@@ -526,33 +527,66 @@ def is_direction_document(text: str) -> bool:
     )
 
 
-_NON_CUSTOMER_ORG_TYPES = frozenset({"certification_body", "testing_center"})
+# ИЛ не бывает «заказчиком» заявки к себе; ОС (certification_body) — наоборот, часто заказчик.
+_NON_CUSTOMER_ORG_TYPES = frozenset({"testing_center"})
+
+
+def _is_own_lab_org(org: OrganizationExtract | str) -> bool:
+    """Наша ИЛ (lab_profile / Кабель-Тест) — не заказчик и не производитель."""
+    try:
+        from ..generation.lab_profile import is_own_lab_name
+    except Exception:
+        is_own_lab_name = None  # type: ignore[assignment]
+    name = org if isinstance(org, str) else (org.name or "")
+    if is_own_lab_name and is_own_lab_name(name):
+        return True
+    if re.search(r"кабель[\s\-–]*тест", name or "", re.I):
+        return True
+    return False
 
 
 def _is_non_customer_org(org: OrganizationExtract) -> bool:
-    """Орган сертификации и ИЛ не могут быть заказчиком испытаний."""
+    """ИЛ / наша лаборатория не может быть заказчиком. ОС (ФаерЛаб) — может."""
+    if _is_own_lab_org(org):
+        return True
     if org.org_type in _NON_CUSTOMER_ORG_TYPES:
         return True
     name = org.name or ""
-    if re.search(r"орган\w*\s+по\s+сертификац", name, re.I):
-        return True
     if re.search(r"испытательн\w+\s+(?:центр|лаборатор)", name, re.I):
-        return True
-    if re.search(r"кабель[\s\-–]*тест", name, re.I):
         return True
     return False
 
 
 def extract_testing_center_from_direction(text: str) -> OrganizationExtract | None:
-    """Испытательный центр из блока «Наименование и адрес испытательной лаборатории»."""
+    """Испытательный центр из шапки направления в ИЛ."""
     match = re.search(
         r"Испытательный\s+центр\s+(.+?)"
-        r"(?:,\s*аттестат|аттестат\s+аккредитации|адрес\s*:|$)",
+        r"(?:,\s*уникальный\s+номер|,\s*аттестат|аттестат\s+аккредитации|"
+        r"адрес\s*(?:места)?|Наименование\s+ИЛ|$)",
         text[:6000],
         re.IGNORECASE | re.DOTALL,
     )
     if not match:
-        return None
+        # fallback: НИЦ «Кабель-Тест» в начале документа
+        nic = re.search(
+            r'НИЦ\s*[«""]([^»"]+)[»""]',
+            text[:2500],
+            re.I,
+        )
+        if not nic:
+            return None
+        name = f'ООО НИЦ «{nic.group(1).strip()}»'
+        fsa_m = _FSA_PATTERN.search(text[:2500])
+        return OrganizationExtract(
+            name=name,
+            org_type="testing_center",
+            role="unknown",
+            is_accredited=bool(fsa_m),
+            fsa_registry_number=(
+                fsa_m.group(0).upper().replace("  ", " ") if fsa_m else None
+            ),
+            confidence=0.75,
+        )
 
     chunk = match.group(1).strip()
     name: str | None = None
@@ -572,22 +606,154 @@ def extract_testing_center_from_direction(text: str) -> OrganizationExtract | No
 
     tail = text[match.start() : match.start() + 900]
     addr = None
-    addr_m = re.search(r"адрес\s*:\s*([^.\n]+)", tail, re.I)
-    if addr_m:
+    addr_m = re.search(
+        r"(\d{6}[^\n]{10,160})",
+        tail,
+        re.I,
+    )
+    if addr_m and not re.search(r"НАПРАВЛЕНИЕ|орган", addr_m.group(1), re.I):
         addr = sanitize_address(addr_m.group(1))
 
-    fsa_m = _FSA_PATTERN.search(tail)
+    fsa_m = _FSA_PATTERN.search(tail) or _FSA_PATTERN.search(text[:2500])
+    phone = None
+    phone_m = re.search(r"(\+?\d[\d\s\-]{9,20})", tail)
+    if phone_m and len(re.sub(r"\D", "", phone_m.group(1))) >= 10:
+        phone = re.sub(r"\s+", " ", phone_m.group(1)).strip()
+
     return OrganizationExtract(
         name=name,
         address=addr,
         legal_address=addr,
         actual_address=addr,
         postal_code=_postal_from_address(addr),
+        phone=phone,
         org_type="testing_center",
         role="unknown",
         is_accredited=bool(fsa_m),
         fsa_registry_number=fsa_m.group(0).upper().replace("  ", " ") if fsa_m else None,
         confidence=0.8,
+    )
+
+
+def extract_certification_body_from_direction(text: str) -> OrganizationExtract | None:
+    """
+    Орган по сертификации из направления (заказчик для ИЛ).
+
+    Пример:
+      НАПРАВЛЕНИЕ
+      Орган по сертификации Общества с ограниченной ответственностью «ФаерЛаб»
+      ...
+      Адрес места осуществления деятельности: 143985, … Телефон: … E-mail: …
+    """
+    if not text or not is_direction_document(text):
+        return None
+
+    head = text[:7000]
+    name: str | None = None
+
+    # 1) «Орган по сертификации … «ФаерЛаб»» (имя в той же фразе)
+    m_quoted = re.search(
+        r"Орган\w*\s+по\s+сертификац\w*\s+"
+        r"(?:Общества\s+с\s+ограниченной\s+ответственностью\s+)?"
+        r"[«\"']([^»\"']{2,80})[»\"']",
+        head,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_quoted:
+        brand = m_quoted.group(1).strip()
+        # отсечь мусор: «продукции и услуг» без реального бренда
+        if not re.search(r"продукц\w*\s+и\s+услуг", brand, re.I):
+            name = f"ООО «{brand}»"
+
+    # 2) Следующая строка — ООО «Тест-С.-Петербург»
+    if not name:
+        m_next = re.search(
+            r"Орган\w*\s+по\s+сертификац\w*[^\n]{0,80}\n\s*"
+            r"((?:ООО|Общество\s+с\s+ограниченной\s+ответственностью)"
+            r"[^\n]{3,100})",
+            head,
+            re.IGNORECASE,
+        )
+        if m_next:
+            raw = re.sub(r"\s+", " ", m_next.group(1)).strip()
+            mq = re.search(r"[«\"']([^»\"']{2,80})[»\"']", raw)
+            if mq and not re.search(r"продукц\w*\s+и\s+услуг", mq.group(1), re.I):
+                name = f"ООО «{mq.group(1).strip()}»"
+            else:
+                cleaned = _clean_org_name(raw[:120])
+                if (
+                    len(normalize_org_name(cleaned)) >= 4
+                    and not re.search(r"продукц\w*\s+и\s+услуг", cleaned, re.I)
+                ):
+                    name = cleaned
+
+    # 3) Та же строка: Общество с ограниченной ответственностью «X»
+    if not name:
+        m_line = re.search(
+            r"Орган\w*\s+по\s+сертификац\w*\s+"
+            r"(Общества\s+с\s+ограниченной\s+ответственностью\s+[«\"'][^»\"']+[»\"']"
+            r"|ООО\s+[«\"'][^»\"']+[»\"'])",
+            head,
+            re.IGNORECASE,
+        )
+        if m_line:
+            raw = re.sub(r"\s+", " ", m_line.group(1)).strip()
+            mq = re.search(r"[«\"']([^»\"']{2,80})[»\"']", raw)
+            if mq:
+                name = f"ООО «{mq.group(1).strip()}»"
+
+    if not name or len(normalize_org_name(name)) < 3:
+        return None
+    if re.search(r"продукц\w*\s+и\s+услуг", name, re.I):
+        return None
+
+    # Блок реквизитов после «Адрес места осуществления деятельности»
+    addr = phone = email = None
+    block_m = re.search(
+        r"Адрес\s+места\s+осуществления\s+деятельности\s*:\s*(.+?)"
+        r"(?=направляет\s+образц|Эксперт\s+органа|Образцы\s+на\s+испытания|$)",
+        head,
+        re.IGNORECASE | re.DOTALL,
+    )
+    block = block_m.group(1) if block_m else ""
+    if block:
+        # отрезать служебную строку-подпись формы
+        block = re.split(
+            r"адрес\s+места\s+осуществления\s+деятельности\s*,\s*телефон",
+            block,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+        # телефон / email вырезать из адреса
+        email_m = re.search(
+            r"(?:адрес\s+электронной\s+почты|e-?mail)\s*:\s*([\w.\-]+@[\w.\-]+\.\w+)",
+            block,
+            re.I,
+        )
+        if email_m:
+            email = email_m.group(1).replace(" ", "")
+        phone_m = re.search(
+            r"Телефон\s*:\s*(\+?[\d\s\(\)\-]{7,30})",
+            block,
+            re.I,
+        )
+        if phone_m:
+            phone = re.sub(r"\s+", " ", phone_m.group(1)).strip().rstrip(".,;")
+        addr_raw = re.split(r"Телефон\s*:", block, maxsplit=1, flags=re.I)[0]
+        addr_raw = re.sub(r"ОГРН\s*:\s*\d+", "", addr_raw, flags=re.I)
+        addr = sanitize_address(addr_raw.strip(" \n\t.,;"))
+
+    return OrganizationExtract(
+        name=name,
+        address=addr,
+        legal_address=addr,
+        actual_address=addr,
+        postal_code=_postal_from_address(addr),
+        phone=phone,
+        email=email,
+        org_type="certification_body",
+        role="customer",
+        confidence=0.9 if addr or phone or email else 0.8,
     )
 
 
@@ -602,6 +768,11 @@ def assign_organization_roles(
     result = [org.model_copy(deep=True) for org in organizations]
 
     for org in result:
+        if _is_own_lab_org(org) or org.org_type == "testing_center":
+            org.org_type = "testing_center"
+            if org.role in ("customer", "manufacturer"):
+                org.role = "unknown"
+            continue
         if org.role == "customer" and _is_non_customer_org(org):
             org.role = "unknown"
             if re.search(r"сертификац", org.name or "", re.I):
@@ -612,24 +783,36 @@ def assign_organization_roles(
     if not is_direction_document(text):
         return result
 
-    manufacturer = next(
-        (o for o in result if o.role == "manufacturer"),
-        next((o for o in result if o.org_type == "manufacturer"), None),
+    # Направление: ОС = заказчик (если ещё не назначен)
+    cert = next(
+        (o for o in result if o.org_type == "certification_body" and o.name),
+        None,
     )
-    if not manufacturer:
-        return result
+    if cert and not _is_own_lab_org(cert):
+        cert.role = "customer"
+        cert.org_type = "certification_body"
 
     has_customer = any(
         o.role == "customer" and o.name and not _is_non_customer_org(o) for o in result
     )
-    if not has_customer:
-        customer = manufacturer.model_copy(deep=True)
-        customer.role = "customer"
-        mfg_key = normalize_org_name(manufacturer.name)
-        if not any(
-            normalize_org_name(o.name) == mfg_key and o.role == "customer" for o in result
-        ):
-            result.append(customer)
+    if has_customer:
+        return result
+
+    # Fallback: производитель = заказчик только если нет ОС
+    manufacturer = next(
+        (o for o in result if o.role == "manufacturer"),
+        next((o for o in result if o.org_type == "manufacturer"), None),
+    )
+    if not manufacturer or _is_own_lab_org(manufacturer):
+        return result
+
+    customer = manufacturer.model_copy(deep=True)
+    customer.role = "customer"
+    mfg_key = normalize_org_name(manufacturer.name)
+    if not any(
+        normalize_org_name(o.name) == mfg_key and o.role == "customer" for o in result
+    ):
+        result.append(customer)
 
     return result
 
@@ -862,6 +1045,10 @@ def extract_organizations(text: str) -> list[OrganizationExtract]:
             found.append(manufacturer)
 
     if is_direction:
+        cert_body = extract_certification_body_from_direction(text)
+        if cert_body:
+            # приоритет: ОС — заказчик; не затирать role=customer
+            add(cert_body, "customer")
         testing_center = extract_testing_center_from_direction(text)
         if testing_center:
             add(testing_center, "unknown")
@@ -875,8 +1062,16 @@ def pick_customer_name(organizations: list[OrganizationExtract]) -> str:
     for org in organizations:
         if org.role == "customer" and org.name and not _is_non_customer_org(org):
             return org.name
+    # ОС с role unknown (до assign) — тоже кандидат в заказчики направления
     for org in organizations:
-        if org.role == "manufacturer" and org.name:
+        if (
+            org.org_type == "certification_body"
+            and org.name
+            and not _is_own_lab_org(org)
+        ):
+            return org.name
+    for org in organizations:
+        if org.role == "manufacturer" and org.name and not _is_own_lab_org(org):
             return org.name
     for org in organizations:
         if org.role == "unknown" and org.name and not _is_non_customer_org(org):
@@ -886,12 +1081,10 @@ def pick_customer_name(organizations: list[OrganizationExtract]) -> str:
 
 def pick_manufacturer_name(organizations: list[OrganizationExtract]) -> str:
     for org in organizations:
-        if org.role == "manufacturer" and org.name:
+        if org.role == "manufacturer" and org.name and not _is_own_lab_org(org):
             return org.name
     for org in organizations:
-        if org.org_type == "manufacturer" and org.name:
+        if org.org_type == "manufacturer" and org.name and not _is_own_lab_org(org):
             return org.name
-    for org in organizations:
-        if org.role == "customer" and org.name and not _is_non_customer_org(org):
-            return org.name
+    # Не подставлять ОС/ИЛ как производителя «по умолчанию»
     return ""

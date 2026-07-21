@@ -17,12 +17,15 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 from ..config import MINIMUM_ORDER_CODE, SAMPLE_PREP_CODE, VAT_RATE
+from ..logging_setup import get_logger
 from ..models import CableMark, Calculation, CalculationLine, TestItem
 from ..parsing.cable_mark_parser import parse_cable_mark
 from ..persistence.sqlite_repo import get_test_item_by_code
 from .climatic_tests import resolve_climate_item_code
 from .money import money_round, to_decimal
 from .sample_complexity import compute_sample_complexity
+
+_log = get_logger("calculation.cost")
 
 PREP_COMPLEXITY_CODE = SAMPLE_PREP_CODE
 
@@ -140,6 +143,16 @@ def calculate_cost(
     complexity, complexity_note = compute_sample_complexity(
         parsed, has_armor=has_armor, is_wire=is_wire
     )
+    mark_text = mark if isinstance(mark, str) else getattr(mark, "full_mark", str(mark))
+    _log.info(
+        "calculate_cost mark=%r tests=%s discount=%s markup=%s armor=%s",
+        (mark_text or "")[:80],
+        list(qty_map.keys()),
+        discount_percent,
+        markup_percent,
+        has_armor,
+        extra={"tag": "Расчёт"},
+    )
 
     lines: list[CalculationLine] = []
     subtotal = Decimal("0")
@@ -148,6 +161,12 @@ def calculate_cost(
         resolved = _resolve_item_code(code)
         item = get_test_item_by_code(resolved, db_path)
         if item is None:
+            _log.warning(
+                "test code not in catalog, skip code=%s resolved=%s",
+                code,
+                resolved,
+                extra={"tag": "Расчёт"},
+            )
             print(f"⚠ Тест '{code}' не найден в справочнике — пропускаю")
             continue
 
@@ -218,6 +237,16 @@ def calculate_cost(
 
     vat_rate = VAT_RATE
     total_with_vat = money_round(to_decimal(total_without_vat) * (Decimal("1") + to_decimal(vat_rate)))
+
+    _log.info(
+        "calculate_cost done mark=%r lines=%s subtotal=%s total_vat=%s min_adj=%s",
+        parsed.full_mark[:80],
+        len(lines),
+        total_without_vat,
+        total_with_vat,
+        minimum_adjustment,
+        extra={"tag": "Расчёт"},
+    )
 
     return Calculation(
         mark=parsed.full_mark,

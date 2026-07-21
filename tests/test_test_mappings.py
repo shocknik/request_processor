@@ -49,12 +49,11 @@ def test_map_voltage_phrase_uses_price_code(db) -> None:
 
 
 def test_resolve_test_code_alias(db) -> None:
-    from request_processor.persistence.sqlite_repo import add_test_item, get_connection
     from request_processor.models import TestItem
+    from request_processor.persistence.sqlite_repo import insert_test_item
 
-    with get_connection(db) as conn:
-        conn.execute("DELETE FROM test_items WHERE code = 'resistance_core'")
-    add_test_item(
+    # Полный seed уже кладёт slug-код прайса; insert upsert'ит по code
+    insert_test_item(
         TestItem(
             code="электрическое_сопротивление_тпж",
             name="Электрическое сопротивление ТПЖ",

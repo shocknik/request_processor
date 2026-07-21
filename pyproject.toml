@@ -51,6 +51,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "request_processor" = ["*.json", "*.sql", "*.md"]
+"request_processor.persistence" = ["*.json"]
 
 [tool.ruff]
 line-length = 100

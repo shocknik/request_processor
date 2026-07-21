@@ -92,54 +92,43 @@ def _add_header_block(
     *,
     style: str,
 ) -> None:
+    """Шапка КП: логотип (КТ) + реквизиты; solid layout для всех стилей."""
     logo = profile.resolved_logo()
-    if style == "modern" and logo is not None:
+    logo_w = {"classic": 3.0, "modern": 2.8, "compact": 2.2}.get(style, 2.8)
+    name_sz = {"classic": 13, "modern": 14, "compact": 12}.get(style, 13)
+    tag_sz = {"classic": 10, "modern": 9, "compact": 9}.get(style, 9)
+
+    if logo is not None:
+        # Двухколоночная шапка: логотип слева, название/контакты справа
         table = doc.add_table(rows=1, cols=2)
         table.autofit = True
         left, right = table.rows[0].cells
         try:
-            left.paragraphs[0].add_run().add_picture(str(logo), width=Cm(2.8))
+            left.paragraphs[0].add_run().add_picture(str(logo), width=Cm(logo_w))
         except Exception:
             pass
         p = right.paragraphs[0]
         r = p.add_run(profile.name)
-        _set_run_font(r, size=14, bold=True, color=colors["name"])
+        _set_run_font(r, size=name_sz, bold=True, color=colors["name"])
         if profile.tagline:
             p2 = right.add_paragraph()
             r2 = p2.add_run(profile.tagline)
-            _set_run_font(r2, size=9, color=colors["muted"])
-        _add_contact_lines(right, profile, colors, size=8)
-    elif style == "compact":
-        if logo is not None:
-            try:
-                p_logo = doc.add_paragraph()
-                p_logo.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                p_logo.add_run().add_picture(str(logo), width=Cm(2.2))
-            except Exception:
-                pass
-        p = doc.add_paragraph()
-        r = p.add_run(profile.name)
-        _set_run_font(r, size=12, bold=True, color=colors["name"])
-        if profile.tagline:
-            p2 = doc.add_paragraph(profile.tagline)
-            for run in p2.runs:
-                _set_run_font(run, size=9, color=colors["muted"])
+            _set_run_font(r2, size=tag_sz, color=colors["muted"])
+        if style != "compact":
+            _add_contact_lines(right, profile, colors, size=8 if style == "modern" else 9)
+        else:
+            # compact: контакты одной строкой под шапкой
+            pass
+        if style == "compact":
+            _add_contact_paragraph(doc, profile, colors)
     else:
-        # classic
-        if logo is not None:
-            try:
-                p_logo = doc.add_paragraph()
-                p_logo.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                p_logo.add_run().add_picture(str(logo), width=Cm(3.2))
-            except Exception:
-                pass
         p_lab = doc.add_paragraph()
         r = p_lab.add_run(profile.name)
-        _set_run_font(r, size=13, bold=True, color=colors["name"])
+        _set_run_font(r, size=name_sz, bold=True, color=colors["name"])
         if profile.tagline:
             p_sub = doc.add_paragraph(profile.tagline)
             for run in p_sub.runs:
-                _set_run_font(run, size=10, color=colors["muted"])
+                _set_run_font(run, size=tag_sz, color=colors["muted"])
         _add_contact_paragraph(doc, profile, colors)
 
 

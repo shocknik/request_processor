@@ -12,7 +12,7 @@
 
 .PARAMETER IncludeAppDb
   Включить data/app.db как есть. Для боя: сначала
-  request-processor prepare-battle-db --yes (прайс остаётся, марки/орг. пустые).
+  request-processor prepare-prod-db --yes (прайс остаётся, марки/орг. пустые).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1

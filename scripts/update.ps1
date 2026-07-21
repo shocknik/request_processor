@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Обновление Lab_request / request-processor на месте — БЕЗ удаления data/ и без «сноса» проги.
@@ -51,6 +51,10 @@ if (-not $ProjectRoot) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
+
+. (Join-Path $PSScriptRoot "_common_log.ps1")
+Initialize-RpLog -ProjectRoot $ProjectRoot -ScriptName "update"
+Write-RpLog ("update start ZipPath=" + $ZipPath + " SourceRoot=" + $SourceRoot) -Level INFO
 
 Write-Host "=== Lab_request: обновление на месте ===" -ForegroundColor Cyan
 Write-Host "Установка: $ProjectRoot"
@@ -146,7 +150,7 @@ foreach ($sub in @("templates", "families")) {
     Write-Host "  + data\$sub (merge)" -ForegroundColor Gray
 }
 
-# НЕ копируем data/app.db из релиза (сохраняем боевую БД)
+# НЕ копируем data/app.db из релиза (сохраняем рабочую БД на prod)
 Write-Host "data\app.db — сохранён (не перезаписан)" -ForegroundColor Green
 
 # --- reinstall package into existing venv ---
@@ -173,7 +177,9 @@ if (-not (Test-Path $venvPy)) {
     if (-not $SkipShortcut) {
         $sc = Join-Path $ProjectRoot "scripts\create_desktop_shortcut.ps1"
         if (Test-Path $sc) {
+            Write-RpLog "running create_desktop_shortcut.ps1" -Level INFO
             & powershell -ExecutionPolicy Bypass -File $sc
+            if ($LASTEXITCODE -ne 0) { Write-RpLog ("shortcut exit=" + $LASTEXITCODE) -Level WARNING }
         }
     }
 }
@@ -184,6 +190,7 @@ if ($tempExtract -and (Test-Path $tempExtract)) {
 }
 
 Write-Host ""
+Write-RpLog "update finished OK" -Level INFO
 Write-Host "=== Обновление завершено ===" -ForegroundColor Green
 Write-Host "Backup: $backupDir"
 Write-Host "Запуск: $ProjectRoot\start_gui.bat  или ярлык Lab_request"

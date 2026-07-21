@@ -60,6 +60,7 @@ tools/*.exe
 
 # Локальные/чувствительные артефакты
 _mech_extract/
+_from_work/
 data/client_profiles.local.yaml
 data/knowledge/
 
