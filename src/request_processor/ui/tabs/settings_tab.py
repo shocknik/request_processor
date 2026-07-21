@@ -334,13 +334,19 @@ class SettingsTabMixin:
         ttk.Button(llm_btns, text="Проверить Ollama", command=self._test_ollama_connection).pack(
             side="left"
         )
+        ttk.Button(
+            llm_btns,
+            text="S2.5 Демо: 3 OCR-марки…",
+            command=self._run_s25_ocr_marks_demo,
+        ).pack(side="left", padx=(8, 0))
         ttk.Label(
             llm_frame,
             text=(
                 "По умолчанию выключено. Стандартный путь моделей Windows: "
                 "%USERPROFILE%\\.ollama\\models "
                 "(напр. C:\\Users\\User\\.ollama\\models). "
-                "Модель: llama3.2 → ollama pull llama3.2"
+                "Модель: llama3.2 → ollama pull llama3.2. "
+                "S2.5 — таблица 3 OCR-марок (MarkCorrector; LLM если включён)."
             ),
             style="CardMuted.TLabel",
             wraplength=720,
@@ -552,6 +558,54 @@ class SettingsTabMixin:
             pack.base_dir = self.pack_base_dir_var.get().strip()
             save_document_pack_settings(pack, self.db_path)
         self.status.set("Настройки сохранены")
+
+    def _run_s25_ocr_marks_demo(self) -> None:
+        """S2.5: таблица 3 OCR-марок — MarkCorrector (+ LLM если opt-in)."""
+        from ...assistant.demo_marks import (
+            format_demo_table,
+            run_ocr_marks_demo,
+            save_demo_report,
+        )
+
+        try:
+            report = run_ocr_marks_demo(db_path=self.db_path, record_feedback=True)
+            path = save_demo_report(report)
+        except Exception as exc:
+            messagebox.showerror("S2.5 демо", str(exc))
+            return
+
+        table = format_demo_table(report)
+        c = report.get("counts") or {}
+        dlg = tk.Toplevel(self)
+        dlg.title("S2.5 — демо 3 OCR-марки")
+        dlg.geometry("820x420")
+        dlg.transient(self)
+        dlg.grab_set()
+        ttk.Label(
+            dlg,
+            text=(
+                f"helped yes={c.get('helped_yes')} partial={c.get('helped_partial')} "
+                f"no={c.get('helped_no')} · llm={c.get('llm_source')} · "
+                f"отчёт: {path.name}"
+            ),
+            style="Muted.TLabel",
+            wraplength=780,
+        ).pack(anchor="w", padx=12, pady=(12, 4))
+        txt = scrolledtext.ScrolledText(dlg, wrap="none", height=16, font=("Consolas", 9))
+        txt.pack(fill="both", expand=True, padx=12, pady=4)
+        txt.insert("1.0", table)
+        txt.configure(state="disabled")
+        ttk.Button(dlg, text="Закрыть", command=dlg.destroy).pack(pady=10)
+        self.status.set(f"S2.5 демо: yes={c.get('helped_yes')}/3 · {path.name}")
+        _log.info(
+            "S2.5 demo yes=%s partial=%s no=%s llm=%s path=%s",
+            c.get("helped_yes"),
+            c.get("helped_partial"),
+            c.get("helped_no"),
+            c.get("llm_source"),
+            path,
+            extra={"tag": "Ассистент"},
+        )
 
     def _refresh_prod_station_label(self) -> None:
         if not hasattr(self, "prod_station_label"):

@@ -1642,6 +1642,49 @@ def import_prod_data_cmd(archive: str, db: str, no_sync: bool) -> None:
         click.echo(f"  sync_corrections: {result['sync_corrections']}")
 
 
+@cli.command("demo-ocr-marks")
+@click.option("--db", default="data/app.db", show_default=True)
+@click.option(
+    "--record/--no-record",
+    default=True,
+    help="Записать feedback (помогло/нет) в corrections + assistant_sessions",
+)
+@click.option(
+    "--save-report/--no-save-report",
+    default=True,
+    help="JSON-отчёт в data/training/exports/reports/",
+)
+def demo_ocr_marks_cmd(db: str, record: bool, save_report: bool) -> None:
+    """S2.5: демо MarkCorrector (+ LLM если включён) на 3 OCR-марках.
+
+    Печатает таблицу raw → suggested → source → helped (yes/partial/no).
+    LLM opt-in: Настройки GUI или ASSISTANT_LLM_ENABLED=1.
+    """
+    from .assistant.demo_marks import (
+        format_demo_table,
+        run_ocr_marks_demo,
+        save_demo_report,
+    )
+    from .persistence.sqlite_repo import migrate_db
+
+    migrate_db(db)
+    report = run_ocr_marks_demo(db_path=db, record_feedback=record)
+    click.echo(format_demo_table(report))
+    if save_report:
+        path = save_demo_report(report)
+        click.echo(click.style(f"✓ Отчёт: {path}", fg="green"))
+    c = report.get("counts") or {}
+    if c.get("helped_yes", 0) + c.get("helped_partial", 0) >= 2:
+        click.echo(click.style("S2.5: демо OK (детерминированный слой помогает)", fg="green"))
+    else:
+        click.echo(
+            click.style(
+                "S2.5: мало совпадений с эталоном — смотрите reason/source в таблице",
+                fg="yellow",
+            )
+        )
+
+
 @cli.command("assistant-llm-status")
 @click.option("--db", default="data/app.db", show_default=True)
 def assistant_llm_status_cmd(db: str) -> None:
