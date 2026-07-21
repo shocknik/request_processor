@@ -755,31 +755,50 @@ OcrEngineChoice = Literal["auto", "tesseract", "easyocr"]
 OcrEngineResolved = Literal["tesseract", "easyocr", "none"]
 
 
+def _easyocr_importable() -> bool:
+    try:
+        import easyocr  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 def resolve_ocr_engine(
     preferred: OcrEngineChoice | str = "auto",
 ) -> OcrEngineResolved:
     """Выбор OCR-движка.
 
-    * ``auto`` — tesseract, иначе easyocr (PyTorch CV)
-    * ``tesseract`` / ``easyocr`` — явный engine (A/B spike 35v)
+    * ``auto`` — tesseract, иначе easyocr (если установлен)
+    * ``tesseract`` / ``easyocr`` — предпочтение; при отсутствии — fallback
+      на другой доступный движок (чтобы на prod не «долбить» мёртвый easyocr)
     """
     pref = (preferred or "auto").strip().lower()
+    has_tess = bool(_find_tesseract())
+    has_easy = _easyocr_importable()
+
     if pref in ("easyocr", "pytorch_cv", "pytorch", "torch"):
-        try:
-            import easyocr  # noqa: F401
-        except ImportError:
-            return "none"
-        return "easyocr"
-    if pref == "tesseract":
-        return "tesseract" if _find_tesseract() else "none"
-    # auto
-    if _find_tesseract():
-        return "tesseract"
-    try:
-        import easyocr  # noqa: F401
-    except ImportError:
+        if has_easy:
+            return "easyocr"
+        if has_tess:
+            logger.warning(
+                "EasyOCR/torch недоступен — fallback на Tesseract",
+            )
+            return "tesseract"
         return "none"
-    return "easyocr"
+    if pref == "tesseract":
+        if has_tess:
+            return "tesseract"
+        if has_easy:
+            logger.warning("Tesseract не найден — fallback на EasyOCR")
+            return "easyocr"
+        return "none"
+    # auto: Tesseract first (лёгкий, default на prod)
+    if has_tess:
+        return "tesseract"
+    if has_easy:
+        return "easyocr"
+    return "none"
 
 
 def _pdf_cache_fingerprint(path: Path) -> str:
@@ -1190,7 +1209,11 @@ def ocr_pdf_ex(
     resolved = resolve_ocr_engine(preferred)  # type: ignore[arg-type]
     if resolved == "none":
         raise RuntimeError(
-            "OCR недоступен. Установи Tesseract (rus) или: pip install easyocr (venv на D:)"
+            "OCR недоступен.\n"
+            "1) Установите Tesseract OCR + language pack rus "
+            "(или задайте TESSERACT_CMD=…\\tesseract.exe).\n"
+            "2) Опционально: pip install easyocr (тяжёлый, не default).\n"
+            "3) Для Word-заявок OCR не нужен — откройте .docx."
         )
 
     preprocess_tag = (

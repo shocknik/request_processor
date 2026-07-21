@@ -11,7 +11,7 @@
   Включить data/training/rag_corpus (большой объём). По умолчанию — нет.
 
 .PARAMETER IncludeAppDb
-  Включить data/app.db как есть. Для боя: сначала
+  Включить data/app.db как есть. Для prod: сначала
   request-processor prepare-prod-db --yes (прайс остаётся, марки/орг. пустые).
 
 .EXAMPLE

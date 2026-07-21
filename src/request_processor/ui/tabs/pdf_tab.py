@@ -2920,11 +2920,31 @@ class PdfTabMixin:
                 self.after(0, finish_ok)
             except Exception as exc:
                 _log.exception("extract failed")
+                err_text = str(exc)
+                wanted_easyocr = bool(self.ocr_pytorch_var.get())
 
                 def on_error() -> None:
                     if prog_dlg.winfo_exists():
                         prog_dlg.destroy()
-                    messagebox.showerror("Ошибка извлечения", str(exc))
+                    # EasyOCR/torch на prod часто нет — не оставляем галочку «долбить» повторно
+                    if wanted_easyocr and (
+                        "OCR недоступен" in err_text
+                        or "easyocr" in err_text.lower()
+                        or "torch" in err_text.lower()
+                    ):
+                        try:
+                            self.ocr_pytorch_var.set(False)
+                            self._on_ocr_engine_toggle()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        messagebox.showerror(
+                            "Ошибка извлечения",
+                            err_text
+                            + "\n\nГалочка EasyOCR/PyTorch снята. "
+                            "Используйте Tesseract (auto) или файл .docx.",
+                        )
+                    else:
+                        messagebox.showerror("Ошибка извлечения", err_text)
                     self.status.set("Ошибка")
                     self._update_validation_status_bar(state="error")
 
