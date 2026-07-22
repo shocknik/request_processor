@@ -44,7 +44,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -IncludeA
 
 ## Ярлык на рабочий стол
 
-`install.ps1` вызывает скрипт ярлыка автоматически.
+`install.ps1` / `update.ps1` вызывают скрипт ярлыка автоматически.  
+Иконка копируется в `%LOCALAPPDATA%\Lab_request\app_icon.ico` (локальный путь — иначе на сетевых дисках `W:\` Explorer часто показывает «пустой» ярлык).
 
 Вручную:
 
@@ -55,10 +56,10 @@ powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1
 
 | | |
 |--|--|
-| **Имя** | «Обработка заявок на испытания кабелей» |
+| **Имя** | Lab_request |
 | **Запуск** | `.venv\Scripts\pythonw.exe -m request_processor.ui.gui` |
 | **Рабочая папка** | корень проекта |
-| **Иконка** | `assets\app_icon.ico` |
+| **Иконка** | `%LOCALAPPDATA%\Lab_request\app_icon.ico` (из `assets\app_icon.ico`) |
 
 Альтернатива: `start_gui.bat` в корне проекта.
 

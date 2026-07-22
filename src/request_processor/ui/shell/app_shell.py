@@ -116,6 +116,17 @@ class ShellMixin:
         # 1920×1080 и шире: ~94% экрана (раньше cap 1200×860 — «маленькое» окно)
         fit_window_to_screen(self, prefer_w=1400, prefer_h=900, fill=True)
         self.configure(bg=COLORS["bg"])
+        # Иконка окна/панели задач + глобальное колесо для Canvas-скроллов
+        try:
+            from ...config import PROJECT_ROOT
+            from ..widgets.mousewheel import install_mousewheel
+
+            ico = PROJECT_ROOT / "assets" / "app_icon.ico"
+            if ico.is_file():
+                self.iconbitmap(default=str(ico))
+            install_mousewheel(self)
+        except Exception as exc:
+            _log.debug("icon/mousewheel init: %s", exc, extra={"tag": "UI"})
 
         self._tests_by_code: dict[str, dict] = {}
         self._calc_entries: list[CalcTestEntry] = []
@@ -487,6 +498,8 @@ class ShellMixin:
 
     def _make_scrollable_tab(self, parent: ttk.Frame) -> ttk.Frame:
         """Canvas + Scrollbar + inner Frame для длинных вкладок (Настройки)."""
+        from ..widgets.mousewheel import register_canvas_mousewheel
+
         outer = ttk.Frame(parent)
         outer.pack(fill="both", expand=True)
 
@@ -517,6 +530,8 @@ class ShellMixin:
         self._settings_scroll_inner = inner
         self._settings_scroll_outer = outer
         self._settings_wheel_bound = False
+        # priority ниже, чем у вложенных canvas (орг. на Заявке)
+        register_canvas_mousewheel(outer, canvas, priority=10)
         return inner
 
     def _widget_is_under(self, widget: tk.Misc | None, ancestor: tk.Misc) -> bool:
@@ -542,28 +557,25 @@ class ShellMixin:
         except (tk.TclError, KeyError):
             pass
 
-        # Колесо для длинной вкладки «Настройки» (bind_all, без срыва на дочерних Entry).
+        # Колесо: глобальный MousewheelManager (не unbind_all — иначе ломает другие Canvas)
         if selected == self.notebook.index(self.tab_settings):
-            self._enable_settings_wheel()
             self._load_mappings_table()
-        else:
-            self._disable_settings_wheel()
-            if selected == self.notebook.index(self.tab_kp):
-                self._load_kp_calculations()
-            elif selected == self.notebook.index(self.tab_orgs):
-                self._load_orgs_table()
-            elif selected == self.notebook.index(self.tab_orders):
-                self._load_orders_table()
-            elif selected == self.notebook.index(self.tab_compare):
-                if not getattr(self, "_compare_list_loaded", False):
-                    self._refresh_compare_list()
-                    self._compare_list_loaded = True
-                else:
-                    self._refresh_compare_list()
-            elif hasattr(self, "tab_programs") and selected == self.notebook.index(
-                self.tab_programs
-            ):
-                self._load_programs_table()
+        elif selected == self.notebook.index(self.tab_kp):
+            self._load_kp_calculations()
+        elif selected == self.notebook.index(self.tab_orgs):
+            self._load_orgs_table()
+        elif selected == self.notebook.index(self.tab_orders):
+            self._load_orders_table()
+        elif selected == self.notebook.index(self.tab_compare):
+            if not getattr(self, "_compare_list_loaded", False):
+                self._refresh_compare_list()
+                self._compare_list_loaded = True
+            else:
+                self._refresh_compare_list()
+        elif hasattr(self, "tab_programs") and selected == self.notebook.index(
+            self.tab_programs
+        ):
+            self._load_programs_table()
 
     def _set_text(self, widget: scrolledtext.ScrolledText, content: str) -> None:
         """Записать текст; readonly-поля (_rp_readonly) остаются копируемыми."""

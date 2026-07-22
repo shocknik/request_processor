@@ -655,7 +655,13 @@ def import_program_from_docx(
         items=items_payload,
         db_path=db,
     )
-    match_stats = {"matched": 0, "unmatched": 0}
+    match_stats: dict[str, Any] = {
+        "matched": 0,
+        "unmatched": 0,
+        "total": 0,
+        "rate": 0.0,
+        "summary": "сопоставлено 0/0",
+    }
     if match_price and items_payload:
         match_stats = match_program_items_to_price(program_id, db_path=db)
     return {
@@ -668,6 +674,9 @@ def import_program_from_docx(
         "items_count": len(parsed.items),
         "matched": match_stats.get("matched", 0),
         "unmatched": match_stats.get("unmatched", 0),
+        "total": match_stats.get("total", 0),
+        "rate": match_stats.get("rate", 0.0),
+        "summary": match_stats.get("summary", ""),
         "source_path": parsed.source_path,
         "notes": parsed.notes,
     }

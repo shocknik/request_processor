@@ -21,9 +21,14 @@ from ..persistence.sqlite_repo import (
 _CLAUSE_LINE = re.compile(
     r"^\s*(\d+(?:\.\d+){1,4})\s+(.{8,200}?)\s*$",
 )
+# Таблица ПМИ/ТУ: «С1 | Проверка конструкции | 2.3.1 - 2.3.6 | 5.2»
+_PIPE_TABLE_ROW = re.compile(
+    r"^\s*\S+\s*\|\s*(?P<title>[^|]{6,160}?)\s*\|\s*(?P<clause>[\d.,\s\-–—]+)\s*\|",
+)
 _INTERESTING = re.compile(
     r"испытан|сопротивлен|провер|измерен|нагружен|изгиб|температур|"
-    r"влажност|горен|огнест|экран|емкост|напряжен|герметич|обрыв",
+    r"влажност|горен|огнест|экран|емкост|напряжен|герметич|обрыв|"
+    r"затухан|кручен|удар|раздавл|растяг|маркиров",
     re.IGNORECASE,
 )
 
@@ -49,16 +54,29 @@ def extract_clauses_from_text(
         line = line.replace("\xa0", " ").strip()
         if len(line) < 12:
             continue
+        clause: str | None = None
+        title: str | None = None
         m = _CLAUSE_LINE.match(line)
-        if not m:
+        if m:
+            clause, title = m.group(1), m.group(2).strip(" .;—-")
+        else:
+            pm = _PIPE_TABLE_ROW.match(line)
+            if pm:
+                title = pm.group("title").strip(" .;—-")
+                raw_cl = (pm.group("clause") or "").strip()
+                # берём первый пункт «2.3.1» из диапазона
+                cm = re.search(r"\d+(?:\.\d+){1,4}", raw_cl)
+                clause = cm.group(0) if cm else raw_cl[:32]
+        if not clause or not title:
             continue
-        clause, title = m.group(1), m.group(2).strip(" .;—-")
-        if clause in seen:
+        key = f"{clause}|{title[:40].lower()}"
+        if key in seen or clause in seen and len(title) < 20:
             continue
         if not _INTERESTING.search(title) and not _INTERESTING.search(line):
             # keep some structural if short clause list still empty later
             if len(found) > 15:
                 continue
+        seen.add(key)
         seen.add(clause)
         found.append((clause, title[:240]))
         if len(found) >= max_clauses:

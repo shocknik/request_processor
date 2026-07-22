@@ -442,21 +442,10 @@ class PdfTabMixin:
         org_inner.bind("<Configure>", _orgs_on_inner_configure)
         self._orgs_canvas.bind("<Configure>", _orgs_on_canvas_configure)
 
-        # Колесо мыши — только когда курсор над областью организаций
-        def _orgs_wheel(event: tk.Event) -> str | None:
-            if not self._widget_is_under(event.widget, scroll_host):
-                return None
-            delta = int(getattr(event, "delta", 0) or 0)
-            if delta == 0:
-                return None
-            steps = -1 if delta > 0 else 1
-            self._orgs_canvas.yview_scroll(steps, "units")
-            return "break"
+        # Колесо: глобальный диспетчер (работает и над Entry/Label внутри)
+        from ..widgets.mousewheel import register_canvas_mousewheel
 
-        # bind_all не ставим — пересечётся с Настройками; bind на host + children
-        self._orgs_canvas.bind("<MouseWheel>", _orgs_wheel)
-        org_inner.bind("<MouseWheel>", _orgs_wheel)
-        scroll_host.bind("<MouseWheel>", _orgs_wheel)
+        register_canvas_mousewheel(scroll_host, self._orgs_canvas, priority=50)
 
         org_form = tk.Frame(org_inner, bg=COLORS["card"])
         org_form.pack(fill="x")
@@ -512,7 +501,6 @@ class PdfTabMixin:
                 # синхронизация Text ↔ StringVar
                 self._bind_text_to_var(addr, var)
                 self._enable_field_clipboard(addr)
-                addr.bind("<MouseWheel>", _orgs_wheel, add="+")
                 self._org_entries[label] = addr
             else:
                 entry = tk.Entry(
@@ -530,7 +518,6 @@ class PdfTabMixin:
                 )
                 entry.grid(row=row * 2 + 1, column=0, sticky="ew", pady=(0, 2), ipady=5)
                 self._enable_field_clipboard(entry)
-                entry.bind("<MouseWheel>", _orgs_wheel, add="+")
                 self._org_entries[label] = entry
 
         # Контекст выбранной марки (внутри scroll)
@@ -570,7 +557,6 @@ class PdfTabMixin:
         )
         # copy из контекста (readonly) — Ctrl+C / ПКМ
         self._enable_field_clipboard(self.mark_context_text, editable=False)
-        self.mark_context_text.bind("<MouseWheel>", _orgs_wheel, add="+")
         self._context_host = ctx
 
         self._on_confirm_only_toggle()

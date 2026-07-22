@@ -688,18 +688,20 @@ def seed_example_norm_requirements(db_path: str | Path = DB_PATH_DEFAULT) -> int
                             """,
                             (int(req["id"]), code, title),
                         )
-        # aliases examples
-        for alias, canon, code in (
-            ("сопротивление жил", "Электрическое сопротивление ТПЖ", "resistance_core"),
-            ("r жилы", "Электрическое сопротивление ТПЖ", "resistance_core"),
-            ("испытание U", "Испытание напряжением", None),
-        ):
+        # aliases examples (S4/S5: реальные коды прайса + ПМИ-формулировки)
+        from ..mapping.program_price_matcher import PROGRAM_ALIAS_SEED
+
+        for alias, canon, code in PROGRAM_ALIAS_SEED:
             conn.execute(
                 """
                 INSERT INTO test_aliases
                     (alias_norm, canonical_name, price_test_code, source, created_at)
                 VALUES (?, ?, ?, 'seed', ?)
-                ON CONFLICT(alias_norm) DO NOTHING
+                ON CONFLICT(alias_norm) DO UPDATE SET
+                    price_test_code = COALESCE(
+                        excluded.price_test_code, test_aliases.price_test_code
+                    ),
+                    canonical_name = excluded.canonical_name
                 """,
                 (alias.lower(), canon, code, now),
             )
@@ -1323,51 +1325,100 @@ def update_program_item_price_code(
 def match_program_items_to_price(
     program_id: int,
     db_path: str | Path = DB_PATH_DEFAULT,
-) -> dict[str, int]:
-    """Проставляет price_test_code по test_mappings / имени прайса.
+    *,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Проставляет price_test_code (S4 polish: phrase rules + fuzzy + aliases).
 
-    Returns: {matched, unmatched}
+    Returns: {matched, unmatched, total, rate, summary, details}
+    rate = matched/total в [0..1]; summary — «сопоставлено N/M (xx%)».
+    overwrite=True — перезаписать уже заданные (и ошибочные) коды.
     """
-    from ..mapping.requirement_mapper import map_requirements_to_tests
+    from ..mapping.program_price_matcher import (
+        match_rate_summary,
+        resolve_program_item_price_code,
+    )
 
     prog = get_test_program(program_id, db_path=db_path)
     if not prog:
-        return {"matched": 0, "unmatched": 0}
+        return {
+            "matched": 0,
+            "unmatched": 0,
+            "total": 0,
+            "rate": 0.0,
+            "summary": match_rate_summary(0, 0),
+            "details": [],
+        }
+    price_items = list_test_items(limit=500, db_path=db_path)
+    context = " ".join(
+        filter(
+            None,
+            [
+                prog.get("name") or "",
+                prog.get("cable_mark_text") or "",
+                prog.get("tu_ref") or "",
+                prog.get("notes") or "",
+            ],
+        )
+    )
     matched = 0
     unmatched = 0
-    price_names = {
-        (r["name"] or "").strip().lower(): r["code"]
-        for r in list_test_items(limit=500, db_path=db_path)
-    }
+    details: list[dict[str, Any]] = []
     for item in prog["items"]:
-        if item.get("price_test_code"):
-            matched += 1
-            continue
+        existing = (item.get("price_test_code") or "").strip() or None
         name = (item.get("name") or "").strip()
-        code: str | None = None
-        nl = name.lower()
-        # S5 aliases first
-        alias_hit = resolve_test_alias(name, db_path=db_path)
-        if alias_hit and alias_hit.get("price_test_code"):
-            code = str(alias_hit["price_test_code"])
-        # exact / substring in price names
-        if not code and nl in price_names:
-            code = price_names[nl]
-        if not code:
-            for pname, pcode in price_names.items():
-                if nl and (nl in pname or pname in nl) and len(nl) >= 8:
-                    code = pcode
-                    break
-        if not code:
-            suggestions = map_requirements_to_tests(name, db_path=db_path)
-            if suggestions:
-                code = suggestions[0].code
-        if code:
-            update_program_item_price_code(int(item["id"]), code, db_path=db_path)
+        if existing and not overwrite:
             matched += 1
+            details.append(
+                {
+                    "id": item.get("id"),
+                    "name": name,
+                    "code": existing,
+                    "method": "kept",
+                }
+            )
+            continue
+        hit = resolve_program_item_price_code(
+            name,
+            price_items=price_items,
+            db_path=db_path,
+            program_context=context,
+        )
+        if hit:
+            update_program_item_price_code(int(item["id"]), hit.code, db_path=db_path)
+            matched += 1
+            details.append(
+                {
+                    "id": item.get("id"),
+                    "name": name,
+                    "code": hit.code,
+                    "method": hit.method,
+                    "note": hit.note,
+                    "score": hit.score,
+                }
+            )
         else:
+            if existing and overwrite:
+                update_program_item_price_code(int(item["id"]), None, db_path=db_path)
             unmatched += 1
-    return {"matched": matched, "unmatched": unmatched}
+            details.append(
+                {
+                    "id": item.get("id"),
+                    "name": name,
+                    "code": None,
+                    "method": "none",
+                }
+            )
+    total = matched + unmatched
+    rate = (matched / total) if total else 0.0
+    return {
+        "matched": matched,
+        "unmatched": unmatched,
+        "total": total,
+        "rate": rate,
+        "summary": match_rate_summary(matched, total),
+        "details": details,
+    }
 
 
 def list_test_mappings(

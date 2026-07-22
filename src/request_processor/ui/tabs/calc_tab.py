@@ -226,6 +226,9 @@ class CalcTabMixin:
         self._calc_canvas.configure(yscrollcommand=calc_scroll.set)
         self._calc_canvas.pack(side="left", fill="both", expand=True)
         calc_scroll.pack(side="right", fill="y")
+        from ..widgets.mousewheel import register_canvas_mousewheel
+
+        register_canvas_mousewheel(canvas_frame, self._calc_canvas, priority=40)
 
         self._calc_empty_label = ttk.Label(
             self.calc_tests_inner,
@@ -279,6 +282,9 @@ class CalcTabMixin:
         self._calc_picker_canvas.configure(yscrollcommand=picker_scroll.set)
         self._calc_picker_canvas.pack(side="left", fill="both", expand=True)
         picker_scroll.pack(side="right", fill="y")
+        from ..widgets.mousewheel import register_canvas_mousewheel as _reg_wheel
+
+        _reg_wheel(picker_canvas_frame, self._calc_picker_canvas, priority=40)
 
         self.calc_picker_empty_var = tk.StringVar(
             value="Укажите марку — появятся испытания из заявки или полный справочник."

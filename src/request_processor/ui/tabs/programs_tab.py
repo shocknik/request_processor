@@ -238,12 +238,19 @@ class ProgramsTabMixin:
         marks_preview = (prog.get("cable_mark_text") or "").replace("\n", " · ")
         if len(marks_preview) > 100:
             marks_preview = marks_preview[:100] + "…"
+        items = prog.get("items") or []
+        matched_n = sum(1 for it in items if (it.get("price_test_code") or "").strip())
+        total_n = len(items)
+        from ...mapping.program_price_matcher import match_rate_summary
+
+        rate_txt = match_rate_summary(matched_n, total_n)
         self.program_info_var.set(
+            f"{rate_txt}  |  "
             f"Марки: {marks_preview or '—'}  |  "
             f"ТУ: {prog.get('tu_ref') or '—'}  |  "
-            f"{(prog.get('source_path') or '')[-50:]}"
+            f"{(prog.get('source_path') or '')[-40:]}"
         )
-        for it in prog.get("items") or []:
+        for it in items:
             self.program_items_tree.insert(
                 "",
                 "end",
@@ -294,12 +301,17 @@ class ProgramsTabMixin:
                     path,
                     extra={"tag": "Программа"},
                 )
+                m = int(result.get("matched") or 0)
+                u = int(result.get("unmatched") or 0)
+                from ...mapping.program_price_matcher import match_rate_summary
+
+                rate = result.get("summary") or match_rate_summary(m, m + u)
                 messagebox.showinfo(
                     "Программа импортирована",
                     f"id={result['program_id']}\n"
                     f"{result['name'][:100]}\n\n"
                     f"Пунктов: {result['items_count']}\n"
-                    f"С прайсом: matched={result['matched']} unmatched={result['unmatched']}",
+                    f"Прайс: {rate}",
                 )
 
             self.after(0, done)
@@ -313,12 +325,21 @@ class ProgramsTabMixin:
             return
         from ...persistence.sqlite_repo import match_program_items_to_price
 
-        stats = match_program_items_to_price(int(sel[0]), db_path=self.db_path)
+        # overwrite: пересчёт (в т.ч. исправление ложных codes)
+        stats = match_program_items_to_price(
+            int(sel[0]), db_path=self.db_path, overwrite=True
+        )
         self._show_program_details()
-        self.status.set(f"Прайс: matched={stats['matched']} unmatched={stats['unmatched']}")
+        summary = stats.get("summary") or (
+            f"matched={stats['matched']} unmatched={stats['unmatched']}"
+        )
+        self.status.set(f"Прайс: {summary}")
         messagebox.showinfo(
-            "Сопоставление",
-            f"matched={stats['matched']}\nunmatched={stats['unmatched']}",
+            "Сопоставление с прайсом",
+            f"{summary}\n\n"
+            f"Сопоставлено: {stats['matched']}\n"
+            f"Без кода: {stats['unmatched']}\n"
+            f"Всего пунктов: {stats.get('total', stats['matched'] + stats['unmatched'])}",
         )
 
     def _delete_selected_program(self) -> None:

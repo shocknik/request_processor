@@ -1437,13 +1437,33 @@ def delete_test_program_cmd(program_id: int, db: str, yes: bool) -> None:
 @cli.command("match-program-price")
 @click.option("--id", "program_id", required=True, type=int)
 @click.option("--db", default="data/app.db", show_default=True)
-def match_program_price_cmd(program_id: int, db: str) -> None:
-    """Сопоставить позиции программы с кодами прайса."""
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Перезаписать уже заданные price_test_code (исправить ошибочные)",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Показать каждую позицию")
+def match_program_price_cmd(
+    program_id: int, db: str, overwrite: bool, verbose: bool
+) -> None:
+    """Сопоставить позиции программы с кодами прайса (S4)."""
     from .persistence.sqlite_repo import match_program_items_to_price, migrate_db
 
     migrate_db(db)
-    stats = match_program_items_to_price(program_id, db_path=db)
-    click.echo(f"matched={stats['matched']} unmatched={stats['unmatched']}")
+    stats = match_program_items_to_price(
+        program_id, db_path=db, overwrite=overwrite
+    )
+    click.echo(
+        f"{stats.get('summary', '')}  "
+        f"matched={stats['matched']} unmatched={stats['unmatched']}"
+        + ("  [overwrite]" if overwrite else "")
+    )
+    if verbose:
+        for d in stats.get("details") or []:
+            code = d.get("code") or "—"
+            click.echo(
+                f"  [{d.get('method', '?')}] {(d.get('name') or '')[:55]} → {code}"
+            )
 
 
 @cli.command("list-norm-documents")
@@ -1502,25 +1522,79 @@ def add_test_alias_cmd(alias: str, canonical: str, code: Optional[str], db: str)
 
 
 @cli.command("import-norm-text")
-@click.option("--file", "file_path", required=True, type=click.Path(exists=True))
+@click.option(
+    "--file",
+    "file_path",
+    default=None,
+    type=click.Path(exists=True),
+    help="Один .txt файл ТУ",
+)
+@click.option(
+    "--dir",
+    "dir_path",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Каталог raw_text/*.txt (пакетный импорт S5)",
+)
 @click.option("--kind", default="tu", show_default=True, help="tu|gost|iec|other")
 @click.option("--max-clauses", default=80, show_default=True, type=int)
+@click.option(
+    "--limit",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Макс. файлов при --dir (0 = все)",
+)
 @click.option("--db", default="data/app.db", show_default=True)
-def import_norm_text_cmd(file_path: str, kind: str, max_clauses: int, db: str) -> None:
+def import_norm_text_cmd(
+    file_path: Optional[str],
+    dir_path: Optional[str],
+    kind: str,
+    max_clauses: int,
+    limit: int,
+    db: str,
+) -> None:
     """Импорт пунктов требований из локального .txt ТУ (raw_text, не git)."""
+    from pathlib import Path as P
+
     from .generation.norm_text_import import import_norm_from_text_file
     from .persistence.sqlite_repo import migrate_db
 
+    if not file_path and not dir_path:
+        click.echo("Укажите --file или --dir", err=True)
+        raise SystemExit(2)
+
     migrate_db(db)
-    try:
-        result = import_norm_from_text_file(
-            file_path, kind=kind, db_path=db, max_clauses=max_clauses
+    paths: list[P] = []
+    if file_path:
+        paths.append(P(file_path))
+    if dir_path:
+        found = sorted(P(dir_path).glob("*.txt"))
+        if limit and limit > 0:
+            found = found[:limit]
+        paths.extend(found)
+    if not paths:
+        click.echo("Нет .txt для импорта", err=True)
+        raise SystemExit(1)
+
+    total_clauses = 0
+    ok = 0
+    for path in paths:
+        try:
+            result = import_norm_from_text_file(
+                path, kind=kind, db_path=db, max_clauses=max_clauses
+            )
+        except Exception as e:
+            click.echo(click.style(f"✗ {path.name}: {e}", fg="red"), err=True)
+            continue
+        ok += 1
+        total_clauses += int(result.get("clauses") or 0)
+        click.echo(
+            click.style(f"✓ {result['doc_id']}", fg="green")
+            + f"  clauses≈{result['clauses']}  id={result['norm_document_id']}"
         )
-    except Exception as e:
-        click.echo(click.style(f"Ошибка: {e}", fg="red"), err=True)
-        raise SystemExit(1) from e
-    click.echo(click.style(f"✓ {result['doc_id']}", fg="green"))
-    click.echo(f"  clauses≈{result['clauses']}  id={result['norm_document_id']}")
+    if len(paths) > 1:
+        click.echo(f"Итого: файлов {ok}/{len(paths)}, clauses≈{total_clauses}")
 
 
 @cli.command("import-aliases-yaml")

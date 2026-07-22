@@ -29,6 +29,19 @@ def test_extract_clauses_interesting() -> None:
     assert any("напряжен" in c[1].lower() for c in clauses)
 
 
+def test_extract_clauses_from_pipe_table() -> None:
+    """Сырой текст ТУ/ПМИ со строками «С1 | … | 2.4 | 5.3» (Вулкан-подобные)."""
+    text = """
+С1 | Проверка конструкции и конструктивных размеров | 2.2.2, 2.3.1 - 2.3.6 | 5.2
+С1 | Измерение коэффициента затухания | 2.4 | 5.3
+П3 | Испытание на огнестойкость | 3.4.5 | 5.9.5
+"""
+    clauses = extract_clauses_from_text(text, max_clauses=20)
+    assert any(c[0] == "2.4" for c in clauses)
+    assert any("затухан" in c[1].lower() for c in clauses)
+    assert any(c[0] == "3.4.5" for c in clauses)
+
+
 def test_import_norm_file(tmp_path: Path) -> None:
     db = tmp_path / "n.db"
     init_db(db)

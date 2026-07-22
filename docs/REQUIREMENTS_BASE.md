@@ -55,7 +55,12 @@ request-processor add-test-alias --alias "сопротивление ТПЖ" --c
 ### Текст ТУ → requirements
 
 ```powershell
+# один файл
 request-processor import-norm-text --file "data\knowledge\manufacturer_v1\raw_text\16.К99-058-2014.txt"
+
+# пакет из корпуса (S5, 2026-07-22)
+request-processor import-norm-text --dir "data\knowledge\manufacturer_v1\raw_text" --limit 15 --max-clauses 40
+request-processor list-norm-documents
 request-processor list-requirements
 ```
 
@@ -63,6 +68,8 @@ GUI: вкладка **10. Программы** → блок «Нормы и си
 
 Эвристика: строки `1.4.1 Описание…` с ключевыми словами (испытан, сопротивл…).  
 Это **каркас**, не юридически полный разбор.
+
+Рекомендуемые ТУ для наполнения (локально): `16.К99-058-2014`, `27.31.11-131-*` (Вулкан/ОК), `27.32.13-099-*`.
 
 ### YAML синонимов → aliases
 

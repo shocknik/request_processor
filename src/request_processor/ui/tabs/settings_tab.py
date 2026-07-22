@@ -188,69 +188,6 @@ class SettingsTabMixin:
             )
         messagebox.showinfo("Нормы / aliases", "\n".join(lines) or "Пусто — migrate-db")
 
-    def _settings_wheel_target_is_nested(self, widget: tk.Misc) -> bool:
-        """Над Treeview/Text/Spinbox — колесо для вложенного скролла, не вкладки."""
-        cur: tk.Misc | None = widget
-        outer = getattr(self, "_settings_scroll_outer", None)
-        while cur is not None:
-            if outer is not None and cur == outer:
-                return False
-            cls = cur.winfo_class()
-            if cls in ("Treeview", "Listbox", "Spinbox", "TSpinbox"):
-                return True
-            if cls == "Text":
-                # Если весь текст уже виден — крутим вкладку, иначе — сам Text.
-                try:
-                    first, last = cur.yview()  # type: ignore[attr-defined]
-                    if float(first) <= 0.001 and float(last) >= 0.999:
-                        return False
-                except (tk.TclError, TypeError, ValueError):
-                    pass
-                return True
-            cur = getattr(cur, "master", None)
-        return False
-
-    def _on_settings_mousewheel(self, event: tk.Event) -> str | None:
-        canvas = getattr(self, "_settings_canvas", None)
-        outer = getattr(self, "_settings_scroll_outer", None)
-        if canvas is None or outer is None:
-            return None
-        # Только когда курсор над вкладкой «Настройки» (не unbind на Leave дочерних).
-        if not self._widget_is_under(event.widget, outer):
-            # Windows: event.widget иногда root — проверяем координаты
-            try:
-                x, y = outer.winfo_pointerxy()
-                under = outer.winfo_containing(x, y)
-                if under is None or not self._widget_is_under(under, outer):
-                    return None
-                widget = under
-            except tk.TclError:
-                return None
-        else:
-            widget = event.widget
-        if self._settings_wheel_target_is_nested(widget):
-            return None
-        delta = int(getattr(event, "delta", 0) or 0)
-        if delta == 0:
-            return None
-        canvas.yview_scroll(int(-1 * (delta / 120)), "units")
-        return "break"
-
-    def _enable_settings_wheel(self) -> None:
-        if getattr(self, "_settings_wheel_bound", False):
-            return
-        self.bind_all("<MouseWheel>", self._on_settings_mousewheel, add="+")
-        self._settings_wheel_bound = True
-
-    def _disable_settings_wheel(self) -> None:
-        if not getattr(self, "_settings_wheel_bound", False):
-            return
-        try:
-            self.unbind_all("<MouseWheel>")
-        except tk.TclError:
-            pass
-        self._settings_wheel_bound = False
-
     def _build_settings_tab(self) -> None:
         # Прокручиваемый контейнер: иначе map_frame.expand съедает верх (LLM, путь).
         body = self._make_scrollable_tab(self.tab_settings)

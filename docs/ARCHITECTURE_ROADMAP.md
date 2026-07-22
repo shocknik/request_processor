@@ -2,7 +2,7 @@
 
 Краткая карта для оператора и разработчика. Детали — в отдельных docs/ и Obsidian.
 
-**Статус на 2026-07-16:** S1 ✅ · S2 (КП/логи/урок) в доработке · S3–S5 каркас ✅ · prod-установка W:\request_processor
+**Статус на 2026-07-22:** S1–S3 ✅ · S2.5 ✅ · **S4 polish** (match ≥9/14 Вулкан) · **S5** batch raw_text + pipe-table · prod W:\request_processor
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -30,8 +30,8 @@
 | S1 | UX, Lab_request, удаления, старт, логи-теги | ✅ | INSTALL, UPDATE, UI_ARCHITECTURE |
 | S2 | КП лого/стили, просмотр логов, Урок ИИ 0 | 🟡 | lab_profile.example, Obsidian |
 | S3 | JSON → protocol_generator | ✅ каркас | PROTOCOL_GENERATOR_BRIDGE |
-| S4 | Программы DOCX | ✅ каркас | TEST_PROGRAMS |
-| S5 | Каркас норм + aliases | ✅ seed | REQUIREMENTS_BASE |
+| S4 | Программы DOCX + match rate | ✅ polish 22.07 | TEST_PROGRAMS |
+| S5 | Нормы raw_text + aliases | ✅ batch + seed | REQUIREMENTS_BASE |
 | Ops | Обновление без сноса, seed прайса, ярлык | ✅ | UPDATE.md |
 
 ## UI-пакет (после декомпозиции)
