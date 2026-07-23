@@ -232,7 +232,7 @@ class CalcTabMixin:
 
         self._calc_empty_label = ttk.Label(
             self.calc_tests_inner,
-            text="Дважды кликните испытание\nво вкладке «7. Справочник»",
+            text="Отметьте испытания справа\nили «Из заявки →»",
             style="CardMuted.TLabel",
             justify="center",
         )
@@ -253,12 +253,79 @@ class CalcTabMixin:
         mid.add(self.calc_right_panel, weight=2)
 
         self.calc_picker_frame = ttk.Frame(self.calc_right_panel, style="Card.TFrame")
+
+        # --- toolbar: поиск + категория + режимы + bulk ---
+        picker_toolbar = ttk.Frame(self.calc_picker_frame, style="Card.TFrame")
+        picker_toolbar.pack(fill="x", pady=(0, 4))
+
+        search_row = ttk.Frame(picker_toolbar, style="Card.TFrame")
+        search_row.pack(fill="x")
+        ttk.Label(search_row, text="Поиск:", style="Card.TLabel").pack(side="left")
+        self.calc_picker_search_var = tk.StringVar(value="")
+        search_entry = ttk.Entry(search_row, textvariable=self.calc_picker_search_var, width=28)
+        search_entry.pack(side="left", padx=(4, 8), fill="x", expand=True)
+        self.calc_picker_search_var.trace_add("write", lambda *_: self._refresh_calc_picker())
+
+        ttk.Label(search_row, text="Категория:", style="Card.TLabel").pack(side="left")
+        self.calc_picker_category_var = tk.StringVar(value="Все")
+        self.calc_picker_category_combo = ttk.Combobox(
+            search_row,
+            textvariable=self.calc_picker_category_var,
+            values=["Все"],
+            state="readonly",
+            width=22,
+        )
+        self.calc_picker_category_combo.pack(side="left", padx=(4, 0))
+        self.calc_picker_category_combo.bind(
+            "<<ComboboxSelected>>", lambda *_: self._refresh_calc_picker()
+        )
+
+        mode_row = ttk.Frame(picker_toolbar, style="Card.TFrame")
+        mode_row.pack(fill="x", pady=(4, 0))
+        self.calc_picker_mode_var = tk.StringVar(value="all")
+        for text, value in (
+            ("Все", "all"),
+            ("Из заявки", "suggested"),
+            ("Выбранные", "selected"),
+        ):
+            ttk.Radiobutton(
+                mode_row,
+                text=text,
+                value=value,
+                variable=self.calc_picker_mode_var,
+                command=self._refresh_calc_picker,
+            ).pack(side="left", padx=(0, 8))
+
+        bulk_row = ttk.Frame(picker_toolbar, style="Card.TFrame")
+        bulk_row.pack(fill="x", pady=(4, 2))
+        ttk.Button(
+            bulk_row,
+            text="Из заявки →",
+            command=self._picker_select_suggested,
+        ).pack(side="left")
+        ttk.Button(
+            bulk_row,
+            text="Отметить видимые",
+            command=self._picker_select_visible,
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            bulk_row,
+            text="Снять видимые",
+            command=self._picker_clear_visible,
+        ).pack(side="left")
+        self.calc_picker_stats_var = tk.StringVar(value="")
+        ttk.Label(
+            bulk_row,
+            textvariable=self.calc_picker_stats_var,
+            style="CardMuted.TLabel",
+        ).pack(side="right")
+
         ttk.Label(
             self.calc_picker_frame,
-            text="Отметьте испытания — они появятся слева (часы для климатики).",
+            text="Галочка → список слева. Для климатики укажите часы слева.",
             style="CardMuted.TLabel",
-            wraplength=420,
-        ).pack(anchor="w", pady=(0, 6))
+            wraplength=480,
+        ).pack(anchor="w", pady=(0, 4))
 
         picker_canvas_frame = ttk.Frame(self.calc_picker_frame, style="Card.TFrame")
         picker_canvas_frame.pack(fill="both", expand=True)
@@ -297,6 +364,7 @@ class CalcTabMixin:
             justify="left",
         )
         self._calc_picker_empty_label.pack(anchor="w", pady=8)
+        self._calc_picker_visible_codes: list[str] = []
 
         self.calc_result_frame = ttk.Frame(self.calc_right_panel, style="Card.TFrame")
         self.calc_result_btns = ttk.Frame(self.calc_result_frame, style="Card.TFrame")
@@ -511,21 +579,83 @@ class CalcTabMixin:
         self.calc_right_panel.configure(text="Результат расчёта")
         self._set_text(self.calc_output, text)
 
-    def _picker_candidate_codes(self, mark: str) -> list[str]:
-        suggested = self._suggested_test_codes_for_mark(mark)
-        selected = [e.code for e in self._calc_entries]
-        if suggested:
-            merged = list(dict.fromkeys(suggested + selected))
-            return merged
+    def _picker_all_catalog_codes(self) -> list[str]:
+        """Полный справочник, отсортированный по категории и имени."""
         if not self._tests_by_code:
-            return selected
+            return []
         return sorted(
             self._tests_by_code.keys(),
             key=lambda c: (
-                self._tests_by_code[c].get("category") or "",
-                self._tests_by_code[c].get("name") or c,
+                category_sort_key(self._tests_by_code[c].get("category")),
+                (self._tests_by_code[c].get("name") or c).lower(),
             ),
         )
+
+    def _picker_candidate_codes(self, mark: str) -> list[str]:
+        """Базовый набор кодов (до фильтра поиска/режима)."""
+        suggested = self._suggested_test_codes_for_mark(mark) if mark else []
+        selected = [e.code for e in self._calc_entries]
+        catalog = self._picker_all_catalog_codes()
+        # Всегда полный справочник + выбранные (если прайс ещё не загружен)
+        if catalog:
+            return catalog
+        return list(dict.fromkeys(suggested + selected))
+
+    def _picker_filtered_codes(self, mark: str) -> list[str]:
+        """Коды с учётом режима, категории и поиска."""
+        mode = (
+            getattr(self, "calc_picker_mode_var", None) or tk.StringVar(value="all")
+        ).get()
+        search = (
+            getattr(self, "calc_picker_search_var", None) or tk.StringVar()
+        ).get().strip().lower()
+        cat_filter = (
+            getattr(self, "calc_picker_category_var", None) or tk.StringVar(value="Все")
+        ).get()
+        suggested = set(self._suggested_test_codes_for_mark(mark) if mark else [])
+        selected = {e.code for e in self._calc_entries}
+        codes = self._picker_candidate_codes(mark)
+
+        if mode == "suggested":
+            # из заявки + уже выбранные (чтобы не потерять галочки)
+            codes = [c for c in codes if c in suggested or c in selected]
+            if not suggested and not selected:
+                codes = []
+        elif mode == "selected":
+            codes = [c for c in codes if c in selected]
+
+        filtered: list[str] = []
+        for code in codes:
+            test = self._tests_by_code.get(code)
+            if not test and code not in selected:
+                continue
+            cat = ((test or {}).get("category") or "Без категории").strip()
+            if cat_filter and cat_filter != "Все" and cat != cat_filter:
+                continue
+            if search:
+                name = ((test or {}).get("name") or "").lower()
+                blob = f"{code} {name} {cat}".lower()
+                if search not in blob:
+                    continue
+            filtered.append(code)
+        return filtered
+
+    def _update_picker_category_combo(self) -> None:
+        """Обновить список категорий в combobox из прайса."""
+        if not hasattr(self, "calc_picker_category_combo"):
+            return
+        cats = sorted(
+            {
+                (t.get("category") or "Без категории").strip()
+                for t in self._tests_by_code.values()
+            },
+            key=category_sort_key,
+        )
+        values = ["Все"] + cats
+        current = self.calc_picker_category_var.get()
+        self.calc_picker_category_combo.configure(values=values)
+        if current not in values:
+            self.calc_picker_category_var.set("Все")
 
     def _sync_picker_var(self, code: str, checked: bool) -> None:
         var = self._calc_picker_vars.get(code)
@@ -551,6 +681,50 @@ class CalcTabMixin:
             if entry:
                 self._remove_calc_entry(entry)
 
+    def _picker_select_suggested(self) -> None:
+        """Отметить все испытания из заявки для текущей марки."""
+        mark = self.mark_var.get().strip()
+        if not mark:
+            messagebox.showinfo("Расчёт", "Сначала укажите марку кабеля.")
+            return
+        codes = self._suggested_test_codes_for_mark(mark)
+        if not codes:
+            messagebox.showinfo(
+                "Расчёт",
+                "Для этой марки нет подсказок из заявки.\n"
+                "Используйте поиск или «Отметить видимые».",
+            )
+            return
+        added = 0
+        for code in codes:
+            if not any(e.code == code for e in self._calc_entries):
+                self._add_test_to_calc(code)
+                added += 1
+        self._refresh_calc_picker()
+        self.status.set(f"Из заявки: +{added} (всего в расчёте {len(self._calc_entries)})")
+
+    def _picker_select_visible(self) -> None:
+        """Отметить все видимые (после фильтров) испытания."""
+        codes = list(getattr(self, "_calc_picker_visible_codes", []) or [])
+        if not codes:
+            return
+        for code in codes:
+            if not any(e.code == code for e in self._calc_entries):
+                self._add_test_to_calc(code)
+        self._refresh_calc_picker()
+        self.status.set(f"Отмечено видимых: {len(codes)}")
+
+    def _picker_clear_visible(self) -> None:
+        """Снять галочки с видимых испытаний."""
+        codes = set(getattr(self, "_calc_picker_visible_codes", []) or [])
+        if not codes:
+            return
+        to_remove = [e for e in list(self._calc_entries) if e.code in codes]
+        for entry in to_remove:
+            self._remove_calc_entry(entry)
+        self._refresh_calc_picker()
+        self.status.set(f"Снято видимых: {len(to_remove)}")
+
     def _refresh_calc_picker(self) -> None:
         if not hasattr(self, "calc_picker_inner"):
             return
@@ -558,47 +732,113 @@ class CalcTabMixin:
             if child is not self._calc_picker_empty_label:
                 child.destroy()
         self._calc_picker_vars.clear()
+        self._calc_picker_visible_codes = []
+        self._update_picker_category_combo()
 
         mark = self.mark_var.get().strip()
-        codes = self._picker_candidate_codes(mark) if mark else []
-        suggested = set(self._suggested_test_codes_for_mark(mark)) if mark else set()
         selected = {e.code for e in self._calc_entries}
+        suggested = set(self._suggested_test_codes_for_mark(mark) if mark else [])
 
-        if not codes:
+        if not mark and not selected and not self._tests_by_code:
             self._calc_picker_empty_label.pack(anchor="w", pady=8)
             self.calc_picker_empty_var.set(
-                "Укажите марку — появятся испытания из заявки или полный справочник."
+                "Укажите марку — появятся испытания из заявки и полный справочник."
             )
+            if hasattr(self, "calc_picker_stats_var"):
+                self.calc_picker_stats_var.set("")
+            return
+
+        # Без марки, но прайс загружен — всё равно показываем справочник
+        if not mark and not self._tests_by_code:
+            self._calc_picker_empty_label.pack(anchor="w", pady=8)
+            self.calc_picker_empty_var.set("Справочник пуст — загрузите прайс или migrate-db.")
+            if hasattr(self, "calc_picker_stats_var"):
+                self.calc_picker_stats_var.set("")
+            return
+
+        codes = self._picker_filtered_codes(mark)
+        if not codes:
+            self._calc_picker_empty_label.pack(anchor="w", pady=8)
+            mode = (
+                getattr(self, "calc_picker_mode_var", None) or tk.StringVar(value="all")
+            ).get()
+            if mode == "suggested" and not suggested:
+                msg = "Подсказок из заявки нет — переключите режим «Все» или «Выбранные»."
+            elif mode == "selected":
+                msg = "Список выбранных пуст — отметьте испытания в режиме «Все»."
+            else:
+                msg = "Ничего не найдено по фильтру. Сбросьте поиск или категорию."
+            self.calc_picker_empty_var.set(msg)
+            if hasattr(self, "calc_picker_stats_var"):
+                self.calc_picker_stats_var.set(f"выбрано {len(selected)}")
             return
 
         self._calc_picker_empty_label.pack_forget()
+        self._calc_picker_visible_codes = list(codes)
+
+        # Группировка по категории
+        by_cat: dict[str, list[str]] = {}
+        for code in codes:
+            test = self._tests_by_code.get(code) or {}
+            cat = (test.get("category") or "Без категории").strip()
+            by_cat.setdefault(cat, []).append(code)
+
         if suggested:
-            hint = f"Из заявки ({len(suggested)}); отмеченные добавляются в список слева."
+            head = f"★ из заявки: {len(suggested)}  ·  "
         else:
-            hint = f"Справочник ({len(codes)} испытаний); отметьте нужные."
+            head = ""
         ttk.Label(
             self.calc_picker_inner,
-            text=hint,
+            text=f"{head}показано {len(codes)} / в прайсе {len(self._tests_by_code)}",
             style="CardMuted.TLabel",
-            wraplength=400,
+            wraplength=440,
         ).pack(anchor="w", pady=(0, 4))
 
-        for code in codes:
-            test = self._tests_by_code.get(code)
-            if not test:
-                continue
-            name = (test.get("name") or code)[:72]
-            var = tk.BooleanVar(value=code in selected)
-            self._calc_picker_vars[code] = var
-            row = ttk.Frame(self.calc_picker_inner, style="Card.TFrame")
-            row.pack(fill="x", anchor="w", pady=1)
-            cb = ttk.Checkbutton(
-                row,
-                text=f"{code} — {name}",
-                variable=var,
-                command=lambda c=code: self._on_picker_toggle(c),
+        for cat in sorted(by_cat.keys(), key=category_sort_key):
+            cat_codes = by_cat[cat]
+            short = CATEGORY_SHORT.get(cat, cat[:18])
+            hdr = ttk.Frame(self.calc_picker_inner, style="Card.TFrame")
+            hdr.pack(fill="x", anchor="w", pady=(6, 2))
+            ttk.Label(
+                hdr,
+                text=f"▸ {short}  ({len(cat_codes)})",
+                style="Card.TLabel",
+            ).pack(side="left")
+            # тонкая подсказка полного имени категории
+            if short != cat:
+                ttk.Label(hdr, text=cat, style="CardMuted.TLabel").pack(
+                    side="left", padx=(6, 0)
+                )
+
+            for code in cat_codes:
+                test = self._tests_by_code.get(code) or {}
+                name = (test.get("name") or code)[:64]
+                is_sug = code in suggested
+                prefix = "★ " if is_sug else ""
+                label = f"{prefix}{name}"
+                var = tk.BooleanVar(value=code in selected)
+                self._calc_picker_vars[code] = var
+                row = ttk.Frame(self.calc_picker_inner, style="Card.TFrame")
+                row.pack(fill="x", anchor="w", pady=0)
+                cb = ttk.Checkbutton(
+                    row,
+                    text=label,
+                    variable=var,
+                    command=lambda c=code: self._on_picker_toggle(c),
+                )
+                cb.pack(side="left", anchor="w")
+                # код прайса мелким текстом справа
+                ttk.Label(
+                    row,
+                    text=code,
+                    style="CardMuted.TLabel",
+                    width=22,
+                ).pack(side="right", padx=(4, 0))
+
+        if hasattr(self, "calc_picker_stats_var"):
+            self.calc_picker_stats_var.set(
+                f"выбрано {len(selected)} · видно {len(codes)}"
             )
-            cb.pack(anchor="w")
 
     def _run_calculate(self) -> None:
         mark = self.mark_var.get().strip()
@@ -606,7 +846,10 @@ class CalcTabMixin:
             messagebox.showwarning("Расчёт", "Укажите марку кабеля.")
             return
         if not self._calc_entries:
-            messagebox.showwarning("Расчёт", "Добавьте испытания из справочника (двойной клик).")
+            messagebox.showwarning(
+                "Расчёт",
+                "Отметьте испытания справа (поиск / категории) или «Из заявки →».",
+            )
             return
 
         test_list = [e.code for e in self._calc_entries]

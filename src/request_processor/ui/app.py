@@ -141,18 +141,12 @@ class RequestProcessorApp(
     )
 
 
-def main() -> None:
-    t0 = time.perf_counter()
-    enable_windows_dpi_awareness()
-    setup_logging(level="INFO")
-    _log.info("main(): starting Lab_request", extra={"tag": "Старт"})
-    app = RequestProcessorApp()
-    _log.info(
-        "mainloop in %.0f ms",
-        (time.perf_counter() - t0) * 1000,
-        extra={"tag": "Старт"},
-    )
-    app.mainloop()
+def main(*, use_splash: bool = True) -> None:
+    """Точка входа GUI. По умолчанию — splash с этапами загрузки."""
+    # Делегируем в лёгкий bootstrap (splash до тяжёлых импортов уже в gui.py)
+    from .bootstrap import run_gui
+
+    run_gui(use_splash=use_splash)
 
 
 if __name__ == "__main__":

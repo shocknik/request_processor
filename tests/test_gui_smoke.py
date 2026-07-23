@@ -120,6 +120,25 @@ def test_gui_mappings_table_on_settings(gui_app: RequestProcessorApp) -> None:
     assert len(children) >= 6
 
 
+def test_calc_picker_has_search_and_modes(gui_app: RequestProcessorApp) -> None:
+    """Вкладка Расчёт: удобный выбор — поиск, категории, режимы, bulk."""
+    assert hasattr(gui_app, "calc_picker_search_var")
+    assert hasattr(gui_app, "calc_picker_category_var")
+    assert hasattr(gui_app, "calc_picker_mode_var")
+    assert gui_app.calc_picker_mode_var.get() == "all"
+    # seed-прайс есть после ensure_db / _load_tests
+    gui_app.mark_var.set("ВВГнг(А) 3х1,5")
+    gui_app._refresh_calc_picker()
+    # полный каталог или пустой seed — но UI не падает
+    assert hasattr(gui_app, "_calc_picker_visible_codes")
+    gui_app.calc_picker_search_var.set("zzz_no_match_xyz")
+    gui_app._refresh_calc_picker()
+    assert gui_app._calc_picker_visible_codes == []
+    gui_app.calc_picker_search_var.set("")
+    gui_app.calc_picker_mode_var.set("selected")
+    gui_app._refresh_calc_picker()
+
+
 def test_settings_tab_is_scrollable(gui_app: RequestProcessorApp) -> None:
     """Вкладка «Настройки» — Canvas+scroll; LLM/путь не выталкиваются за край."""
     assert hasattr(gui_app, "_settings_canvas")

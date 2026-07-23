@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import tkinter as tk
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
@@ -106,13 +107,22 @@ from ...persistence.sqlite_repo import (
 _log = get_logger("ui.gui")
 
 class ShellMixin:
-    def __init__(self, db_path: Path = DB_PATH_DEFAULT) -> None:
+    def __init__(
+        self,
+        db_path: Path = DB_PATH_DEFAULT,
+        *,
+        progress: Callable[[float, str, str], None] | None = None,
+        start_hidden: bool = False,
+    ) -> None:
         super().__init__()
         t0 = time.perf_counter()
         setup_logging(level="INFO")
         self.db_path = Path(db_path)
         self.generated_dir = GENERATED_DIR_DEFAULT
         self.title("Lab_request")
+        # Пока идёт splash — главное окно не мигает пустым
+        if start_hidden:
+            self.withdraw()
         # 1920×1080 и шире: ~94% экрана (раньше cap 1200×860 — «маленькое» окно)
         fit_window_to_screen(self, prefer_w=1400, prefer_h=900, fill=True)
         self.configure(bg=COLORS["bg"])
@@ -145,43 +155,65 @@ class ShellMixin:
         # Состояние страницы «Заявки» (единый render_state)
         self._request_page_state: RequestPageState = RequestPageState.EMPTY
 
-        def _phase(name: str, t_prev: float) -> float:
+        def _report(pct: float, stage: str, detail: str = "") -> None:
+            if progress is not None:
+                try:
+                    progress(pct, stage, detail)
+                except Exception:
+                    pass
+
+        def _phase(name: str, t_prev: float, *, pct: float, label: str, detail: str = "") -> float:
             now = time.perf_counter()
+            ms = (now - t_prev) * 1000
             _log.info(
                 "%s: %.0f ms",
                 name,
-                (now - t_prev) * 1000,
+                ms,
                 extra={"tag": "Старт"},
             )
+            _report(pct, label, detail or f"{ms:.0f} ms")
             return now
 
-        t = _phase("init shell", t0)
+        t = _phase("init shell", t0, pct=55, label="Окно приложения…", detail="инициализация")
+        _report(58, "База данных…", detail=str(self.db_path))
         self._ensure_db()
-        t = _phase("ensure_db", t)
+        t = _phase(
+            "ensure_db",
+            t,
+            pct=68,
+            label="База данных",
+            detail="схема, прайс, migrate",
+        )
+        _report(70, "Тема оформления…")
         self._setup_theme()
-        t = _phase("theme", t)
+        t = _phase("theme", t, pct=72, label="Тема оформления")
+        _report(74, "Интерфейс…", detail="вкладки, сайдбар, формы")
         self._build_ui()
-        t = _phase("build_ui", t)
+        t = _phase("build_ui", t, pct=88, label="Интерфейс собран")
         # Минимальный стартовый набор; сравнение снимков — при первом открытии вкладки
+        _report(90, "Загрузка справочников…", detail="история, прайс, марки")
         self._load_history()
         self._load_tests()
         self._load_cable_marks()
+        _report(93, "Загрузка настроек…")
         self._load_settings()
         self._load_kp_calculations()
         self._load_organizations()
         self._refresh_parse_info_panel()
         self._load_orders_table()
         self._compare_list_loaded = False
-        t = _phase("load_data", t)
+        t = _phase("load_data", t, pct=97, label="Справочники загружены")
         self._install_clipboard_support()
+        total_ms = (time.perf_counter() - t0) * 1000
         _log.info(
             "GUI ready total=%.0f ms db=%s screen=%sx%s",
-            (time.perf_counter() - t0) * 1000,
+            total_ms,
             self.db_path,
             self.winfo_screenwidth(),
             self.winfo_screenheight(),
             extra={"tag": "Старт"},
         )
+        _report(99, "Почти готово…", detail=f"инициализация {total_ms:.0f} ms")
 
     def _make_readonly_text(self, parent: tk.Misc, **kwargs) -> scrolledtext.ScrolledText:
         """Текстовое поле только для чтения, но с выделением и копированием."""

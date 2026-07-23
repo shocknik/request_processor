@@ -5,22 +5,42 @@
 
 ```
 ui/
-  gui.py              # entry: main, re-exports
+  gui.py              # entry: main (lazy re-exports, без тяжёлого import)
+  bootstrap.py        # splash → import app → init → mainloop
   app.py              # RequestProcessorApp (mixins + tk.Tk)
   state.py            # CalcTestEntry, ExtractionDraft, RequestPageState
   theme.py            # AppStyles + design tokens (#F5F7FA / #1677FF)
   shell/
-    app_shell.py      # __init__, _build_ui (sidebar + Hidden.TNotebook)
+    app_shell.py      # __init__(progress=…), _build_ui (sidebar + notebook)
     menubar.py        # Файл / Вид / Данные / Сервис / Справка
   tabs/
     pdf_tab.py        # страница «Заявки» (редизайн)
     calc_tab.py, kp_tab.py, orders_tab.py, ...
   widgets/
+    splash.py         # тёмный splash + progress bar + этапы [Старт]
     clipboard.py      # Ctrl+C/V/X, context menus for entries
     sidebar.py        # Sidebar, NAV_ITEMS, SECTION_TO_TAB
     components.py     # PageHeader, StepIndicator, UploadPanel,
                       # EmptyState, BottomActionBar, StatusBadge, CardFrame
 ```
+
+## Старт (splash)
+
+При `start_gui.bat` / ярлыке сначала показывается **Lab_request** splash
+(тёмный, без рамки): прогресс 0–100% и лента этапов.
+
+| % (примерно) | Этап |
+|--------------|------|
+| 5–12 | загрузчик, DPI, логи |
+| 12–50 | import `ui.app` (тяжёлые зависимости) |
+| 55–70 | БД / migrate / прайс |
+| 70–88 | тема + сборка UI |
+| 90–99 | справочники (марки, орг, заказы…) |
+| 100 | deiconify главного окна |
+
+Почему на **рабочем ПК** дольше, чем на dev: часто `W:\` (NAS), cold start
+после включения, антивирус, `pythonw` + первый import пакетов; на dev —
+локальный SSD и тёплый кэш. В логе ищите `[Старт] … ms`.
 
 ## UX (v0.10)
 
