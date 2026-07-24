@@ -1698,6 +1698,109 @@ def add_acceptance_item_cmd(
     click.echo(click.style(f"✓ acceptance_item id={item_id}", fg="green"))
 
 
+@cli.command("import-acceptance-docx")
+@click.option(
+    "--file",
+    "file_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Локальный .docx ТУ (не коммитить в git)",
+)
+@click.option("--doc-id", default=None, help="Переопределить doc_id в БД")
+@click.option(
+    "--replace/--no-replace",
+    default=True,
+    help="Удалить старые acceptance_items этого ТУ перед импортом",
+)
+@click.option(
+    "--match-price/--no-match-price",
+    default=False,
+    help="После импорта попытаться проставить price_test_code",
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def import_acceptance_docx_cmd(
+    file_path: str,
+    doc_id: Optional[str],
+    replace: bool,
+    match_price: bool,
+    db: str,
+) -> None:
+    """Импорт таблицы приёмки из docx (поколение A) → acceptance_items."""
+    from .generation.acceptance_table_import import (
+        import_acceptance_docx,
+        try_match_prices,
+    )
+    from .persistence.sqlite_repo import migrate_db
+
+    migrate_db(db)
+    try:
+        result = import_acceptance_docx(
+            file_path, db_path=db, replace=replace, doc_id=doc_id
+        )
+    except Exception as e:
+        click.echo(click.style(f"✗ {e}", fg="red"), err=True)
+        raise SystemExit(1) from e
+    click.echo(
+        click.style(
+            f"✓ {result['doc_id']}: items={result['items']} "
+            f"(deleted_before={result.get('deleted_before', 0)})",
+            fg="green",
+        )
+    )
+    for w in result.get("warnings") or []:
+        click.echo(click.style(f"  ! {w}", fg="yellow"))
+    if match_price:
+        m = try_match_prices(doc_id=result["doc_id"], db_path=db)
+        click.echo(f"  price match: {m['matched']}/{m['scanned']}")
+
+
+@cli.command("import-acceptance-etalons")
+@click.option(
+    "--replace/--no-replace",
+    default=True,
+    help="Перезаписать acceptance_items эталонов",
+)
+@click.option(
+    "--match-price/--no-match-price",
+    default=True,
+    help="Проставить price_test_code где удаётся (HITL потом)",
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def import_acceptance_etalons_cmd(
+    replace: bool,
+    match_price: bool,
+    db: str,
+) -> None:
+    """Импорт эталонов ТЗ v3: 131 + 141 (docx) + 005 (raw_text fallback)."""
+    from .generation.acceptance_table_import import (
+        import_etalon_batch,
+        try_match_prices,
+    )
+    from .persistence.sqlite_repo import migrate_db
+
+    migrate_db(db)
+    results = import_etalon_batch(db_path=db, replace=replace)
+    total = 0
+    for r in results:
+        if r.get("error"):
+            click.echo(click.style(f"✗ {r.get('doc_id')}: {r['error']}", fg="red"))
+            continue
+        total += int(r.get("items") or 0)
+        note = r.get("note") or r.get("source_format") or ""
+        click.echo(
+            click.style(
+                f"✓ {r['doc_id']}: items={r['items']}  {note}",
+                fg="green",
+            )
+        )
+        for w in r.get("warnings") or []:
+            click.echo(click.style(f"  ! {w}", fg="yellow"))
+        if match_price and r.get("doc_id"):
+            m = try_match_prices(doc_id=r["doc_id"], db_path=db)
+            click.echo(f"  price match: {m['matched']}/{m['scanned']}")
+    click.echo(f"Итого строк: {total}")
+
+
 @cli.command("list-requirements")
 @click.option("--doc-id", "norm_id", default=None, type=int, help="id norm_documents")
 @click.option("--db", default="data/app.db", show_default=True)

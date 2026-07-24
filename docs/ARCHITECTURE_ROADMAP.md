@@ -33,7 +33,7 @@
 | S4 | Программы DOCX + match rate | ✅ polish 22.07 | TEST_PROGRAMS |
 | S5 | Нормы raw_text + aliases | ✅ batch + seed | REQUIREMENTS_BASE |
 | **S6 w1** | `acceptance_items` + clauses + external refs + CLI | ✅ 2026-07-24 | REQUIREMENTS_BASE, Obsidian 63 |
-| S6 w2 | Импорт таблиц приёмки docx (131, 141, 005) | 🔜 | ТЗ v3 |
+| **S6 w2** | Импорт таблиц приёмки: 131/141 docx + 005 raw_text | ✅ 2026-07-24 | Obsidian 64, acceptance_table_import |
 | Ops | Обновление без сноса, seed прайса, ярлык | ✅ | UPDATE.md |
 
 ## UI-пакет (после декомпозиции)

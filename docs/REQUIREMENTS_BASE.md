@@ -53,7 +53,16 @@ request-processor show-acceptance-item --id 1
 request-processor add-acceptance-item --doc "ТУ-…" --name "…" --req 2.5.1 --method 5.4.1
 ```
 
-Seed при migrate: 3 строки эталона **131** (растяжение, затухание, маркировка n/a).
+Seed при migrate: 3 строки эталона **131** (если каталог ещё пуст).  
+**Волна 2:** полный импорт таблиц приёмки эталонов:
+
+```powershell
+request-processor import-acceptance-etalons
+# 131 + 141 из docx; 005 из raw_text (framed Word)
+request-processor show-norm-catalog --doc "ТУ 27.31.11-131-47273194-2025"
+```
+
+См. Obsidian **64** — отчёт и гайд проверки.
 
 ## Как наполнять (пока вручную / полуавто)
 
