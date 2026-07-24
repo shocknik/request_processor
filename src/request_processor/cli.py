@@ -1478,6 +1478,226 @@ def list_norm_documents_cmd(kind: Optional[str], db: str) -> None:
         click.echo(f"{r['id']:>3}  {r['kind']:6}  {r['doc_id']:28}  {r['title'][:50]}")
 
 
+@cli.command("list-acceptance-items")
+@click.option(
+    "--doc",
+    "doc_id",
+    default=None,
+    help="doc_id ТУ, напр. «ТУ 27.31.11-131-47273194-2025»",
+)
+@click.option("--norm-id", "norm_id", default=None, type=int, help="id norm_documents")
+@click.option(
+    "--billable/--all",
+    "billable_only",
+    default=False,
+    help="Только billable=1 (по умолчанию все)",
+)
+@click.option("--db", default="data/app.db", show_default=True)
+def list_acceptance_items_cmd(
+    doc_id: Optional[str],
+    norm_id: Optional[int],
+    billable_only: bool,
+    db: str,
+) -> None:
+    """Строки каталога приёмки ТУ (acceptance_items, волна 1)."""
+    from .persistence.sqlite_repo import list_acceptance_items, migrate_db
+
+    migrate_db(db)
+    rows = list_acceptance_items(
+        doc_id=doc_id,
+        norm_document_id=norm_id,
+        billable=True if billable_only else None,
+        db_path=db,
+    )
+    if not rows:
+        click.echo("Нет acceptance_items (migrate-db + seed или импорт волны 2).")
+        return
+    for r in rows:
+        bill = "💰" if r.get("billable") else "—"
+        cat = (r.get("test_category") or "—")[:8]
+        code = r.get("price_test_code") or "n/a"
+        click.echo(
+            f"{r['id']:>4}  {bill}  {cat:8}  {(r.get('doc_id') or '')[:32]:32}  "
+            f"{(r.get('name_exact') or '')[:48]:48}  code={code}"
+        )
+
+
+@cli.command("show-acceptance-item")
+@click.option("--id", "item_id", type=int, required=True, help="id acceptance_items")
+@click.option("--db", default="data/app.db", show_default=True)
+def show_acceptance_item_cmd(item_id: int, db: str) -> None:
+    """Карточка acceptance_item: clauses + внешние ГОСТ + regime."""
+    from .persistence.sqlite_repo import get_acceptance_item, migrate_db
+
+    migrate_db(db)
+    item = get_acceptance_item(item_id, db_path=db)
+    if not item:
+        click.echo(f"Не найдено id={item_id}", err=True)
+        raise SystemExit(1)
+    click.echo(f"id={item['id']}  status={item.get('status')}")
+    click.echo(f"doc: {item.get('doc_id')}  ({item.get('doc_title')})")
+    click.echo(f"name: {item.get('name_exact')}")
+    click.echo(
+        f"category={item.get('test_category') or '—'}  "
+        f"group={item.get('group_code') or '—'}  "
+        f"billable={bool(item.get('billable'))}  "
+        f"price={item.get('price_test_code') or 'n/a'}"
+    )
+    click.echo("clauses:")
+    for c in item.get("clauses") or []:
+        click.echo(
+            f"  [{c.get('role')}] п.{c.get('clause')}  "
+            f"kind={c.get('clause_kind')}  {(c.get('title') or '')[:60]}"
+        )
+    if not item.get("clauses"):
+        click.echo("  (нет)")
+    click.echo("method_external:")
+    for e in item.get("method_external") or []:
+        click.echo(
+            f"  {e.get('ext_doc_id')}  "
+            f"{e.get('ext_clause_or_method') or ''}  "
+            f"{(e.get('note') or '')[:40]}"
+        )
+    if not item.get("method_external"):
+        click.echo("  (нет)")
+    if item.get("regime"):
+        click.echo(f"regime: {item['regime']}")
+    elif item.get("regime_json"):
+        click.echo(f"regime_json: {item['regime_json']}")
+    if item.get("notes"):
+        click.echo(f"notes: {item['notes']}")
+
+
+@cli.command("show-norm-catalog")
+@click.option(
+    "--doc",
+    "doc_id",
+    default=None,
+    help="doc_id, напр. «ТУ 27.31.11-131-47273194-2025»",
+)
+@click.option("--norm-id", "norm_id", default=None, type=int)
+@click.option("--db", default="data/app.db", show_default=True)
+def show_norm_catalog_cmd(
+    doc_id: Optional[str],
+    norm_id: Optional[int],
+    db: str,
+) -> None:
+    """ТУ целиком: метаданные + acceptance_items с пунктами (JOIN)."""
+    from .persistence.sqlite_repo import migrate_db, show_norm_catalog
+
+    if not doc_id and norm_id is None:
+        click.echo("Укажите --doc или --norm-id", err=True)
+        raise SystemExit(2)
+    migrate_db(db)
+    try:
+        cat = show_norm_catalog(doc_id=doc_id, norm_document_id=norm_id, db_path=db)
+    except ValueError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2) from e
+    if not cat:
+        click.echo("Документ не найден", err=True)
+        raise SystemExit(1)
+    click.echo(
+        f"{cat.get('doc_id')}  kind={cat.get('kind')}  "
+        f"status={cat.get('status')}  format={cat.get('source_format') or '—'}"
+    )
+    click.echo(f"title: {cat.get('title')}")
+    if cat.get("manufacturer_hint"):
+        click.echo(f"manufacturer: {cat['manufacturer_hint']}")
+    if cat.get("file_path"):
+        click.echo(f"file_path (local only): {cat['file_path']}")
+    items = cat.get("acceptance_items") or []
+    click.echo(f"acceptance_items: {len(items)}")
+    for it in items:
+        reqs = [
+            c["clause"]
+            for c in (it.get("clauses") or [])
+            if c.get("role") == "requirement"
+        ]
+        meths = [
+            c["clause"]
+            for c in (it.get("clauses") or [])
+            if c.get("role") == "method_internal"
+        ]
+        exts = [e.get("ext_doc_id") for e in (it.get("method_external") or [])]
+        bill = "billable" if it.get("billable") else "n/a-price"
+        click.echo(
+            f"  [{it['id']}] {it.get('name_exact')}  ({bill})\n"
+            f"      req={','.join(reqs) or '—'}  "
+            f"method_tu={','.join(meths) or '—'}  "
+            f"ext={','.join(x for x in exts if x) or '—'}"
+        )
+
+
+@cli.command("add-acceptance-item")
+@click.option("--doc", "doc_id", required=True, help="doc_id ТУ (уже в norm_documents)")
+@click.option("--name", "name_exact", required=True, help="Точное имя из таблицы приёмки")
+@click.option(
+    "--req",
+    "req_clauses",
+    multiple=True,
+    help="Пункт требований (повторяемый; один пункт за раз, не диапазон)",
+)
+@click.option(
+    "--method",
+    "method_clauses",
+    multiple=True,
+    help="Пункт методов ТУ 5.x (повторяемый)",
+)
+@click.option("--category", default=None, help="psi|periodic|type|other (опц.)")
+@click.option("--code", default=None, help="price_test_code или пусто")
+@click.option(
+    "--billable/--no-billable",
+    default=True,
+    help="В прайсе / не в прайсе (маркировка — --no-billable)",
+)
+@click.option("--sort", "sort_order", default=0, type=int)
+@click.option(
+    "--ext-doc",
+    default=None,
+    help="Внешний ГОСТ/IEC (один; детальнее — волна 2/CLI позже)",
+)
+@click.option("--ext-method", default=None, help="Метод/п. внешнего НД")
+@click.option("--db", default="data/app.db", show_default=True)
+def add_acceptance_item_cmd(
+    doc_id: str,
+    name_exact: str,
+    req_clauses: tuple[str, ...],
+    method_clauses: tuple[str, ...],
+    category: Optional[str],
+    code: Optional[str],
+    billable: bool,
+    sort_order: int,
+    ext_doc: Optional[str],
+    ext_method: Optional[str],
+    db: str,
+) -> None:
+    """Вручную добавить строку каталога приёмки (HITL / до парсера docx)."""
+    from .persistence.sqlite_repo import add_acceptance_item, migrate_db, upsert_norm_document
+
+    migrate_db(db)
+    # если doc ещё нет — минимальная карточка (без пути к ТУ)
+    upsert_norm_document(doc_id, doc_id, kind="tu", status="draft", db_path=db)
+    ext_list = []
+    if ext_doc:
+        ext_list.append(
+            {"ext_doc_id": ext_doc, "ext_clause_or_method": ext_method or ""}
+        )
+    item_id = add_acceptance_item(
+        doc_id=doc_id,
+        name_exact=name_exact,
+        requirement_clauses=list(req_clauses),
+        method_clauses=list(method_clauses),
+        test_category=category,
+        price_test_code=code,
+        billable=billable,
+        sort_order=sort_order,
+        method_external=ext_list or None,
+        db_path=db,
+    )
+    click.echo(click.style(f"✓ acceptance_item id={item_id}", fg="green"))
+
+
 @cli.command("list-requirements")
 @click.option("--doc-id", "norm_id", default=None, type=int, help="id norm_documents")
 @click.option("--db", default="data/app.db", show_default=True)

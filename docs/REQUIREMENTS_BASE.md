@@ -1,24 +1,34 @@
-# База требований и aliases (S5 — каркас)
+# База требований, aliases и каталог приёмки ТУ
 
-**Статус:** схема + seed-примеры + CLI.  
-Полный разбор ТУ/IEC/ГОСТ из `rag_corpus` — **следующий этап** (файлы локально, не в git).
+**Статус:** S5 каркас + **волна 1** (`acceptance_items`, 2026-07-24).  
+Полный импорт таблиц из docx — **волна 2**. Файлы ТУ **только локально**, не в git.
+
+ТЗ: Obsidian «63 - ТЗ ТУ каталог — сжато для переутверждения (v3)» (согласовано).
 
 ## Зачем
 
-| Проблема | Решение v1 |
-|----------|------------|
+| Проблема | Решение |
+|----------|---------|
 | Одно испытание — много названий в ПМИ/письмах | `test_aliases` |
-| Пункт ТУ ↔ метод ↔ прайс | `norm_documents` + `requirements` + `requirement_test_links` |
-| Программы уже импортируют пункты | позже: auto-link program_item → requirement |
+| Пункт ТУ ↔ метод ↔ прайс | `requirements` + links + **acceptance_items** |
+| Строка таблицы приёмки ТУ | `acceptance_items` + `acceptance_item_clauses` |
+| Внешний ГОСТ метода | `method_external_refs` (отдельный контур) |
+| Программы S4 | позже: auto-link program_item → acceptance |
 
 ## Таблицы
 
 ```
-norm_documents     — ТУ / ГОСТ / IEC (идентификатор, kind, title)
-requirements       — пункт (clause) + title/body
-requirement_test_links — requirement → price_test_code
-test_aliases       — «r жилы» → канон / code
+norm_documents           — ТУ / ГОСТ / IEC (+ edition_note, source_format, status)
+requirements             — пункт clause (один, не диапазон) + title/body + clause_kind
+requirement_test_links   — requirement → price_test_code
+test_aliases             — «r жилы» → канон / code
+acceptance_items         — строка приёмки (name_exact, billable, regime_json, …)
+acceptance_item_clauses  — item ↔ requirement (role: requirement | method_internal)
+method_external_refs     — item → ГОСТ/IEC + метод
 ```
+
+**Решения v3:** `group_code` / `test_category` опциональны; маркировка — `billable=0`;  
+режимы v1 — плоский `regime_json` (ветки по марке — v2).
 
 ## Seed (авто при migrate-db)
 
@@ -34,7 +44,16 @@ request-processor list-norm-documents
 request-processor list-requirements
 request-processor list-test-aliases
 request-processor add-test-alias --alias "сопротивление ТПЖ" --canonical "…" --code resistance_core
+
+# Волна 1 — каталог приёмки
+request-processor list-acceptance-items
+request-processor list-acceptance-items --doc "ТУ 27.31.11-131-47273194-2025"
+request-processor show-norm-catalog --doc "ТУ 27.31.11-131-47273194-2025"
+request-processor show-acceptance-item --id 1
+request-processor add-acceptance-item --doc "ТУ-…" --name "…" --req 2.5.1 --method 5.4.1
 ```
+
+Seed при migrate: 3 строки эталона **131** (растяжение, затухание, маркировка n/a).
 
 ## Как наполнять (пока вручную / полуавто)
 

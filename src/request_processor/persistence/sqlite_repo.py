@@ -407,6 +407,7 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     _migrate_training_tables(db_path)
     _migrate_test_programs(db_path)
     _migrate_norm_requirements(db_path)
+    _migrate_acceptance_catalog(db_path)
     _migrate_calculation_lines_quantity(db_path)
     apply_price_catalog_fixes(db_path)
     sync_climatic_tests(db_path)
@@ -416,6 +417,7 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     sync_default_test_mappings(db_path)
     sync_mappings_from_test_item_names(db_path)
     seed_example_norm_requirements(db_path)
+    seed_example_acceptance_catalog(db_path)
 
 
 def _migrate_training_tables(db_path: str | Path = DB_PATH_DEFAULT) -> None:
@@ -576,7 +578,7 @@ def _migrate_norm_requirements(db_path: str | Path = DB_PATH_DEFAULT) -> None:
                 doc_id          TEXT NOT NULL UNIQUE,
                 title           TEXT NOT NULL,
                 kind            TEXT NOT NULL DEFAULT 'tu',
-                -- kind: tu | gost | iec | pmi | other
+                -- kind: tu | gost | iec | method_std | pmi | other
                 file_path       TEXT,
                 notes           TEXT,
                 created_at      TEXT NOT NULL
@@ -615,6 +617,97 @@ def _migrate_norm_requirements(db_path: str | Path = DB_PATH_DEFAULT) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_test_aliases_code
                 ON test_aliases(price_test_code);
+            """
+        )
+
+
+def _migrate_acceptance_catalog(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """
+    Волна 1 (ТЗ v3): каталог строк таблицы приёмки ТУ.
+
+    Учитывает решения оператора:
+    - group_code / test_category — опциональны;
+    - пункты не диапазонами: связь item ↔ clause по одной;
+    - внешний ГОСТ — отдельная таблица method_external_refs;
+    - regime_json — плоский JSON на item (ветки по марке — v2);
+    - ТУ-файлы не в git (file_path локальный).
+    """
+    with get_connection(db_path) as conn:
+        # Расширение norm_documents / requirements (идемпотентно)
+        nd_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(norm_documents)").fetchall()
+        }
+        for col, decl in (
+            ("edition_note", "TEXT"),
+            ("source_format", "TEXT"),
+            ("manufacturer_hint", "TEXT"),
+            ("status", "TEXT NOT NULL DEFAULT 'draft'"),
+        ):
+            if col not in nd_cols:
+                conn.execute(f"ALTER TABLE norm_documents ADD COLUMN {col} {decl}")
+
+        req_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(requirements)").fetchall()
+        }
+        if "clause_kind" not in req_cols:
+            # requirement | method | note | ref
+            conn.execute(
+                "ALTER TABLE requirements ADD COLUMN clause_kind TEXT "
+                "NOT NULL DEFAULT 'requirement'"
+            )
+
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS acceptance_items (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                norm_document_id    INTEGER NOT NULL
+                    REFERENCES norm_documents(id) ON DELETE CASCADE,
+                test_category       TEXT,
+                -- psi | periodic | type | other | NULL (не жёстко)
+                group_code          TEXT,
+                -- С1/П1… опционально, в v1 часто NULL
+                name_exact          TEXT NOT NULL,
+                name_norm           TEXT NOT NULL,
+                price_test_code     TEXT,
+                billable            INTEGER NOT NULL DEFAULT 1,
+                sort_order          INTEGER NOT NULL DEFAULT 0,
+                regime_json         TEXT,
+                notes               TEXT,
+                status              TEXT NOT NULL DEFAULT 'draft',
+                -- draft | reviewed | approved
+                created_at          TEXT NOT NULL,
+                UNIQUE(norm_document_id, name_norm, sort_order)
+            );
+            CREATE INDEX IF NOT EXISTS idx_acceptance_items_doc
+                ON acceptance_items(norm_document_id);
+            CREATE INDEX IF NOT EXISTS idx_acceptance_items_code
+                ON acceptance_items(price_test_code);
+
+            CREATE TABLE IF NOT EXISTS acceptance_item_clauses (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                acceptance_item_id  INTEGER NOT NULL
+                    REFERENCES acceptance_items(id) ON DELETE CASCADE,
+                requirement_id      INTEGER NOT NULL
+                    REFERENCES requirements(id) ON DELETE CASCADE,
+                role                TEXT NOT NULL,
+                -- requirement | method_internal
+                UNIQUE(acceptance_item_id, requirement_id, role)
+            );
+            CREATE INDEX IF NOT EXISTS idx_acceptance_item_clauses_item
+                ON acceptance_item_clauses(acceptance_item_id);
+
+            CREATE TABLE IF NOT EXISTS method_external_refs (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                acceptance_item_id  INTEGER NOT NULL
+                    REFERENCES acceptance_items(id) ON DELETE CASCADE,
+                ext_doc_id          TEXT NOT NULL,
+                ext_doc_title       TEXT,
+                ext_clause_or_method TEXT,
+                note                TEXT,
+                UNIQUE(acceptance_item_id, ext_doc_id, ext_clause_or_method)
+            );
+            CREATE INDEX IF NOT EXISTS idx_method_external_refs_item
+                ON method_external_refs(acceptance_item_id);
             """
         )
 
@@ -705,6 +798,526 @@ def seed_example_norm_requirements(db_path: str | Path = DB_PATH_DEFAULT) -> int
                 """,
                 (alias.lower(), canon, code, now),
             )
+    return added
+
+
+def _norm_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def ensure_requirement(
+    norm_document_id: int,
+    clause: str,
+    *,
+    title: str | None = None,
+    body: str | None = None,
+    clause_kind: str = "requirement",
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Создаёт или возвращает requirements.id. clause — один пункт (не диапазон)."""
+    clause = (clause or "").strip()
+    if not clause:
+        raise ValueError("clause пустой")
+    kind = (clause_kind or "requirement").strip() or "requirement"
+    now = datetime.now().isoformat()
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO requirements
+                (norm_document_id, clause, title, body, created_at, clause_kind)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(norm_document_id, clause) DO UPDATE SET
+                title = COALESCE(excluded.title, requirements.title),
+                body = COALESCE(excluded.body, requirements.body),
+                clause_kind = COALESCE(excluded.clause_kind, requirements.clause_kind)
+            """,
+            (
+                norm_document_id,
+                clause,
+                (title or "").strip() or None,
+                body,
+                now,
+                kind,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT id FROM requirements
+            WHERE norm_document_id = ? AND clause = ?
+            """,
+            (norm_document_id, clause),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("ensure_requirement failed")
+        return int(row["id"])
+
+
+def upsert_norm_document(
+    doc_id: str,
+    title: str,
+    *,
+    kind: str = "tu",
+    file_path: str | None = None,
+    notes: str | None = None,
+    edition_note: str | None = None,
+    source_format: str | None = None,
+    manufacturer_hint: str | None = None,
+    status: str = "draft",
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Создаёт/обновляет norm_documents, возвращает id."""
+    now = datetime.now().isoformat()
+    doc_id = (doc_id or "").strip()
+    title = (title or "").strip() or doc_id
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO norm_documents (
+                doc_id, title, kind, file_path, notes, created_at,
+                edition_note, source_format, manufacturer_hint, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                title = excluded.title,
+                kind = excluded.kind,
+                file_path = COALESCE(excluded.file_path, norm_documents.file_path),
+                notes = COALESCE(excluded.notes, norm_documents.notes),
+                edition_note = COALESCE(excluded.edition_note, norm_documents.edition_note),
+                source_format = COALESCE(
+                    excluded.source_format, norm_documents.source_format
+                ),
+                manufacturer_hint = COALESCE(
+                    excluded.manufacturer_hint, norm_documents.manufacturer_hint
+                ),
+                status = COALESCE(excluded.status, norm_documents.status)
+            """,
+            (
+                doc_id,
+                title,
+                (kind or "tu").strip(),
+                file_path,
+                notes,
+                now,
+                edition_note,
+                source_format,
+                manufacturer_hint,
+                (status or "draft").strip() or "draft",
+            ),
+        )
+        row = conn.execute(
+            "SELECT id FROM norm_documents WHERE doc_id = ?", (doc_id,)
+        ).fetchone()
+        if not row:
+            raise RuntimeError("upsert_norm_document failed")
+        return int(row["id"])
+
+
+def add_acceptance_item(
+    *,
+    norm_document_id: int | None = None,
+    doc_id: str | None = None,
+    name_exact: str,
+    requirement_clauses: list[str] | None = None,
+    method_clauses: list[str] | None = None,
+    test_category: str | None = None,
+    group_code: str | None = None,
+    price_test_code: str | None = None,
+    billable: bool = True,
+    sort_order: int = 0,
+    regime: dict[str, Any] | str | None = None,
+    notes: str | None = None,
+    status: str = "draft",
+    method_external: list[dict[str, str | None]] | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """
+    Добавляет acceptance_item и связи с пунктами (по одному clause за раз).
+
+    requirement_clauses / method_clauses — списки вида [\"2.5.1\"], не \"2.3.1-2.3.6\".
+    """
+    name_exact = (name_exact or "").strip()
+    if not name_exact:
+        raise ValueError("name_exact пустой")
+    if norm_document_id is None:
+        if not doc_id:
+            raise ValueError("нужен norm_document_id или doc_id")
+        with get_connection(db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM norm_documents WHERE doc_id = ?",
+                (doc_id.strip(),),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"norm_documents не найден: {doc_id}")
+            norm_document_id = int(row["id"])
+
+    name_n = _norm_name(name_exact)
+    if isinstance(regime, dict):
+        regime_s = json.dumps(regime, ensure_ascii=False)
+    else:
+        regime_s = regime
+    now = datetime.now().isoformat()
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO acceptance_items (
+                norm_document_id, test_category, group_code,
+                name_exact, name_norm, price_test_code, billable,
+                sort_order, regime_json, notes, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(norm_document_id, name_norm, sort_order) DO UPDATE SET
+                name_exact = excluded.name_exact,
+                test_category = excluded.test_category,
+                group_code = excluded.group_code,
+                price_test_code = excluded.price_test_code,
+                billable = excluded.billable,
+                regime_json = COALESCE(excluded.regime_json, acceptance_items.regime_json),
+                notes = COALESCE(excluded.notes, acceptance_items.notes),
+                status = excluded.status
+            """,
+            (
+                norm_document_id,
+                (test_category or "").strip() or None,
+                (group_code or "").strip() or None,
+                name_exact,
+                name_n,
+                (price_test_code or "").strip() or None,
+                1 if billable else 0,
+                int(sort_order),
+                regime_s,
+                notes,
+                (status or "draft").strip() or "draft",
+                now,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT id FROM acceptance_items
+            WHERE norm_document_id = ? AND name_norm = ? AND sort_order = ?
+            """,
+            (norm_document_id, name_n, int(sort_order)),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("add_acceptance_item failed")
+        item_id = int(row["id"])
+
+    for cl in requirement_clauses or []:
+        rid = ensure_requirement(
+            norm_document_id,
+            cl,
+            title=name_exact,
+            clause_kind="requirement",
+            db_path=db_path,
+        )
+        _link_acceptance_clause(item_id, rid, "requirement", db_path=db_path)
+
+    for cl in method_clauses or []:
+        rid = ensure_requirement(
+            norm_document_id,
+            cl,
+            title=f"Метод: {name_exact}",
+            clause_kind="method",
+            db_path=db_path,
+        )
+        _link_acceptance_clause(item_id, rid, "method_internal", db_path=db_path)
+
+    for ext in method_external or []:
+        add_method_external_ref(
+            item_id,
+            ext_doc_id=str(ext.get("ext_doc_id") or ext.get("doc") or ""),
+            ext_doc_title=ext.get("ext_doc_title") or ext.get("title"),
+            ext_clause_or_method=ext.get("ext_clause_or_method")
+            or ext.get("method")
+            or ext.get("clause"),
+            note=ext.get("note"),
+            db_path=db_path,
+        )
+
+    return item_id
+
+
+def _link_acceptance_clause(
+    acceptance_item_id: int,
+    requirement_id: int,
+    role: str,
+    *,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> None:
+    role = (role or "").strip()
+    if role not in ("requirement", "method_internal"):
+        raise ValueError(f"role недопустим: {role}")
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO acceptance_item_clauses
+                (acceptance_item_id, requirement_id, role)
+            VALUES (?, ?, ?)
+            ON CONFLICT(acceptance_item_id, requirement_id, role) DO NOTHING
+            """,
+            (acceptance_item_id, requirement_id, role),
+        )
+
+
+def add_method_external_ref(
+    acceptance_item_id: int,
+    *,
+    ext_doc_id: str,
+    ext_doc_title: str | None = None,
+    ext_clause_or_method: str | None = None,
+    note: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    ext_doc_id = (ext_doc_id or "").strip()
+    if not ext_doc_id:
+        raise ValueError("ext_doc_id пустой")
+    # Пустая строка вместо NULL — чтобы UNIQUE/ON CONFLICT стабильно срабатывали
+    method = (ext_clause_or_method or "").strip()
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO method_external_refs (
+                acceptance_item_id, ext_doc_id, ext_doc_title,
+                ext_clause_or_method, note
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(acceptance_item_id, ext_doc_id, ext_clause_or_method)
+            DO UPDATE SET
+                ext_doc_title = COALESCE(
+                    excluded.ext_doc_title, method_external_refs.ext_doc_title
+                ),
+                note = COALESCE(excluded.note, method_external_refs.note)
+            """,
+            (
+                acceptance_item_id,
+                ext_doc_id,
+                (ext_doc_title or "").strip() or None,
+                method,
+                note,
+            ),
+        )
+        if cur.lastrowid:
+            return int(cur.lastrowid)
+        row = conn.execute(
+            """
+            SELECT id FROM method_external_refs
+            WHERE acceptance_item_id = ? AND ext_doc_id = ?
+              AND IFNULL(ext_clause_or_method, '') = ?
+            """,
+            (acceptance_item_id, ext_doc_id, method),
+        ).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def list_acceptance_items(
+    *,
+    norm_document_id: int | None = None,
+    doc_id: str | None = None,
+    billable: bool | None = None,
+    limit: int = 500,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    """Список acceptance_items с JOIN на norm_documents."""
+    q = """
+        SELECT a.*, n.doc_id, n.title AS doc_title, n.kind AS doc_kind,
+               n.status AS doc_status, n.source_format
+        FROM acceptance_items a
+        JOIN norm_documents n ON n.id = a.norm_document_id
+        WHERE 1=1
+    """
+    params: list[Any] = []
+    if norm_document_id is not None:
+        q += " AND a.norm_document_id = ?"
+        params.append(norm_document_id)
+    if doc_id:
+        q += " AND n.doc_id = ?"
+        params.append(doc_id.strip())
+    if billable is not None:
+        q += " AND a.billable = ?"
+        params.append(1 if billable else 0)
+    q += " ORDER BY n.doc_id, a.sort_order, a.id LIMIT ?"
+    params.append(limit)
+    with get_connection(db_path) as conn:
+        return [dict(r) for r in conn.execute(q, params).fetchall()]
+
+
+def get_acceptance_item(
+    item_id: int,
+    *,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    """Один item + clauses + external refs (для show CLI)."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT a.*, n.doc_id, n.title AS doc_title, n.kind AS doc_kind,
+                   n.edition_note, n.source_format, n.manufacturer_hint,
+                   n.status AS doc_status, n.file_path AS doc_file_path
+            FROM acceptance_items a
+            JOIN norm_documents n ON n.id = a.norm_document_id
+            WHERE a.id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        clauses = conn.execute(
+            """
+            SELECT c.role, r.id AS requirement_id, r.clause, r.title,
+                   r.body, r.clause_kind
+            FROM acceptance_item_clauses c
+            JOIN requirements r ON r.id = c.requirement_id
+            WHERE c.acceptance_item_id = ?
+            ORDER BY c.role, r.clause
+            """,
+            (item_id,),
+        ).fetchall()
+        out["clauses"] = [dict(c) for c in clauses]
+        exts = conn.execute(
+            """
+            SELECT * FROM method_external_refs
+            WHERE acceptance_item_id = ?
+            ORDER BY id
+            """,
+            (item_id,),
+        ).fetchall()
+        out["method_external"] = [dict(e) for e in exts]
+        if out.get("regime_json"):
+            try:
+                out["regime"] = json.loads(out["regime_json"])
+            except (TypeError, json.JSONDecodeError):
+                out["regime"] = None
+        return out
+
+
+def show_norm_catalog(
+    *,
+    doc_id: str | None = None,
+    norm_document_id: int | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    """Карточка ТУ: документ + все acceptance_items с краткими clause."""
+    with get_connection(db_path) as conn:
+        if norm_document_id is not None:
+            doc = conn.execute(
+                "SELECT * FROM norm_documents WHERE id = ?",
+                (norm_document_id,),
+            ).fetchone()
+        elif doc_id:
+            doc = conn.execute(
+                "SELECT * FROM norm_documents WHERE doc_id = ?",
+                (doc_id.strip(),),
+            ).fetchone()
+        else:
+            raise ValueError("нужен doc_id или norm_document_id")
+        if not doc:
+            return None
+        d = dict(doc)
+        items = list_acceptance_items(
+            norm_document_id=int(d["id"]),
+            db_path=db_path,
+            limit=2000,
+        )
+        enriched: list[dict[str, Any]] = []
+        for it in items:
+            full = get_acceptance_item(int(it["id"]), db_path=db_path)
+            if full:
+                enriched.append(full)
+        d["acceptance_items"] = enriched
+        return d
+
+
+def seed_example_acceptance_catalog(db_path: str | Path = DB_PATH_DEFAULT) -> int:
+    """
+    Идемпотентный seed эталона 131 (структура таблицы приёмки, без текста ТУ из файла).
+
+    group_code не заполняем (решение v3). Маркировка — billable=0.
+    """
+    doc_key = "ТУ 27.31.11-131-47273194-2025"
+    nd_id = upsert_norm_document(
+        doc_key,
+        "Кабели оптические огнестойкие (эталон каталога acceptance, seed)",
+        kind="tu",
+        notes="seed wave1; полный импорт docx — волна 2; файл ТУ только локально",
+        source_format="docx_clean",
+        manufacturer_hint="ООО НПП Спецкабель",
+        status="draft",
+        edition_note="seed structure from TZ v3 §9.1",
+        db_path=db_path,
+    )
+    # Уже есть items? не дублируем сверх seed
+    existing = list_acceptance_items(norm_document_id=nd_id, db_path=db_path)
+    if len(existing) >= 3:
+        return 0
+
+    specs: list[dict[str, Any]] = [
+        {
+            "name_exact": "Прочность к растягивающему усилию",
+            "test_category": "periodic",
+            "group_code": None,
+            "requirement_clauses": ["2.5.1"],
+            "method_clauses": ["5.4.1"],
+            "billable": True,
+            "sort_order": 10,
+            "regime": {
+                "force_kn": 1.5,
+                "sample_length_m": 10,
+                "hold_min": 10,
+                "source": "seed_tz_v3_9_1",
+            },
+            "method_external": [
+                {
+                    "ext_doc_id": "ГОСТ 12182.5-80",
+                    "ext_clause_or_method": None,
+                    "note": "seed; + контроль целостности — отдельно при review",
+                }
+            ],
+            "notes": "seed: эталон строки периодики",
+        },
+        {
+            "name_exact": "Измерение коэффициента затухания",
+            "test_category": "psi",
+            "requirement_clauses": ["2.4"],
+            "method_clauses": ["5.3"],
+            "billable": True,
+            "sort_order": 20,
+            "method_external": [
+                {
+                    "ext_doc_id": "ГОСТ Р МЭК 60793-1-40",
+                    "ext_clause_or_method": "метод C",
+                }
+            ],
+            "notes": "seed: ПСИ, пункты по одному",
+        },
+        {
+            "name_exact": "Проверка маркировки и упаковки",
+            "test_category": "psi",
+            "requirement_clauses": ["2.8", "2.9"],
+            "method_clauses": ["5.7.1"],
+            "billable": False,
+            "sort_order": 30,
+            "notes": "seed: billable=false (решение v3, не прайс)",
+        },
+    ]
+    added = 0
+    for spec in specs:
+        name = str(spec["name_exact"])
+        if any(_norm_name(e["name_exact"]) == _norm_name(name) for e in existing):
+            continue
+        add_acceptance_item(
+            norm_document_id=nd_id,
+            name_exact=name,
+            requirement_clauses=list(spec.get("requirement_clauses") or []),
+            method_clauses=list(spec.get("method_clauses") or []),
+            test_category=spec.get("test_category"),
+            group_code=spec.get("group_code"),
+            billable=bool(spec.get("billable", True)),
+            sort_order=int(spec.get("sort_order") or 0),
+            regime=spec.get("regime"),
+            notes=spec.get("notes"),
+            method_external=list(spec.get("method_external") or []),
+            status="draft",
+            db_path=db_path,
+        )
+        added += 1
     return added
 
 

@@ -319,6 +319,7 @@ request-processor index-rag --folder data/training/rag_corpus/tu --kind tu
 |---------|------|----------|
 | **S4 Программы** | Импорт DOCX → `test_programs`, match с `test_items` | [docs/TEST_PROGRAMS.md](docs/TEST_PROGRAMS.md) |
 | **S5 Нормы** | raw_text, aliases, seed примеров | [docs/REQUIREMENTS_BASE.md](docs/REQUIREMENTS_BASE.md) |
+| **S6 w1 Каталог приёмки** | `acceptance_items` + clauses + external ГОСТ (CLI) | [docs/REQUIREMENTS_BASE.md](docs/REQUIREMENTS_BASE.md) |
 | **КП** | стили, lab_profile, лого | `docs/lab_profile.example.yaml` |
 | **Протокол** | `export-protocol-meta` → JSON для внешнего generator | [docs/PROTOCOL_GENERATOR_BRIDGE.md](docs/PROTOCOL_GENERATOR_BRIDGE.md) |
 
