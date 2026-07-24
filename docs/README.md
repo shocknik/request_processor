@@ -15,8 +15,18 @@
 
 | Файл | Назначение |
 |------|------------|
+| **[DEV_AGENT_SETUP.md](./DEV_AGENT_SETUP.md)** | VS Code + Grok: как настроить IDE/агента |
+| `ARCHITECTURE_ROADMAP.md` | Карта S1–S5 |
+| `UI_ARCHITECTURE.md` | Sidebar, splash, tabs |
+| `TEST_PROGRAMS.md` | Программы испытаний (S4) |
+| `REQUIREMENTS_BASE.md` | Нормы / aliases (S5) |
+| `PROTOCOL_GENERATOR_BRIDGE.md` | JSON → protocol_generator |
+| `UPDATE.md` | Обновление in-place |
 | `client_profiles.example.yaml` | Пример локальных профилей клиентов |
+| `lab_profile.example.yaml` | Реквизиты лаборатории |
 | `План_Итерации_2.md` | Исторический план (если есть в полной копии) |
+
+В корне репо: **[AGENTS.md](../AGENTS.md)** — правила для AI-агента (Grok).
 
 ## Obsidian (только на машине разработчика)
 

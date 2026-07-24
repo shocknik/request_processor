@@ -1,0 +1,11 @@
+{
+  "ruff": {
+    "command": "D:\\My_projects\\request_processor\\.venv\\Scripts\\ruff.exe",
+    "args": ["server"]
+  },
+  "basedpyright": {
+    "command": "D:\\My_projects\\request_processor\\.venv\\Scripts\\basedpyright-langserver.exe",
+    "args": ["--stdio"],
+    "_comment": "Optional: pip install basedpyright — then copy this file to %USERPROFILE%\\.grok\\lsp.json (merge with ruff)"
+  }
+}

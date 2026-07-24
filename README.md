@@ -517,6 +517,8 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | [docs/PROTOCOL_GENERATOR_BRIDGE.md](docs/PROTOCOL_GENERATOR_BRIDGE.md) | JSON → protocol_generator |
 | [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md) | Карта S1–S5 |
 | [docs/README.md](docs/README.md) | Индекс docs/ |
+| [docs/DEV_AGENT_SETUP.md](docs/DEV_AGENT_SETUP.md) | VS Code + Grok: продуктивная работа агента |
+| [AGENTS.md](AGENTS.md) | Правила для AI-агента (автозагрузка Grok) |
 | **GitHub** | https://github.com/shocknik/request_processor |
 | **Obsidian** | `Python/Проект request-processor/` (разработка) |
 

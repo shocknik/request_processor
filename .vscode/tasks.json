@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "pytest",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-m", "pytest", "tests/", "-q", "--tb=line"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "ruff check",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/ruff.exe",
+      "args": ["check", "src", "tests"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "migrate-db",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/Scripts/request-processor.exe",
+      "args": ["migrate-db"],
+      "group": "none"
+    }
+  ]
+}
