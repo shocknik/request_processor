@@ -1,10 +1,11 @@
-# Обработка заявок на испытания кабелей
+# Lab_request (request-processor)
 
-Автоматизация расчёта стоимости испытаний кабельной продукции, извлечения данных из заявок (PDF/Word), валидации парсинга оператором и формирования документов (коммерческое предложение и заявка на испытания).
+Автоматизация расчёта стоимости испытаний кабельной продукции: извлечение данных из заявок (PDF/Word/текст), валидация оператором, расчёт, КП, заявка на испытания, программы ПМИ, нормы и мост к генератору протоколов.
 
 **Версия:** 0.9.1  
+**Продуктовое имя:** Lab_request  
 **Репозиторий:** https://github.com/shocknik/request_processor  
-**Python:** ≥ 3.10
+**Python:** ≥ 3.10 (рекомендуется 3.11/3.12)
 
 ---
 
@@ -18,9 +19,10 @@
 - [Каталог data/](#каталог-data)
 - [База данных](#база-данных)
 - [Извлечение данных](#извлечение-данных)
-- [OCR (Фаза 2)](#ocr-фаза-2)
-- [Обучение и оценка качества (Фаза 1)](#обучение-и-оценка-качества-фаза-1)
-- [Семейства документов (YAML)](#семейства-документов-yaml)
+- [OCR](#ocr)
+- [Обучение и оценка](#обучение-и-оценка)
+- [Семейства документов](#семейства-документов)
+- [Программы, нормы, КП, протоколы](#программы-нормы-кп-протоколы)
 - [Графический интерфейс](#графический-интерфейс)
 - [CLI](#cli)
 - [Тесты](#тесты)
@@ -35,58 +37,50 @@
 
 ### Бизнес-цикл
 
-- **Извлечение** из **PDF**, **Word (.docx)** и **свободного текста** (речь/письмо заказчика): марки, заказчик, производитель, организации
-- **Валидация парсинга** — отчёт уверенности (правила P0–P2), human-in-the-loop в GUI, экспорт правок оператора
-- **Маппинг требований** — справочник `test_mappings` (25+ фраз), подсказки «Испытания из заявки» на вкладке «Расчёт»
-- **Расчёт испытаний** — правила `fixed`, `per_core`, `per_group`, `time_based`; климатические часы выдержки
-- **КП в Word** по нескольким маркам; автоматическое создание заказа в БД
-- **Заявка на испытания в Word** — форма + приложение с объёмом испытаний
-- **Макет протокола** + **пакет документов** (заявка + КП + протокол + summary) по заказу
-- **Заказы** — заявка + расчёты + КП = один заказ; история сгенерированных документов
-- Справочники: испытания, марки, организации
-- **GUI-first** (tkinter) + **CLI** (Click) для eval/migrate/агента
+- **Извлечение** из **PDF**, **Word (.docx)** и **свободного текста**: марки, заказчик, производитель, организации
+- **Валидация парсинга** — отчёт уверенности (P0–P2), human-in-the-loop в GUI, экспорт правок оператора
+- **Маппинг требований** — `test_mappings` + **синонимы** (`test_aliases`)
+- **Расчёт испытаний** — правила `fixed`, `per_core`, `per_group`, `time_based`; климатические часы
+- **КП в Word** — стили **classic / modern / compact**, логотип и реквизиты из `lab_profile`
+- **Заявка на испытания** + **пакет документов** (заявка + КП + протокол-макет + summary)
+- **JSON protocol_meta** — мост к отдельному `protocol_generator` (без правок чужого проекта)
+- **Заказы** — заявка + расчёты + КП; история `generated_documents`
+- **Программы испытаний (S4)** — импорт ПМИ/ПИ из DOCX, сопоставление с прайсом
+- **Нормы (S5)** — `norm_documents` / `requirements`, импорт raw-текста, алиасы
+- **GUI-first** (tkinter, sidebar) + **CLI** (Click)
 
 ### OCR и распознавание сканов
 
-- **Tesseract** (приоритет) + **EasyOCR** (fallback, опционально)
-- **Кэш OCR** — `data/ocr_cache/` (fingerprint файла + DPI + движок + версия препроцессинга)
-- **Препроцессинг v2** (OpenCV, опционально `pip install -e ".[cv]"`): grayscale → deskew → denoise → upscale → adaptive threshold
-- **Table OCR v0** — детекция сетки линий на сканах, OCR по ячейкам; fallback «полосы строк» для Word-экспортов без горизонтальных линий
-- **Confidence scoring** — пословная уверенность Tesseract (`OcrPageResult`, `OcrWord`)
-- **OCR benchmark** — сравнение raw vs preprocess на странице, метрики CER
+- **Tesseract** (приоритет) + **EasyOCR** (fallback, опционально; при сбое EasyOCR — снова Tesseract)
+- **Кэш OCR** — `data/ocr_cache/`
+- **Препроцессинг v2** (OpenCV, `pip install -e ".[cv]"`)
+- **Table OCR v0** — сетка / полосы строк
+- **Confidence scoring**, **OCR benchmark**, демо **MarkCorrector** (`demo-ocr-marks`)
 
-### Нормализация и семейства документов
+### Нормализация и семейства
 
-- **Нормализация OCR-марок** — латиница → кириллица (`KCBur(A)` → `КСБнг(А)`), подсказка по `cable_marks`
-- **Семейства документов (YAML)** — `periodic_letter_v1`, `lan_letter_v1` с детекцией по маркерам типа документа и таблицы
-- **Специализированные экстракторы** — письма с таблицей периодических испытаний, гарантийные письма (LAN), направления в ИЛ, таблицы серийных марок
-- **Вид испытаний** — автоопределение из письма/заявки (вкладка «КП»)
+- OCR-марки: латиница → кириллица, fuzzy snap по `cable_marks`
+- YAML-семейства: `periodic_letter_v1`, `lan_letter_v1`
+- Специализированные экстракторы: периодические письма, LAN, направления в ИЛ, серийные марки
+- Вид испытаний — автоопределение (вкладка «КП»)
 
-### Обучение и оценка (Фаза 1)
+### Обучение, prod-данные, ассистент
 
-- **training_documents** — регистрация PDF/DOCX, inbox → registered
-- **training_labels** — эталонная разметка (marks, organizations, requirements, ocr_page, full_json)
-- **eval-extraction** — сравнение извлечённых марок с ground truth, recall micro/macro
-- **training_corrections** — синхронизация правок оператора из `data/training/corrections/*.jsonl`
-- **RAG-корпус** — индексация ТУ/ГОСТ/ПМИ/протоколов в `rag_documents` (без embeddings — задел Фазы 4)
-- **document_families** — YAML-семейства в БД
-
-### Ассистент (спринт B)
-
-- `MarkCorrector` + fuzzy snap по `cable_marks` + `BrandKnowledgeBase`
-- Вкладка «Заявка»: колонка **💡**, кнопки **Принять/Отклонить**, диалог **Ассистент**
-- Журнал решений → `data/training/corrections/assistant_*.jsonl` + `assistant_sessions`
-- Подсказки испытаний в панели марки; LLM — позже, opt-in
+- training_documents / labels / eval-extraction / corrections / RAG registry
+- **export/import-prod-data**, **prepare-prod-db** для переноса на рабочий ПК
+- **MarkCorrector** + fuzzy + BrandKnowledgeBase; LLM **opt-in** (Ollama, `assistant-llm-*`)
+- Снимки парсинга и вкладка **«Сравнение»**
 
 ### Тестирование
 
-- **pytest** — **116** тестов: валидатор, CLI, марки (периодические письма, LAN, серийные кабели, направления), OCR, организации, training repo, eval extraction, table OCR, preprocess, GUI smoke
+- **pytest** — **~205** тестов (экстракция, OCR, GUI smoke/splash, программы, нормы, KP styles, protocol_meta, prod data, …)
 
 ---
 
 ## Быстрый старт
 
-**На рабочий ПК (рекомендуется):** см. **[INSTALL.md](INSTALL.md)** — один скрипт `scripts/install.ps1`.
+**Рабочий ПК (рекомендуется):** [INSTALL.md](INSTALL.md) → `scripts/install.ps1`.  
+**Обновление без сноса БД:** [docs/UPDATE.md](docs/UPDATE.md) → `scripts/update.ps1`.
 
 **Разработка:**
 
@@ -102,9 +96,9 @@ request-processor migrate-db
 request-processor gui
 ```
 
-Запуск: `start_gui.bat` или ярлык на рабочем столе.
+Запуск: `start_gui.bat`, `start_gui_debug.bat` или ярлык **Lab_request**.
 
-Для dev-тестов OCR-fallback (тяжёлый torch, **не default**):
+OCR-fallback с EasyOCR (тяжёлый torch, **не default**):
 
 ```powershell
 pip install -e ".[dev,ocr,cv]"
@@ -118,38 +112,33 @@ pip install -e ".[dev,ocr,cv]"
 |--------|-----------|------------|
 | *(базовые)* | `pip install -e .` | pydantic, click, openpyxl, pdfplumber, python-docx, pymupdf, pytesseract, Pillow, PyYAML |
 | `dev` | `pip install -e ".[dev]"` | pytest, ruff, mypy |
-| `ocr` | `pip install -e ".[ocr]"` | EasyOCR (fallback без Tesseract) |
-| `cv` | `pip install -e ".[cv]"` | opencv-python-headless — препроцессинг сканов (Фаза 2) |
+| `ocr` | `pip install -e ".[ocr]"` | EasyOCR (fallback) |
+| `cv` | `pip install -e ".[cv]"` | opencv — препроцессинг сканов |
 | `nlp` | `pip install -e ".[nlp]"` | torch, transformers — NER (опционально) |
 
-**Tesseract OCR** (рекомендуется для продакшена):
-
-1. Установить [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) (Windows: `C:\Program Files\Tesseract-OCR\tesseract.exe`)
-2. Языки: `rus`, `eng`
-3. Проект ищет бинарник автоматически; при отсутствии — fallback на EasyOCR (если установлен)
-
-**PyMuPDF** рендерит страницы PDF в изображения (без poppler).
+**Tesseract** (рекомендуется для PDF-сканов): [UB-Mannheim build](https://github.com/UB-Mannheim/tesseract/wiki), языки `rus` + `eng`.  
+Для **Word .docx** OCR обычно не нужен. **PyMuPDF** рендерит страницы PDF (без poppler).
 
 ---
 
 ## Рабочий цикл
 
 ```
-Заявка (PDF/DOCX)
-    → извлечение (текст / OCR / таблицы)
-    → валидация (P0–P2)
-    → подтверждение оператором (GUI)
-    → расчёт по маркам
-    → КП (Word) → заказ в БД
-    → заявка на испытания (Word)
+Заявка (PDF/DOCX/текст)
+    → извлечение (текст / OCR / таблицы / семейства)
+    → валидация (P0–P2) + подтверждение оператором
+    → расчёт (прайс + mappings + aliases ± программа)
+    → КП (Word, стиль) → заказ в БД
+    → заявка / пакет / protocol_meta JSON
 ```
 
-1. **Заявка** — загрузить документ → извлечь марки и организации → проверить и подтвердить (вкладка «1. Заявка»)
-2. **Расчёт** — выбрать марку, испытания (вручную или «Испытания из заявки»), посчитать
-3. **КП** — сформировать Word → **заказ сохраняется автоматически**
-4. **Заказы** — сформировать заявку на испытания, открыть/распечатать КП и заявку
+1. **Заявки** — загрузить документ → марки и организации → проверить → подтвердить  
+2. **Расчёты** — марка, испытания (picker / «из заявки» / из программы), итог  
+3. **КП** — заказчик, вид испытаний, стиль, генерация Word  
+4. **Заказы** — заявка на испытания, файлы, protocol_meta  
+5. **Программы / нормы** — справочный контур для ПМИ и ТУ  
 
-Правки оператора при подтверждении экспортируются в `data/training/corrections/*.jsonl` для дообучения пайплайна.
+Правки оператора → `data/training/corrections/*.jsonl`.
 
 ---
 
@@ -157,81 +146,43 @@ pip install -e ".[dev,ocr,cv]"
 
 ```
 src/request_processor/
-├── __init__.py              # версия пакета
-├── config.py                # PROJECT_ROOT, пути data/, training/, ocr_cache/
-├── cli.py                   # Click CLI (30+ команд)
-├── models.py                # Pydantic-модели (PdfExtractionResult, ValidationReport, …)
-│
-├── extraction/              # Извлечение из документов
-│   ├── pdf_extractor.py     # PDF/DOCX, OCR, find_cable_marks, кэш
-│   ├── periodic_letter_extractor.py   # Таблица периодических испытаний
-│   ├── letter_extractor.py            # Деловые письма
-│   ├── direction_table_extractor.py   # Направления в ИЛ
-│   ├── organization_extractor.py
-│   ├── test_type_extractor.py         # Вид испытаний
-│   ├── ocr_mark_normalizer.py         # Латиница → кириллица
-│   ├── ocr_text_normalizer.py
-│   ├── families/
-│   │   └── registry.py      # YAML-семейства, match_score
-│   └── ocr/                 # Фаза 2
-│       ├── preprocess.py    # OpenCV pipeline v2
-│       ├── confidence.py    # OcrPageResult, OcrWord
-│       ├── table.py         # Table OCR v0
-│       └── benchmark.py     # raw vs preprocess, CER
-│
-├── parsing/                 # Разбор марки кабеля (бренд, жилы, сечение, ТУ)
-│   └── cable_mark_parser.py
-│
-├── persistence/
-│   ├── sqlite_repo.py       # Операционная БД (заказы, расчёты, марки, …)
-│   └── training_repo.py     # Обучение: documents, labels, RAG, corrections
-│
-├── generation/              # Word-документы
-│   ├── kp_generator.py        # Коммерческое предложение
-│   └── application_generator.py  # Заявка на испытания
-│
-├── calculation/
-│   ├── cost_calculator.py
-│   ├── test_rules.py
-│   └── climatic_tests.py
-│
-├── mapping/
-│   └── requirement_mapper.py  # test_mappings → коды испытаний
-│
-├── validation/
-│   ├── extraction_validator.py  # Human-in-the-loop, P0–P2
-│   └── eval_extraction.py       # Сравнение с ground truth
-│
-├── nlp/                     # NER (опционально)
-│   └── nlp_extractor.py
-│
-├── assistant/               # Задел ИИ-ассистента
-│   ├── mark_corrector.py
-│   ├── brand_knowledge.py
-│   └── models.py
-│
+├── __init__.py, config.py, cli.py, models.py, logging_setup.py
+├── extraction/           # PDF/DOCX, OCR, семьи, организации, марки
+│   ├── pdf_extractor.py, periodic_letter_extractor.py, letter_extractor.py
+│   ├── direction_table_extractor.py, organization_extractor.py
+│   ├── ocr_mark_normalizer.py, ocr_text_normalizer.py, client_profiles.py
+│   ├── families/registry.py
+│   └── ocr/              # preprocess, table, confidence, benchmark
+├── parsing/              # разбор марки кабеля
+├── persistence/          # sqlite_repo (операционка), training_repo
+├── generation/           # КП, заявка, пакет, протокол-макет, program_importer,
+│                         # norm_text_import, protocol_meta_export, lab_profile
+├── calculation/          # cost_calculator, test_rules, climatic_tests
+├── mapping/              # requirement_mapper, program_price_matcher
+├── validation/           # extraction_validator, eval_extraction
+├── knowledge/            # synonyms и связанное
+├── parse_compare/        # снимки парсинга
+├── assistant/            # MarkCorrector, fuzzy, LLM provider, demo_marks
+├── nlp/                  # NER (опционально)
+├── training/             # prod_data export/import helpers
 └── ui/
-    └── gui.py               # tkinter, 9 вкладок
+    ├── gui.py            # entry point
+    ├── bootstrap.py      # splash → app → mainloop
+    ├── app.py, state.py, theme.py
+    ├── shell/            # app_shell, menubar
+    ├── tabs/             # pdf, calc, kp, orders, marks, orgs, programs, …
+    └── widgets/          # sidebar, splash, mousewheel, clipboard, components
 
-data/
-├── app.db                   # SQLite (операционная + training)
-├── families/                # YAML-семейства документов
-├── templates/               # Шаблоны Word
-├── extracted/               # JSON результатов extract-pdf
-├── generated/               # Сгенерированные КП и заявки
-├── ocr_cache/               # Кэш распознанного текста
-└── training/                # Обучающий контур (см. ниже)
-
-tests/                       # 116 pytest-тестов
-scripts/                     # PowerShell/Python утилиты
-docs/                        # История итераций
+data/                     # БД, шаблоны, кэш, training, generated (см. ниже)
+tests/                    # ~205 pytest
+scripts/                  # install, update, release zip, training helpers
+docs/                     # паспорт, UPDATE, S4/S5, UI, protocol bridge
 ```
 
 Точки входа после `pip install -e .`:
 
-- `request-processor` — CLI
-- `request-processor-gui` — GUI
-- `python -m request_processor.ui.gui` — GUI без entry point
+- `request-processor` — CLI  
+- `request-processor-gui` / `python -m request_processor.ui.gui` — GUI  
 
 ---
 
@@ -239,207 +190,144 @@ docs/                        # История итераций
 
 | Путь | Назначение |
 |------|------------|
-| `data/app.db` | Основная SQLite-база |
-| `data/templates/zayavka_ispytaniy.docx` | Шаблон заявки на испытания |
-| `data/templates/Форма Протокола испытаний (2025).docx` | Шаблон протокола |
-| `data/extracted/` | JSON после `extract-pdf` / GUI |
-| `data/generated/` | Сгенерированные КП и заявки |
-| `data/ocr_cache/` | Кэш OCR (ключ: hash + dpi + engine + preprocess) |
-| `data/families/*.yaml` | Конфигурации семейств документов (типы: письмо, направление, …) |
-| `data/client_profiles.local.yaml` | Локальные адреса/профили клиентов (**не в git**, см. `docs/client_profiles.example.yaml`) |
+| `data/app.db` | SQLite (операционка + training + программы + нормы) |
+| `data/templates/` | Шаблоны Word (заявка, протокол) |
+| `data/extracted/` | JSON после extract |
+| `data/generated/` | КП, заявки, пакеты |
+| `data/ocr_cache/` | Кэш OCR |
+| `data/families/*.yaml` | Семейства документов |
+| `data/client_profiles.local.yaml` | Локальные профили клиентов (**не в git**) |
+| `data/lab_profile.yaml` | Реквизиты/лого лаборатории (**не в git**, см. example) |
+| `data/logs/` | `app_*`, `scripts_*`, `tests_*` |
+| `data/parse_snapshots/` | Снимки парсинга для сравнения |
+| `data/knowledge/` | Корпус знаний / manufacturer (локально) |
+| `data/training/` | inbox, labels, corrections, rag_corpus, exports |
 
 ### Обучающий контур (`data/training/`)
 
 | Путь | Назначение |
 |------|------------|
-| `documents/inbox/` | Входящие PDF/DOCX для регистрации (`ingest-training-inbox`) |
-| `documents/registered/` | Зарегистрированные документы |
-| `documents/archived/` | Архив |
-| `labels/marks/` | Эталоны марок (JSON) для `eval-extraction` |
-| `labels/organizations/` | Эталоны организаций |
-| `labels/requirements/` | Эталоны требований |
-| `labels/ocr_pages/` | Эталоны OCR постранично |
-| `corrections/` | JSONL правок оператора (`sync-corrections`) |
-| `exports/reports/` | Отчёты eval-extraction, ocr-benchmark |
-| `exports/jsonl/` | Экспорт датасетов |
-| `rag_corpus/tu/` | ТУ |
-| `rag_corpus/gost/` | ГОСТ |
-| `rag_corpus/pmi/` | ПМИ |
-| `rag_corpus/protocols/` | Протоколы |
-| `rag_corpus/internal/` | Внутренние документы |
+| `documents/inbox|registered|archived/` | Регистрация документов |
+| `labels/{marks,organizations,requirements,ocr_pages}/` | Эталоны |
+| `corrections/` | JSONL правок оператора |
+| `exports/reports|jsonl/` | eval, benchmark, датасеты |
+| `rag_corpus/{tu,gost,pmi,protocols,internal}/` | Корпус RAG (без embeddings) |
 
-Инициализация папок: `scripts/init_training_folders.ps1`
+Инициализация: `scripts/init_training_folders.ps1`.
 
 ---
 
 ## База данных
 
-`request-processor migrate-db` создаёт и обновляет схему.
+`request-processor migrate-db` создаёт и обновляет схему **без wipe**.
 
 ### Операционные таблицы
 
 | Таблица | Назначение |
 |---------|------------|
-| `test_items` | Справочник испытаний (прайс) |
-| `calculations` | Сохранённые расчёты |
-| `calculation_lines` | Строки расчёта |
-| `cable_marks` | Накопленные марки кабелей |
-| `organizations` | Справочник организаций (ИНН, адрес, ФСА) |
-| `document_extractions` | Журнал обработанных заявок |
-| `orders` | Заказ (= КП): заказчик, пути к файлам |
-| `order_marks` | Марки заказа + производитель |
-| `test_applications` | Сформированные заявки на испытания |
-| `test_mappings` | Фраза требования → код испытания |
-| `generated_documents` | История КП и заявок |
-| `app_settings` | Настройки (климатические часы) |
+| `test_items` | Прайс испытаний |
+| `calculations` / `calculation_lines` | Расчёты |
+| `cable_marks` | Накопленные марки |
+| `organizations` | Организации (ИНН, адрес, ФСА, …) |
+| `document_extractions` | Журнал заявок |
+| `orders` / `order_marks` | Заказы (КП) |
+| `test_applications` | Заявки на испытания |
+| `test_mappings` | Фраза → код испытания |
+| `generated_documents` | История файлов |
+| `app_settings` | Настройки (климат, LLM, …) |
 
-### Таблицы обучения и RAG (Фаза 1)
+### Программы и нормы (S4–S5)
 
 | Таблица | Назначение |
 |---------|------------|
-| `training_documents` | Зарегистрированные PDF/DOCX, hash, label_status |
-| `training_labels` | Эталонная разметка (payload JSON) |
-| `document_families` | Семейства из YAML |
-| `ocr_runs` | Журнал прогонов OCR (движок, dpi, confidence) |
+| `test_programs` / `test_program_items` | ПМИ/ПИ и позиции |
+| `norm_documents` | Нормативные документы |
+| `requirements` / `requirement_test_links` | Пункты требований |
+| `test_aliases` | Синонимы названий → код/канон |
+
+### Обучение и RAG
+
+| Таблица | Назначение |
+|---------|------------|
+| `training_documents`, `training_labels` | Документы и эталоны |
+| `document_families` | YAML-семейства в БД |
+| `ocr_runs` | Журнал OCR |
 | `training_corrections` | Правки оператора |
-| `rag_documents` | Файлы корпуса (ТУ, ГОСТ, …) |
-| `rag_chunks` | Чанки для RAG (embedding_blob — задел) |
-| `assistant_sessions` | Сессии ассистента (задел) |
+| `rag_documents` / `rag_chunks` | Корпус (embeddings — задел) |
+| `assistant_sessions` | Сессии ассистента |
 
 ---
 
 ## Извлечение данных
 
-Единая точка входа: `extract_from_document(path)` в `pdf_extractor.py`.
+Единая точка: `extract_from_document(path)` в `extraction/pdf_extractor.py`.
 
-### Поддерживаемые форматы
-
-- **PDF** — pdfplumber (текст + таблицы); при скане — PyMuPDF → Tesseract/EasyOCR
-- **DOCX** — python-docx (параграфы + таблицы)
-
-### Поиск марок
-
-1. Классификация семейства (`families/registry.py`, YAML)
-2. Специализированные паттерны (периодические письма, LAN, серийные/гибкие марки, направления, …)
-3. Общий `find_cable_marks()` по тексту и таблицам
-4. OCR-фиксы по семействам документов (периодические, LAN, направления, …)
-5. `ocr_mark_normalizer` — нормализация бренда и латиницы
-6. Дедупликация и `is_plausible_mark()` — отсев мусора
-
-### Организации
-
-`organization_extractor.py` — заказчик, производитель, испытательный центр; ИНН/КПП, адрес, ФСА.
-
-### Валидация (human-in-the-loop)
-
-`extraction_validator.py`:
-
-- Классификация типа документа: `letter`, `direction`, `act`, `unknown`
-- Оценка полей: марки, организации, пустой текст, OCR-штраф
-- `ValidationReport.block_confirm` — блокировка подтверждения при критических проблемах
-- CLI: `--validate` (код выхода 1 при блокировке); GUI: панель на вкладке «1. Заявка»
+1. Классификация семейства (YAML)  
+2. Специализированные паттерны (периодика, LAN, направления, серии)  
+3. Общий `find_cable_marks()`  
+4. OCR-фиксы по семейству + `ocr_mark_normalizer`  
+5. Организации: `organization_extractor.py`  
+6. Валидация: `extraction_validator.py` (`ValidationReport`, `block_confirm`)  
 
 ---
 
-## OCR (Фаза 2)
+## OCR
 
 Модуль `extraction/ocr/`.
 
-### Препроцессинг (`preprocess.py`, версия **v2**)
+- **preprocess v2:** grayscale → deskew → denoise → upscale → adaptive threshold  
+- **table v0:** grid / row_strip  
+- **confidence:** Tesseract `image_to_data`  
+- **benchmark:** raw vs preprocessed, CER  
+- **кэш:** hash + DPI + engine + preprocess tag → `data/ocr_cache/`  
 
+```powershell
+request-processor ocr-benchmark --pdf scan.pdf --page 1
+request-processor demo-ocr-marks --pdf scan.pdf
 ```
-grayscale → deskew (до ±5°) → denoise → upscale (min 1500px, target 2000px) → adaptive threshold
-```
-
-Требует `opencv-python-headless` (`pip install -e ".[cv]"`). Без OpenCV OCR работает на сыром изображении.
-
-### Table OCR (`table.py`, версия **v0**)
-
-- **grid** — детекция H/V линий OpenCV, OCR ячеек (Tesseract PSM 7)
-- **row_strip** — fallback: полосы по проекции текста (марки в колонке 1)
-- Результат: `TableOcrResult` (rows, text, cell_count, mode)
-
-### Confidence (`confidence.py`)
-
-- `ocr_image_with_data()` — Tesseract `image_to_data` → `OcrPageResult`
-- `mean_word_confidence` — средняя уверенность по словам
-
-### Benchmark (`benchmark.py`)
-
-- Сравнение **raw** vs **preprocessed** на одной странице
-- Метрики: `mean_confidence`, `text_chars`, CER (если есть ground truth)
-- CLI: `ocr-benchmark --pdf scan.pdf --page 1`
-
-### Кэш
-
-Ключ кэша: SHA256 файла + DPI + engine + тег preprocess (`v2` или `none`).  
-Путь: `data/ocr_cache/<stem>_<hash>_dpi<DPI>_<engine>[_pre<v2>].txt`
 
 ---
 
-## Обучение и оценка качества (Фаза 1)
-
-### Регистрация документов
+## Обучение и оценка
 
 ```powershell
-# Один файл
 request-processor ingest-training-doc --file "path/to/letter.pdf" --family periodic_letter_v1
-
-# Пакет из inbox
 request-processor ingest-training-inbox
-
-# Семена: YAML → document_families + эталоны из data/extracted
 request-processor seed-training
-```
-
-### Разметка и оценка
-
-```powershell
-# Импорт эталона
-request-processor import-label --file data/training/labels/marks/example_letter.json
-
-# Сравнение с ground truth
+request-processor import-label --file data/training/labels/marks/example.json
 request-processor eval-extraction
-# → data/training/exports/reports/eval_marks_<дата>.json
-# Метрики: micro_recall, macro_recall, per-file TP/FP/FN
-```
-
-### Правки оператора
-
-При подтверждении заявки в GUI правки пишутся в `data/training/corrections/*.jsonl`.  
-Синхронизация в БД:
-
-```powershell
 request-processor sync-corrections
-```
-
-### RAG-корпус (без embeddings)
-
-```powershell
 request-processor index-rag --folder data/training/rag_corpus/tu --kind tu
-request-processor list-rag
 ```
 
 ---
 
-## Семейства документов (YAML)
-
-Файлы в `data/families/`, загрузка через `families/registry.py`.
+## Семейства документов
 
 | ID | Файл | Тип | Описание |
 |----|------|-----|----------|
-| `periodic_letter_v1` | `periodic_table_v1.yaml` | `letter_periodic` | Письмо производителя — таблица периодических испытаний |
-| `lan_letter_v1` | `lan_letter_v1.yaml` | `letter_list` | Гарантийное письмо / список LAN-марок |
+| `periodic_letter_v1` | `periodic_table_v1.yaml` | `letter_periodic` | Таблица периодических испытаний |
+| `lan_letter_v1` | `lan_letter_v1.yaml` | `letter_list` | Гарантийное / LAN-список |
 
-Каждое семейство задаёт:
+Поля: `sender_patterns`, `detection`, `mark_patterns`, `ocr_phrase_fixes`, `row_sort`, `confidence_threshold`.
 
-- `sender_patterns` — паттерны отправителя
-- `detection.markers` / `table_hints` — детекция по тексту
-- `mark_patterns` — regex марок с kind
-- `ocr_phrase_fixes` — замены OCR-ошибок по семейству
-- `row_sort` — приоритет строк таблицы (периодические)
+---
 
-`match_score(text)` → 0..1; `is_confident_match()` — порог `confidence_threshold`.
+## Программы, нормы, КП, протоколы
+
+| Область | Суть | Документ |
+|---------|------|----------|
+| **S4 Программы** | Импорт DOCX → `test_programs`, match с `test_items` | [docs/TEST_PROGRAMS.md](docs/TEST_PROGRAMS.md) |
+| **S5 Нормы** | raw_text, aliases, seed примеров | [docs/REQUIREMENTS_BASE.md](docs/REQUIREMENTS_BASE.md) |
+| **КП** | стили, lab_profile, лого | `docs/lab_profile.example.yaml` |
+| **Протокол** | `export-protocol-meta` → JSON для внешнего generator | [docs/PROTOCOL_GENERATOR_BRIDGE.md](docs/PROTOCOL_GENERATOR_BRIDGE.md) |
+
+```powershell
+request-processor import-test-program --file "ПМИ.docx"
+request-processor match-program-price --program-id 1
+request-processor import-norm-text --file norms.txt
+request-processor export-protocol-meta --order-id 1
+```
 
 ---
 
@@ -447,19 +335,24 @@ request-processor list-rag
 
 Запуск: `request-processor gui` или `request-processor-gui`.
 
-| Вкладка | Функции |
-|---------|---------|
-| **1. Заявка** | Загрузка PDF/DOCX, OCR, таблица марок (редактирование, ✓/—), организации, валидация, «Подтвердить заявку», экспорт правок |
-| **2. Расчёт** | Марка, выбор испытаний (picker по категориям), климатические часы, «Испытания из заявки», итог |
-| **3. КП** | Заказчик, **вид испытаний** (автозаполнение), выбор расчётов, генерация Word |
-| **4. Заказы** | Список заказов, детали, заявка на испытания, открытие файлов |
-| **5. Марки** | Справочник `cable_marks`, поиск, «→ В расчёт» |
-| **6. Организации** | Справочник, поиск, редактирование |
-| **7. Справочник** | Испытания по категориям, двойной клик → в расчёт |
-| **8. История** | Последние расчёты |
-| **9. Настройки** | Климатические часы; CRUD `test_mappings` |
+При старте — **splash** (прогресс загрузки). Навигация — **левый sidebar** (не горизонтальный ряд из 9 вкладок).
 
-Опции на вкладке «Заявка»: OCR, кэш OCR, сохранение марок/организаций в БД.
+| Раздел | Функции |
+|--------|---------|
+| **Заявки** | PDF/DOCX/текст, OCR, марки, организации, валидация, ассистент, подтверждение |
+| **Расчёты** | Марка, picker испытаний, климат, «из заявки», итог |
+| **КП** | Заказчик, вид испытаний, стиль КП, генерация |
+| **Заказы** | Список, заявка, пакет, файлы, protocol_meta |
+| **Марки** | Справочник, поиск, в расчёт |
+| **Организации** | Справочник, дедуп/подтверждение |
+| **Программы** | Импорт ПМИ, позиции, match с прайсом |
+| **История** | Последние расчёты |
+| **Сравнение** | Снимки парсинга |
+| **Настройки** | Климат, mappings, LLM (opt-in), прочее |
+| **Справочник** | Испытания (меню **Данные**, не в sidebar) |
+
+Меню: **Файл / Вид / Данные / Сервис / Справка**. Логи: Сервис → просмотр / `data/logs/`.  
+UI-архитектура: [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md).
 
 ---
 
@@ -467,11 +360,12 @@ request-processor list-rag
 
 Полный список: `request-processor --help`.
 
-### База и справочники
+### База, prod, справочники
 
 ```powershell
 request-processor init-db
 request-processor migrate-db
+request-processor prepare-prod-db --yes
 request-processor load-data --price data/прайс.xlsx
 request-processor import-tests --file tests.xlsx
 request-processor list-tests
@@ -479,17 +373,21 @@ request-processor add-test-item --code ... --name ... --base-cost ... --category
 request-processor list-cable-marks --search "ВВГ"
 request-processor list-organizations --search "производитель"
 request-processor set-climatic-hours --temp-low 48 --humidity 120
+request-processor export-prod-data --out pack.zip
+request-processor import-prod-data --file pack.zip
 ```
 
 ### Извлечение и валидация
 
 ```powershell
 request-processor extract-pdf --pdf letter.pdf --show-marks
-request-processor extract-pdf --pdf letter.pdf --dry-run          # только JSON
-request-processor extract-pdf --pdf letter.pdf --validate         # отчёт валидатора
+request-processor extract-pdf --pdf letter.pdf --dry-run
+request-processor extract-pdf --pdf letter.pdf --validate
 request-processor extract-pdf --pdf scan.pdf --ocr-dpi 300
-request-processor extract-pdf --pdf scan.pdf --no-ocr-cache
-request-processor process --input letter.pdf                      # упрощённый extract
+request-processor process --input letter.pdf
+request-processor save-parse-snapshot --file data/extracted/x.json
+request-processor list-parse-snapshots
+request-processor compare-parse-snapshots --a ID1 --b ID2
 ```
 
 ### Расчёт и документы
@@ -498,42 +396,39 @@ request-processor process --input letter.pdf                      # упрощё
 request-processor calculate --mark "ВВГнг(А) 3х2,5" --tests "temp_low,humidity" --hour temp_low=48
 request-processor history
 request-processor suggest-tests --requirements "солнечного излучения"
-request-processor suggest-tests --mark "ВВГнг"
 request-processor generate-kp --customer "ООО …" --calc-ids "1,2,3"
 request-processor generate-application --order-id 1
+request-processor export-protocol-meta --order-id 1
 request-processor list-orders
 request-processor list-generated-documents --order-id 1
-request-processor list-applications
 ```
 
-### Маппинг требований
+### Маппинг, алиасы, программы, нормы
 
 ```powershell
 request-processor list-test-mappings
 request-processor add-test-mapping --pattern "солнечн" --test-code solar_radiation
-request-processor update-test-mapping --id 1 --pattern "новая фраза"
-request-processor delete-test-mapping --id 1
+request-processor list-test-aliases
+request-processor add-test-alias --alias "..." --test-code ...
+request-processor import-aliases-yaml --file data/knowledge/...
+request-processor import-test-program --file program.docx
+request-processor list-test-programs
+request-processor show-test-program --id 1
+request-processor match-program-price --program-id 1
+request-processor import-norm-text --file norms.txt
+request-processor list-norm-documents
+request-processor list-requirements
 ```
 
-### Обучение, OCR benchmark, RAG
+### Training, OCR, ассистент, GUI
 
 ```powershell
 request-processor seed-training
-request-processor ingest-training-doc --file doc.pdf --family periodic_letter_v1
-request-processor ingest-training-inbox
-request-processor list-training-docs
-request-processor import-label --file data/training/labels/marks/example_letter.json
 request-processor eval-extraction
-request-processor eval-extraction --no-ocr-cache
-request-processor ocr-benchmark --pdf scan.pdf --page 1 --dpi 200
-request-processor sync-corrections
-request-processor index-rag --folder data/training/rag_corpus/tu --kind tu
-request-processor list-rag
-```
-
-### GUI
-
-```powershell
+request-processor ocr-benchmark --pdf scan.pdf --page 1
+request-processor demo-ocr-marks --pdf scan.pdf
+request-processor assistant-llm-status
+request-processor assistant-llm-test --mark "КСнг(А)"
 request-processor gui
 ```
 
@@ -543,38 +438,19 @@ request-processor gui
 
 ```powershell
 pytest tests/ -q
-pytest tests/test_periodic_letter_marks.py -v
-pytest tests/test_eval_extraction.py -v
+pytest tests/test_program_importer.py tests/test_norm_text_import.py -v
 ```
 
-| Файл | Что проверяет |
-|------|---------------|
-| `test_extraction_validator.py` | Правила P0–P2, ValidationReport |
-| `test_cli_extract_pdf.py` | CLI extract-pdf, --validate, --dry-run |
-| `test_find_cable_marks.py` | Общий поиск марок |
-| `test_periodic_letter_marks.py` | Письма с таблицей периодических испытаний |
-| `test_periodic_letter_address.py` | Адреса производителя в письмах |
-| `test_lan_letter_ocr.py` | LAN-письмо + OCR-кэш |
-| `test_letter_marks_regression.py` | Регрессия марок из OCR-шума |
-| `test_series_cable_marks.py` | Серийные/гибкие марки |
-| `test_direction_marks.py` | Направления в ИЛ: типовые марки |
-| `test_ocr_cache.py` | Кэш OCR |
-| `test_ocr_preprocess.py` | Препроцессинг v2 |
-| `test_table_ocr.py` | Table OCR v0 |
-| `test_ocr_mark_normalizer.py` | Нормализация марок |
-| `test_ocr_text_normalizer.py` | Нормализация текста |
-| `test_training_repo.py` | training_documents, labels, RAG |
-| `test_eval_extraction.py` | eval-extraction |
-| `test_family_registry.py` | YAML-семейства |
-| `test_requirement_mapper.py` | Маппинг требований |
-| `test_test_mappings.py` | Справочник test_mappings |
-| `test_test_type_extractor.py` | Вид испытаний |
-| `test_extract_organizations.py` | Организации |
-| `test_direction_table_extractor.py` | Направления |
-| `test_pdf_extractor_regression.py` | Регрессии pdf_extractor |
-| `test_generated_documents.py` | generated_documents |
-| `test_assistant_mark_corrector.py` | MarkCorrector |
-| `test_gui_smoke.py` | Импорт и создание GUI |
+| Группа | Примеры файлов |
+|--------|----------------|
+| Извлечение / марки | `test_find_cable_marks`, `test_periodic_letter_*`, `test_lan_letter_ocr`, `test_direction_*`, `test_series_cable_marks` |
+| OCR | `test_ocr_*`, `test_table_ocr` |
+| Валидация / eval | `test_extraction_validator`, `test_eval_extraction` |
+| GUI | `test_gui_smoke`, `test_splash`, `test_window_fit`, `test_mousewheel` |
+| S4 / S5 | `test_program_importer`, `test_program_price_match`, `test_norm_*` |
+| Документы | `test_generated_documents`, `test_document_pack`, `test_kp_styles`, `test_protocol_meta_export` |
+| Ассистент | `test_assistant_*`, `test_demo_ocr_marks` |
+| Prod / DB | `test_prepare_prod_db`, `test_prod_data`, `test_delete_entities` |
 
 Линтер: `ruff check src tests`  
 Типы: `mypy src/request_processor` (strict)
@@ -586,47 +462,63 @@ pytest tests/test_eval_extraction.py -v
 | Скрипт | Назначение |
 |--------|------------|
 | `start_gui.bat` | Запуск GUI |
-| `start_gui_debug.bat` | GUI с логом в `data/gui_launch.log` |
-| `scripts/install.ps1` | Установка на ПК (venv, deps, БД, ярлык) |
-| `scripts/build_release_zip.ps1` | Zip-релиз для другого компьютера |
-| `scripts/create_desktop_shortcut.ps1` | Ярлык на рабочем столе |
-| `scripts/init_training_folders.ps1` | Создание структуры `data/training/` |
-| `scripts/batch_extract_inbox.ps1` | Пакетное извлечение из inbox |
+| `start_gui_debug.bat` | GUI + лог `data/gui_launch.log` |
+| `scripts/install.ps1` | Установка (venv, deps, БД, ярлык) |
+| `scripts/update.ps1` | **Обновление in-place** (БД сохраняется) |
+| `scripts/build_release_zip.ps1` | Zip-релиз |
+| `scripts/create_desktop_shortcut.ps1` | Ярлык Lab_request |
+| `scripts/init_training_folders.ps1` | Структура `data/training/` |
+| `scripts/batch_extract_inbox.ps1` | Пакетное извлечение |
+| `scripts/install_ollama.ps1` | Ollama (LLM opt-in) |
+| `scripts/run_protocol_from_json.ps1` | Запуск внешнего protocol_generator |
 | `scripts/cleanup_artifacts.ps1` | Очистка артефактов |
 
-Ярлык на рабочем столе:
-
 ```powershell
-cd D:\My_projects\request_processor
 powershell -ExecutionPolicy Bypass -File scripts\create_desktop_shortcut.ps1
+powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\request_processor_0.9.1_YYYYMMDD.zip"
 ```
 
 ---
 
 ## Дорожная карта
 
-| Фаза | Статус | Содержание |
+| Этап | Статус | Содержание |
 |------|--------|------------|
-| **0** | ✅ | Базовый расчёт, GUI, SQLite, КП |
-| **1** | ✅ | Human-in-the-loop, test_mappings, заказы, заявки |
-| **1 training** | ✅ | training_documents, labels, families YAML, eval-extraction, RAG registry |
-| **2 OCR** | ✅ | preprocess v2, table OCR v0, confidence, benchmark, расширенные марки |
-| **3** | 🔜 | Улучшение recall на реальных сканах, больше семейств |
+| **0–1** | ✅ | Расчёт, GUI, SQLite, КП, заказы, mappings, human-in-the-loop |
+| **1 training** | ✅ | documents, labels, families, eval, RAG registry |
+| **2 OCR** | ✅ | preprocess v2, table OCR, confidence, benchmark |
+| **S1–S3** | ✅ | UX Lab_request, KP styles, protocol_meta bridge |
+| **S2.5** | ✅ | OCR marks demo + feedback |
+| **S4** | ✅ | Программы DOCX + price match |
+| **S5** | ✅ | Нормы raw_text + aliases |
+| **Ops** | ✅ | install / update.ps1, prod-data, passport, FHD |
+| **UI shell** | ✅ | sidebar, splash, menubar (docs: v0.10 redesign) |
+| **3+** | 🔜 | Recall на сканах, больше семейств |
 | **4 RAG** | 🔜 | Embeddings, поиск по ТУ/ГОСТ |
-| **5 Assistant** | 🟡 | MarkCorrector в GUI (детерминированный слой); LLM — позже |
-| **6 Production** | 🟡 | v0.9: installer, пакет документов, текст/речь, DPI 400, torch opt-in |
+| **5 Assistant** | 🟡 | MarkCorrector в GUI; LLM opt-in (Ollama) |
+| **6 Production** | 🟡 | Эксплуатация v0.9.1, polish под боевой ПК |
 
-Подробные отчёты и планы — в Obsidian (`Python/Проект request-processor/`) и `docs/README.md`.
+Карта S1–S5: [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md).  
+Журнал и планы: Obsidian `Python/Проект request-processor/`.
 
 ---
 
 ## Документация
 
-- **GitHub:** https://github.com/shocknik/request_processor
-- **Obsidian:** `Python/Проект request-processor/`
-- **docs/README.md** — хронология итераций (v0.7–v0.8.2)
-- **docs/План_Итерации_2.md** — план фазы 2
-- Ключевые заметки Obsidian: валидация парсинга (22), OCR (31), test_mappings (32), пакеты (33), ИИ-ассистент (34), eval-extraction (35m), OCR Фаза 2 (35b, 35p, 35s)
+| Документ | Назначение |
+|----------|------------|
+| [INSTALL.md](INSTALL.md) | Установка на рабочий ПК |
+| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса |
+| [docs/UPDATE_WORK_PC_2026-07-21.md](docs/UPDATE_WORK_PC_2026-07-21.md) | Заметки конкретного релиза |
+| [docs/44 - Паспорт…](docs/) | Паспорт и экспериментальная эксплуатация |
+| [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md) | UI: splash, sidebar, tabs |
+| [docs/TEST_PROGRAMS.md](docs/TEST_PROGRAMS.md) | Программы испытаний (S4) |
+| [docs/REQUIREMENTS_BASE.md](docs/REQUIREMENTS_BASE.md) | Нормы / aliases (S5) |
+| [docs/PROTOCOL_GENERATOR_BRIDGE.md](docs/PROTOCOL_GENERATOR_BRIDGE.md) | JSON → protocol_generator |
+| [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md) | Карта S1–S5 |
+| [docs/README.md](docs/README.md) | Индекс docs/ |
+| **GitHub** | https://github.com/shocknik/request_processor |
+| **Obsidian** | `Python/Проект request-processor/` (разработка) |
 
 ---
 
