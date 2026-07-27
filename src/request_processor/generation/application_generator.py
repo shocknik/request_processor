@@ -139,7 +139,9 @@ def generate_application_from_order(
 
     if output_path is None:
         customer = details.get("customer_name") or "заказчик"
-        safe = re.sub(r'[<>:"/\\|?*«»]', "_", customer).strip("._ ")[:30] or "заказчик"
+        from .document_pack import safe_filename_part
+
+        safe = safe_filename_part(customer, max_len=30, default="заказчик")
         out_dir = GENERATED_DIR_DEFAULT
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = out_dir / f"Заявка_{safe}_заказ{order_id}_{datetime.now():%Y%m%d_%H%M}.docx"

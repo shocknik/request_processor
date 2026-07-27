@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Literal
 
 from ..models import OrganizationExtract, OrganizationRole
@@ -1077,6 +1078,81 @@ def pick_customer_name(organizations: list[OrganizationExtract]) -> str:
         if org.role == "unknown" and org.name and not _is_non_customer_org(org):
             return org.name
     return ""
+
+
+# Папки пути, которые не бывают именем заказчика (prod path-hint, 27.07)
+_PATH_SKIP_PARTS = re.compile(
+    r"^(?:"
+    r"\d{4}"
+    r"|users?(?:_folder\$)?"
+    r"|user_data"
+    r"|temp|tmp|inbox|downloads?"
+    r"|request_processor"
+    r"|обработка\s+заявок"
+    r"|расчёты\s+для\s+заказчиков"
+    r"|расчеты\s+для\s+заказчиков"
+    r"|документы?"
+    r"|data|generated|extracted"
+    r")$",
+    re.IGNORECASE,
+)
+_PATH_MARK_LIKE = re.compile(
+    r"(?:\d+\s*[xх×]\s*\d)|(?:нг\s*\()|(?:^лпмф)|(?:^ввг)|(?:^кв[вг])",
+    re.IGNORECASE,
+)
+_PATH_ORG_HINT = re.compile(
+    r"(?:ооо|ано|оао|зао|пао|ип\b|llc|ltd|jsc|inc\b)",
+    re.IGNORECASE,
+)
+
+
+def suggest_customer_from_source_path(source_path: str | Path | None) -> str:
+    """
+    Эвристика заказчика из родительских папок пути файла.
+
+    Не коммитит в БД — только подсказка для поля «Заказчик» (HITL).
+    Примеры prod: …\\SUPR\\2026\\….pdf → «SUPR»;
+    …\\АНО … Электросерт\\2026\\ЛПМФм\\….docx → «АНО … Электросерт».
+    """
+    if not source_path:
+        return ""
+    try:
+        parts = list(Path(source_path).resolve().parts)
+    except (OSError, RuntimeError, ValueError):
+        parts = list(Path(str(source_path)).parts)
+    if len(parts) < 2:
+        return ""
+
+    # Без имени файла; от ближайшей папки к корню
+    candidates: list[str] = []
+    for part in reversed(parts[:-1]):
+        name = (part or "").strip().rstrip("\\/")
+        if not name or name in (".", "..") or len(name) < 2:
+            continue
+        if name.endswith(":") or name.startswith("\\\\"):
+            continue
+        if _PATH_SKIP_PARTS.match(name):
+            continue
+        if name.endswith("$"):
+            continue
+        if _PATH_MARK_LIKE.search(name) and not _PATH_ORG_HINT.search(name):
+            continue
+        candidates.append(name)
+
+    if not candidates:
+        return ""
+
+    # Предпочтение: юр. форма / «орган…» / «сертифик…»
+    for name in candidates:
+        if _PATH_ORG_HINT.search(name) or re.search(
+            r"сертифик|завод|кабел", name, re.I
+        ):
+            return name
+    # Короткий латинский код папки (SUPR)
+    for name in candidates:
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,15}", name):
+            return name
+    return candidates[0]
 
 
 def pick_manufacturer_name(organizations: list[OrganizationExtract]) -> str:

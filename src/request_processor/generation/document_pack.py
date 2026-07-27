@@ -23,9 +23,26 @@ from .application_generator import generate_application_from_order
 from .protocol_generator import generate_protocol_draft_from_order
 
 
+def safe_filename_part(
+    text: str,
+    max_len: int = 40,
+    *,
+    default: str = "заказ",
+) -> str:
+    """
+    Безопасный фрагмент имени файла Windows.
+
+    «ООО «СУПР»» → «ООО_СУПР» (не «ООО _СУПР»).
+    """
+    cleaned = re.sub(r'[<>:"/\\|?*«»""„]', "_", text or "")
+    cleaned = re.sub(r"\s*_\s*", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ._")
+    return (cleaned[:max_len] or default).rstrip("._")
+
+
 def _safe_name(text: str, max_len: int = 40) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*«»]', "_", text or "").strip("._ ")
-    return (cleaned[:max_len] or "заказ").rstrip("._")
+    return safe_filename_part(text, max_len=max_len, default="заказ")
 
 
 def build_document_pack(

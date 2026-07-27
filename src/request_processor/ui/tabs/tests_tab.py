@@ -302,6 +302,7 @@ class TestsTabMixin:
                     ),
                     tags=tags,
                 )
+        self._update_picker_category_combo()
         self._refresh_calc_picker()
 
     def _add_test_dialog(self) -> None:

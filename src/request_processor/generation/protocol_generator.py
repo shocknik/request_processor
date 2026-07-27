@@ -111,7 +111,9 @@ def generate_protocol_draft_from_order(
     )
 
     if output_path is None:
-        safe = re.sub(r'[<>:"/\\|?*«»]', "_", customer).strip("._ ")[:30] or "заказчик"
+        from .document_pack import safe_filename_part
+
+        safe = safe_filename_part(customer, max_len=30, default="заказчик")
         out_dir = GENERATED_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = out_dir / (

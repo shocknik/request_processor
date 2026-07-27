@@ -30,15 +30,21 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 # НЕ включайте -IncludeAppDb для обновления боя (иначе соблазн перезаписать БД)
 ```
 
+Актуальный релиз **2026-07-27:** `dist\request_processor_0.9.1_20260727.zip`  
+(calc filter, extract Queue, DOCX perf, prod-hot marks).  
+На work: положить в `W:\inbox\`, затем `scripts\update.ps1 -ZipPath …`.
+
 Скопируйте zip на рабочий ПК (флешка / сеть).
 
 ### На рабочем ПК
 
 1. **Закройте** Lab_request (GUI).
-2. Положите zip туда, **куда у вас есть полный доступ** (не сетевой `inbox` с ACL):
-   - `%TEMP%`, Рабочий стол, или рядом с установкой, например `W:\request_processor_0.9.1\_update.zip`
-   - Если `Test-Path` / обновление пишет **«Отказано в доступе»** — zip лежит в папке без прав чтения (часто `W:\inbox` на NAS). Переложите на локальный путь.
-3. Текущая установка, например: `W:\request_processor_0.9.1` или `D:\apps\request_processor`
+2. Положите zip туда, **куда у вас есть полный доступ**:
+   - **На work (IDM23060):** надёжный вариант — `W:\inbox\request_processor_….zip` (путь, с которого update 23.07 завершился OK).  
+     `D:\inbox\…` на этом ПК может **не** открываться — скрипт стартует, но zip не читается.
+   - Альтернативы: `%TEMP%`, Рабочий стол, или рядом с установкой (`W:\request_processor\_update.zip`).
+   - Если `Test-Path` / обновление пишет **«Отказано в доступе»** — zip в папке без прав; переложите на локальный/`W:\inbox`.
+3. Текущая установка, например: `W:\request_processor` или `D:\apps\request_processor`
 
 ```powershell
 cd W:\request_processor_0.9.1

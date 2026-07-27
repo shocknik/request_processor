@@ -10,6 +10,7 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from typing import Any
 
 from ...calculation.climatic_tests import climatic_settings_fields, is_climatic_code
 from ...calculation.test_rules import (
@@ -698,14 +699,19 @@ class PdfTabMixin:
         """Единственная главная кнопка: extract или confirm в зависимости от state."""
         state = getattr(self, "_request_page_state", RequestPageState.EMPTY)
         _log.info("primary action state=%s", getattr(state, "value", state), extra={"tag": "Заявка"})
-        if state in (
-            RequestPageState.REVIEW_REQUIRED,
-            RequestPageState.READY_TO_CONFIRM,
-        ):
-            self._confirm_extraction()
-            return
-        # EMPTY / FILE / ERROR / CONFIRMED / PROCESSING → extract (PROCESSING disabled)
-        self._run_extract_pdf()
+        try:
+            if state in (
+                RequestPageState.REVIEW_REQUIRED,
+                RequestPageState.READY_TO_CONFIRM,
+            ):
+                self._confirm_extraction()
+                return
+            # EMPTY / FILE / ERROR / CONFIRMED / PROCESSING → extract
+            self._run_extract_pdf()
+        except Exception as exc:
+            _log.exception("primary action failed: %s", exc, extra={"tag": "Заявка"})
+            messagebox.showerror("Заявка", f"Не удалось запустить извлечение:\n{exc}")
+            self.status.set("Ошибка запуска извлечения")
 
     def _on_pdf_path_changed(self) -> None:
         """Реакция на смену пути файла (browse / drop / programmatic)."""
@@ -961,12 +967,20 @@ class PdfTabMixin:
             return "assist"
         return mark.status.value
 
-    def _rebuild_assistant_hints(self) -> None:
-        """Пересчитывает кэш подсказок 💡 для текущего черновика."""
+    def _rebuild_assistant_hints(self, *, force: bool = False) -> None:
+        """
+        Кэш подсказок 💡 для текущего черновика.
+
+        Не вызывать на каждый redraw дерева: fuzzy × N марок × справочник.
+        Пересчёт — после extract (force) или явного действия оператора.
+        """
+        if not force and self._assistant_hints:
+            return
         self._assistant_hints = {}
         if not self._extraction_draft:
             return
         from ...assistant.mark_corrector import get_mark_corrector
+
         corrector = get_mark_corrector(self.db_path)
         ctx = AssistantContext(
             document_text=self._extraction_draft.result.text[:4000]
@@ -974,13 +988,82 @@ class PdfTabMixin:
             else None,
             document_type=self._extraction_draft.result.source_type,
         )
+        marks = [m.mark for m in self._extraction_draft.marks]
+        try:
+            # one pool, no LLM; map by raw mark for index fill
+            suggestions = {
+                s.raw.strip(): s
+                for s in corrector.suggest_many(
+                    marks,
+                    context=ctx,
+                    only_changed=False,
+                    use_llm=False,
+                )
+            }
+        except Exception:  # noqa: BLE001
+            suggestions = {}
         for idx, mark in enumerate(self._extraction_draft.marks):
+            s = suggestions.get((mark.mark or "").strip())
+            if s is not None and s.changed:
+                self._assistant_hints[idx] = s.suggested
+
+    def _schedule_assistant_hints(self) -> None:
+        """Фоновый пересчёт подсказок после появления черновика (не блокирует UI)."""
+        if not self._extraction_draft:
+            return
+        draft_id = id(self._extraction_draft)
+
+        def work() -> None:
             try:
-                suggestion = corrector.suggest(mark.mark, context=ctx)
+                from ...assistant.mark_corrector import get_mark_corrector
+
+                draft = self._extraction_draft
+                if draft is None or id(draft) != draft_id:
+                    return
+                corrector = get_mark_corrector(self.db_path)
+                ctx = AssistantContext(
+                    document_text=draft.result.text[:4000] if draft.result.text else None,
+                    document_type=draft.result.source_type,
+                )
+                marks = [m.mark for m in draft.marks]
+                suggestions = {
+                    s.raw.strip(): s
+                    for s in corrector.suggest_many(
+                        marks,
+                        context=ctx,
+                        only_changed=False,
+                        use_llm=False,
+                    )
+                }
+                hints: dict[int, str] = {}
+                for idx, mark in enumerate(draft.marks):
+                    s = suggestions.get((mark.mark or "").strip())
+                    if s is not None and s.changed:
+                        hints[idx] = s.suggested
+
+                def apply() -> None:
+                    if self._extraction_draft is None or id(self._extraction_draft) != draft_id:
+                        return
+                    self._assistant_hints = hints
+                    # только перерисовать статусы/💡 без повторного fuzzy
+                    self._refresh_marks_tree(rebuild_hints=False)
+                    if hints:
+                        try:
+                            prev = self.status.get()
+                        except Exception:  # noqa: BLE001
+                            prev = ""
+                        base = (prev or "").split(" · ассистент:")[0].rstrip()
+                        self.status.set(
+                            f"{base} · ассистент: {len(hints)} правок"
+                            if base
+                            else f"Ассистент: {len(hints)} правок"
+                        )
+
+                self.after(0, apply)
             except Exception:  # noqa: BLE001
-                continue
-            if suggestion.changed:
-                self._assistant_hints[idx] = suggestion.suggested
+                _log.debug("assistant hints background failed", exc_info=True)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _mark_status_label(self, mark: MarkValidation, *, idx: int = -1) -> str:
         """
@@ -1012,7 +1095,7 @@ class PdfTabMixin:
             cat = "Низкая"
         return f"{pct} · {cat}"
 
-    def _refresh_marks_tree(self) -> None:
+    def _refresh_marks_tree(self, *, rebuild_hints: bool = False) -> None:
         if not hasattr(self, "marks_tree"):
             return
         for item in self.marks_tree.get_children():
@@ -1022,8 +1105,9 @@ class PdfTabMixin:
             self._show_marks_empty(True)
             self._set_mark_action_buttons_enabled(False)
             return
-        # лёгкий rebuild подсказок (детерминированный, быстрый)
-        self._rebuild_assistant_hints()
+        # hints только по явному запросу; иначе — кэш (не fuzzy на каждый redraw)
+        if rebuild_hints:
+            self._rebuild_assistant_hints(force=True)
         marks = self._extraction_draft.marks
         self._show_marks_empty(len(marks) == 0)
         for idx, mark in enumerate(marks):
@@ -1241,7 +1325,9 @@ class PdfTabMixin:
     def _show_extraction_draft(self, draft: ExtractionDraft) -> None:
         self._extraction_draft = draft
         self._extraction_confirmed = False
-        self._refresh_marks_tree()
+        # новый черновик — сброс кэша 💡 (пересчёт фоном после extract)
+        self._assistant_hints = {}
+        self._refresh_marks_tree(rebuild_hints=False)
         self._fill_draft_org_fields(draft)
         self._apply_test_type_from_document(draft.result.text)
         self._update_validation_warnings(draft.report)
@@ -2678,78 +2764,68 @@ class PdfTabMixin:
         source_path: Path,
         json_stem: str,
         confirm_only: bool,
+        draft: ExtractionDraft | None = None,
     ) -> None:
-        """Общая сборка черновика после extract (файл или текст)."""
-        report = validate_extraction(result)
+        """Показать черновик на main thread (prepare — в worker / здесь)."""
+        from ..extract_job import prepare_extraction_draft
+
+        if draft is None:
+            draft = prepare_extraction_draft(
+                result,
+                source_path=source_path,
+                json_stem=json_stem,
+            )
         _log.info(
             "extract done marks=%s orgs=%s text=%s engine=%s conf=%.2f",
             len(result.cable_marks),
             len(result.organizations),
             len(result.text),
             result.ocr_engine,
-            report.overall_confidence,
+            draft.report.overall_confidence,
         )
-        out_dir = Path("data/extracted")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        safe_stem = re.sub(r'[<>:"/\\|?*]', "_", json_stem)[:80] or "extract"
-        out_file = out_dir / f"{safe_stem}.json"
-        out_file.write_text(
-            result.model_dump_json(indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        initial_marks = [m.model_copy(deep=True) for m in report.marks]
-        draft = ExtractionDraft(
-            result=result,
-            report=report,
-            source_path=source_path,
-            json_path=out_file,
-            marks=initial_marks,
-            original_marks=[m.model_copy(deep=True) for m in initial_marks],
-            original_customer=result.customer_name,
-            original_manufacturer=result.manufacturer_name or "",
-        )
+        self._apply_extraction_draft_ui(draft, confirm_only=confirm_only)
 
-        def update_ui() -> None:
-            self._show_extraction_draft(draft)
-            if not confirm_only:
-                self.save_marks_var.set(True)
-                self.save_orgs_var.set(True)
-                confirmed = self._build_confirmed_result()
-                self._persist_extraction(
-                    confirmed,
-                    mark_validations=self._extraction_draft.marks if self._extraction_draft else None,
-                )
-                self._extraction_confirmed = True
-                self._extraction_draft.result = confirmed
-                self._load_cable_marks()
-                self._load_organizations()
-                if confirmed.customer_name:
-                    self.kp_customer_var.set(confirmed.customer_name)
-                self._update_validation_status_bar(
-                    state="confirmed",
-                    file_name=source_path.name,
-                    result=confirmed,
-                    report=draft.report,
-                )
-                self.status.set(
-                    f"Заявка сохранена · марок: {len(confirmed.cable_marks)} · {out_file.name}"
-                )
-            else:
-                n_suggest = 0
-                for m in draft.marks:
-                    try:
-                        from ...assistant.mark_corrector import suggest_mark_correction, get_mark_corrector
-                        if suggest_mark_correction(m.mark, db_path=self.db_path).changed:
-                            n_suggest += 1
-                    except Exception:  # noqa: BLE001
-                        pass
-                hint = f" · ассистент: {n_suggest} правок" if n_suggest else ""
-                self.status.set(
-                    f"Черновик · марок: {sum(1 for m in draft.marks if m.accepted)}{hint} · "
-                    f"проверьте и подтвердите"
-                )
-
-        self.after(0, update_ui)
+    def _apply_extraction_draft_ui(
+        self,
+        draft: ExtractionDraft,
+        *,
+        confirm_only: bool,
+    ) -> None:
+        """Только main thread: Treeview/labels + optional auto-save."""
+        source_path = draft.source_path
+        out_name = draft.json_path.name if draft.json_path else ""
+        self._show_extraction_draft(draft)
+        if not confirm_only:
+            self.save_marks_var.set(True)
+            self.save_orgs_var.set(True)
+            confirmed = self._build_confirmed_result()
+            self._persist_extraction(
+                confirmed,
+                mark_validations=self._extraction_draft.marks if self._extraction_draft else None,
+            )
+            self._extraction_confirmed = True
+            self._extraction_draft.result = confirmed
+            self._load_cable_marks()
+            self._load_organizations()
+            if confirmed.customer_name:
+                self.kp_customer_var.set(confirmed.customer_name)
+            self._update_validation_status_bar(
+                state="confirmed",
+                file_name=Path(source_path).name,
+                result=confirmed,
+                report=draft.report,
+            )
+            self.status.set(
+                f"Заявка сохранена · марок: {len(confirmed.cable_marks)}"
+                + (f" · {out_name}" if out_name else "")
+            )
+        else:
+            self.status.set(
+                f"Черновик · марок: {sum(1 for m in draft.marks if m.accepted)} · "
+                f"проверьте и подтвердите"
+            )
+        # 💡 после показа (отдельный job, не держит progress extract)
+        self._schedule_assistant_hints()
 
     def _run_extract_free_text(self) -> None:
         """Вход: текст из речи заказчика / письмо / запрос по ТУ (без файла)."""
@@ -2804,30 +2880,122 @@ class PdfTabMixin:
         ttk.Button(btns, text="Разобрать", style="Accent.TButton", command=run_parse).pack(side="left")
         ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
 
-    def _open_extract_progress_dialog(self, title: str) -> tuple[tk.Toplevel, tk.StringVar, ttk.Progressbar]:
-        """Модальное окно прогресса парсинга (обновляется из worker через after)."""
+    def _open_extract_progress_dialog(
+        self,
+        *,
+        file_name: str,
+        cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        """
+        Progress UI: этап + elapsed + bar + Отмена.
+        Без grab_set / wait_window / вложенного mainloop.
+        """
         dlg = tk.Toplevel(self)
-        dlg.title(title)
+        dlg.title("Обработка заявки")
         dlg.transient(self)
         dlg.resizable(False, False)
         dlg.configure(bg=COLORS["bg"])
-        dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # нельзя закрыть крестиком
-        ttk.Label(dlg, text="Извлечение заявки…", font=("Segoe UI Semibold", 11)).pack(
-            anchor="w", padx=16, pady=(14, 4)
+        # крестик = отмена (не убиваем thread)
+        dlg.protocol("WM_DELETE_WINDOW", lambda: cancel_event.set())
+
+        ttk.Label(
+            dlg,
+            text="Обработка заявки",
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", padx=16, pady=(14, 2))
+        ttk.Label(
+            dlg,
+            text=file_name[:70],
+            style="Muted.TLabel",
+        ).pack(anchor="w", padx=16)
+
+        # master=dlg обязателен (Python 3.12+/3.14: нет implicit default root)
+        stage_var = tk.StringVar(master=dlg, value="Подготовка…")
+        ttk.Label(
+            dlg,
+            textvariable=stage_var,
+            style="Muted.TLabel",
+            wraplength=420,
+        ).pack(anchor="w", padx=16, pady=(8, 2))
+
+        detail_var = tk.StringVar(master=dlg, value="")
+        ttk.Label(
+            dlg,
+            textvariable=detail_var,
+            style="Muted.TLabel",
+            wraplength=420,
+        ).pack(anchor="w", padx=16)
+
+        elapsed_var = tk.StringVar(master=dlg, value="Прошло: 0,0 с")
+        ttk.Label(dlg, textvariable=elapsed_var, style="Muted.TLabel").pack(
+            anchor="w", padx=16, pady=(4, 4)
         )
-        msg_var = tk.StringVar(value="Подготовка…")
-        ttk.Label(dlg, textvariable=msg_var, style="Muted.TLabel", wraplength=420).pack(
-            anchor="w", padx=16, pady=(0, 8)
+
+        bar = ttk.Progressbar(dlg, mode="indeterminate", length=420)
+        bar.pack(fill="x", padx=16, pady=(0, 8))
+        bar.start(12)
+
+        steps_var = tk.StringVar(master=dlg, value="")
+        ttk.Label(
+            dlg,
+            textvariable=steps_var,
+            style="Muted.TLabel",
+            justify="left",
+            wraplength=420,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", padx=16, pady=(0, 14))
+        cancel_btn = ttk.Button(
+            btns,
+            text="Отмена",
+            command=lambda: cancel_event.set(),
         )
-        bar = ttk.Progressbar(dlg, mode="determinate", maximum=100, length=420)
-        bar.pack(fill="x", padx=16, pady=(0, 16))
-        bar["value"] = 0
-        fit_window_to_screen(dlg, prefer_w=460, prefer_h=140)
+        cancel_btn.pack(side="right")
+
+        # не блокируем mainloop геометрией
+        try:
+            fit_window_to_screen(dlg, prefer_w=480, prefer_h=220)
+        except Exception:  # noqa: BLE001
+            pass
         dlg.update_idletasks()
-        return dlg, msg_var, bar
+
+        return {
+            "dlg": dlg,
+            "stage_var": stage_var,
+            "detail_var": detail_var,
+            "elapsed_var": elapsed_var,
+            "steps_var": steps_var,
+            "bar": bar,
+            "cancel_btn": cancel_btn,
+            "click_t0": time.perf_counter(),
+            "seen_stages": [],
+        }
 
     def _run_extract_pdf(self) -> None:
-        doc_path = self.pdf_path_var.get().strip()
+        """
+        Extract: main thread только Queue + UI.
+        Worker — run_extract_job без tkinter (см. extract_job.py).
+        """
+        from queue import Empty, Queue
+
+        from ..extract_job import (
+            ExtractJobOptions,
+            GuiExtractEvent,
+            install_thread_exception_hook,
+            log_extract_stage,
+            log_runtime_fingerprint,
+            new_job_id,
+            run_extract_job,
+        )
+
+        install_thread_exception_hook()
+        click_t0 = time.perf_counter()
+        job_id = new_job_id()
+        log_runtime_fingerprint(method=self._run_extract_pdf)
+        log_extract_stage(job_id, click_t0, "gui.extract.click")
+
+        doc_path = (self.pdf_path_var.get() or "").strip()
         if not doc_path:
             messagebox.showwarning(
                 "Заявка",
@@ -2836,107 +3004,301 @@ class PdfTabMixin:
             )
             return
 
-        eng = "torch-CV" if self.ocr_pytorch_var.get() else "OCR"
+        # Все tk.Variable — только main thread
+        log_extract_stage(job_id, click_t0, "gui.options.capture.begin")
         try:
-            dpi_show = int(self.ocr_dpi_var.get())
+            dpi = int(self.ocr_dpi_var.get())
         except (TypeError, ValueError, tk.TclError):
-            dpi_show = SCAN_OCR_DPI
-        self.status.set(f"Извлечение заявки… ({eng}, DPI {dpi_show})")
-        self.render_request_state(RequestPageState.PROCESSING)
-        confirm_only = self.confirm_only_var.get()
-
-        prog_dlg, prog_msg, prog_bar = self._open_extract_progress_dialog(
-            f"Парсинг · {eng} · DPI {dpi_show}"
+            dpi = SCAN_OCR_DPI
+        dpi = max(150, min(dpi, 600))
+        use_ocr_flag = bool(self.ocr_var.get())
+        use_easyocr = bool(self.ocr_pytorch_var.get())
+        confirm_only = bool(self.confirm_only_var.get())
+        ocr_engine = "easyocr" if use_easyocr else "auto"
+        try:
+            resolved = Path(doc_path).resolve()
+        except OSError:
+            messagebox.showerror("Заявка", f"Некорректный путь:\n{doc_path}")
+            return
+        if not resolved.is_file():
+            messagebox.showerror("Заявка", f"Файл не найден:\n{resolved}")
+            return
+        suffix = resolved.suffix.lower()
+        options = ExtractJobOptions(
+            job_id=job_id,
+            path=resolved,
+            use_ocr=use_ocr_flag if suffix == ".pdf" else False,
+            ocr_engine=ocr_engine if suffix == ".pdf" else "auto",
+            ocr_dpi=dpi,
+            confirm_only=confirm_only,
+            click_t0=click_t0,
+        )
+        log_extract_stage(
+            job_id,
+            click_t0,
+            "gui.options.captured",
+            file=resolved.name,
+            use_ocr=options.use_ocr,
+            ocr_engine=options.ocr_engine,
         )
 
-        def on_progress(message: str, *, current: int | None = None, total: int | None = None, stage: str = "") -> None:
-            def ui() -> None:
-                if not prog_dlg.winfo_exists():
-                    return
-                label = message
-                if current is not None and total:
-                    label = f"{message}  ({current}/{total})"
+        log_extract_stage(job_id, click_t0, "gui.state.processing.begin")
+        self.status.set(
+            "Извлечение заявки… (Word, без OCR)"
+            if suffix == ".docx"
+            else f"Извлечение заявки… ({'torch-CV' if use_easyocr else 'OCR'}, DPI {dpi})"
+        )
+        self.render_request_state(RequestPageState.PROCESSING)
+        log_extract_stage(job_id, click_t0, "gui.state.processing.end")
+
+        cancel_event = threading.Event()
+        events: Queue[GuiExtractEvent] = Queue()
+        self._active_extract_job_id = job_id
+        self._extract_cancel_event = cancel_event
+        self._extract_events = events
+        self._extract_worker_started = False
+        self._extract_finished = False
+
+        log_extract_stage(job_id, click_t0, "gui.dialog.open.begin")
+        ui = self._open_extract_progress_dialog(
+            file_name=resolved.name,
+            cancel_event=cancel_event,
+        )
+        log_extract_stage(job_id, click_t0, "gui.dialog.open.end")
+        self._extract_progress_ui = ui
+
+        def _tick_elapsed() -> None:
+            if self._extract_finished or getattr(self, "_active_extract_job_id", None) != job_id:
+                return
+            dlg = ui.get("dlg")
+            if dlg is None or not dlg.winfo_exists():
+                return
+            elapsed = time.perf_counter() - click_t0
+            ui["elapsed_var"].set(f"Прошло: {elapsed:.1f} с".replace(".", ","))
+            # watchdog: worker.entry за 1.5 с
+            if (
+                not self._extract_worker_started
+                and elapsed > 1.5
+                and not getattr(self, "_extract_watchdog_warned", False)
+            ):
+                self._extract_watchdog_warned = True
+                ui["stage_var"].set(
+                    "Фоновая обработка не запустилась. Проверьте журнал и версию кода."
+                )
+                _log.error(
+                    "gui extract watchdog: no worker.entry job=%s elapsed=%.2f",
+                    job_id,
+                    elapsed,
+                    extra={"tag": "ExtractTimeline"},
+                )
+            self.after(200, _tick_elapsed)
+
+        self._extract_watchdog_warned = False
+        self.after(200, _tick_elapsed)
+
+        log_extract_stage(job_id, click_t0, "gui.poll.scheduled")
+        self.after(50, lambda: self._poll_extract_events(job_id))
+
+        log_extract_stage(job_id, click_t0, "gui.thread.create")
+        thread = threading.Thread(
+            target=run_extract_job,
+            args=(options, events, cancel_event),
+            name=f"extract-{job_id}",
+            daemon=True,
+        )
+        log_extract_stage(job_id, click_t0, "gui.thread.start.call")
+        thread.start()
+        log_extract_stage(job_id, click_t0, "gui.thread.start.return")
+        # управление сразу в mainloop — worker не ждёт geometry dialog
+
+    def _poll_extract_events(self, job_id: str) -> None:
+        """Main thread: читать Queue, обновлять progress, показать draft."""
+        from queue import Empty
+
+        from ..extract_job import GuiExtractEvent, log_extract_stage
+
+        if getattr(self, "_active_extract_job_id", None) != job_id:
+            return
+        events = getattr(self, "_extract_events", None)
+        ui = getattr(self, "_extract_progress_ui", None) or {}
+        click_t0 = ui.get("click_t0") or time.perf_counter()
+        finished = False
+
+        if events is not None:
+            try:
+                while True:
+                    ev: GuiExtractEvent = events.get_nowait()
+                    if ev.job_id != job_id:
+                        continue
+                    finished = self._handle_extract_event(ev, ui=ui, click_t0=click_t0) or finished
+            except Empty:
+                pass
+
+        if finished or getattr(self, "_extract_finished", False):
+            return
+        self.after(80, lambda: self._poll_extract_events(job_id))
+
+    def _handle_extract_event(
+        self,
+        ev: Any,
+        *,
+        ui: dict[str, Any],
+        click_t0: float,
+    ) -> bool:
+        """Обработать одно событие extract. True = job finished."""
+        from ..extract_job import log_extract_stage
+
+        job_id = ev.job_id
+        kind = ev.kind
+        dlg = ui.get("dlg")
+        bar = ui.get("bar")
+
+        if kind == "started":
+            self._extract_worker_started = True
+            if ui.get("stage_var") is not None:
+                ui["stage_var"].set(ev.message or "Фоновая обработка запущена")
+            return False
+
+        if kind == "progress":
+            stage_label = {
+                "text": "Чтение документа",
+                "open": "Открытие файла",
+                "ocr": "OCR",
+                "tables": "Чтение таблиц",
+                "marks": "Поиск марок",
+                "orgs": "Поиск организаций",
+                "done": "Готово",
+            }.get(ev.stage, ev.message or ev.stage or "Обработка…")
+            if ui.get("stage_var") is not None:
+                ui["stage_var"].set(stage_label if not ev.message else ev.message)
+            detail = ""
+            if ev.current is not None and ev.total:
+                detail = f"{ev.stage or 'шаг'}: {ev.current} / {ev.total}"
+                if bar is not None:
                     try:
-                        prog_bar["value"] = min(100, max(0, 100.0 * current / total))
+                        bar.stop()
+                        bar.configure(mode="determinate", maximum=max(ev.total, 1))
+                        bar["value"] = ev.current
                     except tk.TclError:
                         pass
-                elif stage == "done":
-                    prog_bar["value"] = 100
-                prog_msg.set(label)
-                self.status.set(label)
-
-            self.after(0, ui)
-
-        def work() -> None:
-            try:
-                resolved = Path(doc_path).resolve()
-                ocr_engine = "easyocr" if self.ocr_pytorch_var.get() else "auto"
+            elif bar is not None:
                 try:
-                    dpi = int(self.ocr_dpi_var.get())
-                except (TypeError, ValueError, tk.TclError):
-                    dpi = SCAN_OCR_DPI
-                dpi = max(150, min(dpi, 600))
-                _log.info(
-                    "extract start file=%s ocr=%s engine=%s dpi=%s",
-                    resolved.name,
-                    self.ocr_var.get(),
-                    ocr_engine,
-                    dpi,
-                )
-                from ...extraction.pdf_extractor import extract_from_document
-                result = extract_from_document(
-                    Path(doc_path),
-                    use_ocr=self.ocr_var.get(),
-                    ocr_engine=ocr_engine,
-                    ocr_dpi=dpi,
-                    progress=on_progress,
-                )
-                result = result.model_copy(update={"source_path": str(resolved)})
+                    if str(bar.cget("mode")) != "indeterminate":
+                        bar.configure(mode="indeterminate")
+                        bar.start(12)
+                except tk.TclError:
+                    pass
+            if ui.get("detail_var") is not None:
+                ui["detail_var"].set(detail)
+            seen: list[str] = ui.setdefault("seen_stages", [])
+            key = ev.stage or ev.message
+            if key and key not in seen:
+                seen.append(key)
+            if ui.get("steps_var") is not None and seen:
+                lines = []
+                for s in seen[-6:]:
+                    mark = "✓" if s != (ev.stage or "") else "●"
+                    lines.append(f"{mark} {s}")
+                ui["steps_var"].set("\n".join(lines))
+            self.status.set(ev.message or stage_label)
+            return False
 
-                def finish_ok() -> None:
-                    if prog_dlg.winfo_exists():
-                        prog_dlg.destroy()
-                    self._present_extraction_result(
-                        result,
-                        source_path=resolved,
-                        json_stem=resolved.stem,
-                        confirm_only=confirm_only,
-                    )
+        if kind == "result":
+            log_extract_stage(job_id, click_t0, "gui.result.received")
+            payload = ev.payload or {}
+            draft = payload.get("draft")
+            result = payload.get("result")
+            confirm_only = bool(payload.get("confirm_only", True))
+            self._close_extract_progress_ui(ui)
+            if draft is not None and result is not None:
+                log_extract_stage(job_id, click_t0, "draft.ui.start")
+                self._apply_extraction_draft_ui(draft, confirm_only=confirm_only)
+                log_extract_stage(job_id, click_t0, "draft.ui.end")
+            elif result is not None:
+                self._present_extraction_result(
+                    result,
+                    source_path=Path(result.source_path),
+                    json_stem=Path(result.source_path).stem,
+                    confirm_only=confirm_only,
+                )
+            log_extract_stage(
+                job_id,
+                click_t0,
+                "gui.extract.total",
+                elapsed=time.perf_counter() - click_t0,
+            )
+            return False
 
-                self.after(0, finish_ok)
-            except Exception as exc:
-                _log.exception("extract failed")
-                err_text = str(exc)
+        if kind == "error":
+            self._close_extract_progress_ui(ui)
+            err_text = ev.message or "Ошибка извлечения"
+            try:
                 wanted_easyocr = bool(self.ocr_pytorch_var.get())
+            except Exception:  # noqa: BLE001
+                wanted_easyocr = False
+            if wanted_easyocr and (
+                "OCR недоступен" in err_text
+                or "easyocr" in err_text.lower()
+                or "torch" in err_text.lower()
+            ):
+                try:
+                    self.ocr_pytorch_var.set(False)
+                    self._on_ocr_engine_toggle()
+                except Exception:  # noqa: BLE001
+                    pass
+                messagebox.showerror(
+                    "Ошибка извлечения",
+                    err_text
+                    + "\n\nГалочка EasyOCR/PyTorch снята. "
+                    "Используйте Tesseract (auto) или файл .docx.",
+                )
+            else:
+                messagebox.showerror("Ошибка извлечения", err_text)
+            self.status.set("Ошибка")
+            self._update_validation_status_bar(state="error")
+            path = (self.pdf_path_var.get() or "").strip()
+            self.render_request_state(
+                RequestPageState.FILE_SELECTED if path else RequestPageState.EMPTY
+            )
+            return False
 
-                def on_error() -> None:
-                    if prog_dlg.winfo_exists():
-                        prog_dlg.destroy()
-                    # EasyOCR/torch на prod часто нет — не оставляем галочку «долбить» повторно
-                    if wanted_easyocr and (
-                        "OCR недоступен" in err_text
-                        or "easyocr" in err_text.lower()
-                        or "torch" in err_text.lower()
-                    ):
-                        try:
-                            self.ocr_pytorch_var.set(False)
-                            self._on_ocr_engine_toggle()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        messagebox.showerror(
-                            "Ошибка извлечения",
-                            err_text
-                            + "\n\nГалочка EasyOCR/PyTorch снята. "
-                            "Используйте Tesseract (auto) или файл .docx.",
-                        )
-                    else:
-                        messagebox.showerror("Ошибка извлечения", err_text)
-                    self.status.set("Ошибка")
-                    self._update_validation_status_bar(state="error")
+        if kind == "cancelled":
+            self._close_extract_progress_ui(ui)
+            self.status.set("Отменено")
+            path = (self.pdf_path_var.get() or "").strip()
+            self.render_request_state(
+                RequestPageState.FILE_SELECTED if path else RequestPageState.EMPTY
+            )
+            log_extract_stage(job_id, click_t0, "gui.extract.cancelled")
+            return False
 
-                self.after(0, on_error)
+        if kind == "finished":
+            self._extract_finished = True
+            # если result/error уже закрыли dialog — ok
+            if dlg is not None and dlg.winfo_exists():
+                # cancelled/error path should have closed; safety
+                pass
+            log_extract_stage(job_id, click_t0, "gui.extract.finished", message=ev.message)
+            return True
 
-        threading.Thread(target=work, daemon=True).start()
+        return False
+
+    def _close_extract_progress_ui(self, ui: dict[str, Any] | None) -> None:
+        if not ui:
+            return
+        dlg = ui.get("dlg")
+        bar = ui.get("bar")
+        try:
+            if bar is not None:
+                bar.stop()
+        except tk.TclError:
+            pass
+        try:
+            if dlg is not None and dlg.winfo_exists():
+                dlg.destroy()
+        except tk.TclError:
+            pass
+        self._extract_progress_ui = None
 
     def _toggle_pdf_opts(self) -> None:
         """Показать/скрыть блок OCR и флагов сохранения (ссылка «Параметры OCR»)."""

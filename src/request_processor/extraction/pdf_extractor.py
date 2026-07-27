@@ -13,15 +13,15 @@ import hashlib
 import logging
 import re
 import shutil
-from typing import Literal
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from ..config import OCR_CACHE_DIR
-from ..parsing.cable_mark_parser import extract_document_from_text, fix_ocr_document_text
-from ..assistant.mark_corrector import suggest_mark_correction
 from ..models import CableMarkMatch, PdfExtractionResult
+from ..parsing.cable_mark_parser import extract_document_from_text, fix_ocr_document_text
 from .ocr_mark_normalizer import normalize_mark_after_ocr
 from .ocr_text_normalizer import normalize_ocr_text
 from .organization_extractor import (
@@ -68,6 +68,20 @@ _LAN_FIRE = r"(?:нг|ur|Hr|hr|ng|Нг)\s*\(\s*A\s*\)"
 _LAN_MARK_PATTERN = re.compile(
     r"(?:\d+\.\s*)?"
     rf"({_LAN_BRAND}\s+(?:SF?/)?UTP\s+Cat\s+5\w\s+ZH\s+{_LAN_FIRE}-HF\s+\d+\s*x\s*\d+(?:\s*x\s*[\d.,]+)?)",
+    re.IGNORECASE,
+)
+
+# Generic LAN без бренда СПЕЦЛАН (prod 27.07 SUPR ТЗ): U/UTP cat 5e 2x2x0.52 PE
+# U/UTP, F/UTP, S/FTP, SF/TP (без бренда СПЕЦЛАН)
+_GENERIC_LAN_SHIELD = r"(?:(?:[USF]/)?/?UTP|S/?FTP|SF/?TP)"
+_GENERIC_LAN_SHEATH = r"(?:PE|PVC|LSZH|ZH|PP|FRHF|FRLS)"
+_GENERIC_LAN_MARK_PATTERN = re.compile(
+    r"("
+    rf"{_GENERIC_LAN_SHIELD}"
+    r"\s+cat\s*\d\w?"
+    r"\s+\d+\s*[xх]\s*\d+(?:\s*[xх]\s*[\d.,]+)?"
+    rf"(?:\s+{_GENERIC_LAN_SHEATH})?"
+    r")",
     re.IGNORECASE,
 )
 
@@ -149,17 +163,21 @@ _VICABFLEX_MARK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Имя + размер: пробел опционален (prod: «марки ЛПМФм10х0,08»)
+# Только в контексте «марки …» — не в глобальном _MARK_PATTERN (иначе FP).
+_NAME_SIZE_CAPTURE = rf"({_NAME_PART}\s*{_SIZE_PART})"
+
 # Контекстный поиск после «марки:» / «марка»
 _AFTER_MARKI_PATTERN = re.compile(
     rf"(?:кабел[ья]\s+)?(?:силовой\s+)?марк[аи]\s*:?\s*"
-    rf"({_NAME_PART}\s+{_SIZE_PART})",
+    rf"{_NAME_SIZE_CAPTURE}",
     re.IGNORECASE,
 )
 
 # Провод/кабель «марки X» (включая OCR «ПровоА», «Nposoa Mapkn»)
 _PRODUCT_MARK_PATTERN = re.compile(
     rf"(?:Прово\w*|Кабел\w*|Mapkn\w*)[^\n]{{0,50}}?марк[аи]\s*:?\s*"
-    rf"({_NAME_PART}\s+{_SIZE_PART})",
+    rf"{_NAME_SIZE_CAPTURE}",
     re.IGNORECASE,
 )
 
@@ -455,21 +473,40 @@ def is_plausible_mark(mark: str) -> bool:
     has_lan_size = re.search(_SIZE_PART_LATIN, mark, re.IGNORECASE)
     has_star_size = re.search(r"\d+\*[\d.,]", mark)
     is_latin_brand = re.match(r"^(?:FLEXICORE|VicabFLEX|H07RN-F)", mark, re.IGNORECASE)
-    if not has_cyr_size and not has_lan_size and not has_star_size and not is_latin_brand:
+    is_generic_lan = bool(
+        re.match(rf"^{_GENERIC_LAN_SHIELD}\b", mark, re.IGNORECASE)
+    )
+    if (
+        not has_cyr_size
+        and not has_lan_size
+        and not has_star_size
+        and not is_latin_brand
+        and not is_generic_lan
+    ):
         return False
     # One brand token per mark (joined OCR lines are not a single mark)
     if mark.upper().count("FLEXICORE") > 1:
         return False
     if mark.upper().count("VICABFLEX") > 1:
         return False
-    name = re.split(r"\s+\d", mark, maxsplit=1)[0]
+    # Generic LAN: «U/UTP cat 5e 2x2…» — name до size, не до «cat 5»
+    if is_generic_lan:
+        name = re.split(r"\s+\d+\s*[xх]", mark, maxsplit=1, flags=re.IGNORECASE)[0]
+    else:
+        name = re.split(r"\s+\d", mark, maxsplit=1)[0]
     if len(name) > 100 or len(name) < 3:
         return False
     return True
 
 
 def _clean_mark(raw: str) -> str:
-    """Убирает хвостовой мусор из кандидата в марку и правит OCR-латиницу."""
+    """
+    Дешёвая детерминированная нормализация кандидата в марку.
+
+    Только strip / regex / локальные OCR-правки. Без SQLite, MarkCorrector,
+    fuzzy и Ollama — иначе O(regex-кандидаты × справочник) на каждый finditer.
+    Ассистент (fuzzy/LLM) — отдельно, после дедупа, в GUI/CLI.
+    """
     mark = raw.strip(" .,;:\n")
     mark = re.sub(
         rf"^(.+?{_SIZE_PART})\s+м\s+\d.*",
@@ -505,8 +542,8 @@ def _clean_mark(raw: str) -> str:
         return mark
     if re.match(r"^КГ[А-ЯЁа-яё]", mark):
         return mark.strip()
-    suggestion = suggest_mark_correction(mark.strip())
-    return suggestion.suggested
+    # Локальные OCR-фиксы без БД (латиница→кириллица, fire-class, spacing)
+    return normalize_mark_after_ocr(mark.strip(), known_brands=None)
 
 
 def _context_snippet(text: str, start: int, end: int, radius: int = 120) -> str:
@@ -740,6 +777,7 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
 
     for pattern in (
         _LAN_MARK_PATTERN,
+        _GENERIC_LAN_MARK_PATTERN,
         _AFTER_MARKI_PATTERN,
         _PRODUCT_MARK_PATTERN,
         _MARK_PATTERN,
@@ -1329,7 +1367,8 @@ def _resolve_cable_marks(
     """
     Марки кабелей: table-first для направлений, иначе regex по тексту.
 
-    Таблица направления приоритетнее плоского текста PDF.
+    Таблица направления приоритетнее плоского текста PDF/Word.
+    Текст перед regex сжимается (Word-шаблоны с merge иначе → секунды CPU).
     """
     if tables:
         from .direction_table_extractor import extract_marks_from_tables
@@ -1338,10 +1377,8 @@ def _resolve_cable_marks(
         if table_marks:
             return table_marks
 
-    search_text = text
-    if tables:
-        search_text = f"{text}\n{_tables_to_text(tables)}".strip()
-    return find_cable_marks(search_text)
+    search_text = build_search_text(text, tables)
+    return find_cable_marks(_compact_text_for_marks(search_text))
 
 
 def _cyrillic_letter_ratio(text: str) -> float:
@@ -1383,8 +1420,9 @@ def _detect_scanned(pdf_path: Path) -> tuple[bool, int]:
 def build_search_text(text: str, tables: list[list[list[str]]] | None = None) -> str:
     """Текст заявки + плоское представление таблиц для поиска org/марок."""
     if not tables:
-        return text
-    return f"{text}\n{_tables_to_text(tables)}".strip()
+        return _dedupe_consecutive_lines(text)
+    joined = f"{text}\n{_tables_to_text(tables)}".strip()
+    return _dedupe_consecutive_lines(joined)
 
 
 def extract_from_pdf(
@@ -1514,38 +1552,119 @@ def extract_from_pdf(
     )
 
 
-def extract_text_from_docx(docx_path: Path | str) -> str:
-    """Извлекает текст из Word-документа (.docx)."""
+def _collapse_horizontal_merge_cells(cells: list[str]) -> list[str]:
+    """Убрать дубли ячеек от горизонтального merge (python-docx повторяет text)."""
+    if not cells:
+        return []
+    out: list[str] = []
+    prev: str | None = None
+    for cell in cells:
+        if prev is not None and cell == prev:
+            continue
+        out.append(cell)
+        prev = cell
+    return out
+
+
+def _dedupe_consecutive_lines(text: str) -> str:
+    """Схлопнуть подряд идущие одинаковые строки (шаблоны Word / merge)."""
+    if not text:
+        return ""
+    out: list[str] = []
+    prev: str | None = None
+    blank_run = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            blank_run += 1
+            if blank_run <= 1:
+                out.append("")
+            prev = ""
+            continue
+        blank_run = 0
+        if stripped == prev:
+            continue
+        out.append(stripped)
+        prev = stripped
+    return "\n".join(out).strip()
+
+
+def _unique_lines_preserve_order(text: str, *, max_chars: int = 60_000) -> str:
+    """Уникальные непустые строки (порядок сохраняется) — для regex по маркам."""
+    if not text:
+        return ""
+    seen: set[str] = set()
+    lines: list[str] = []
+    size = 0
+    for line in text.splitlines():
+        key = line.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if size + len(key) + 1 > max_chars:
+            break
+        lines.append(key)
+        size += len(key) + 1
+    return "\n".join(lines)
+
+
+def _compact_text_for_marks(text: str, *, max_chars: int = 60_000) -> str:
+    """Сжать текст перед find_cable_marks (шаблоны Word иначе → 60k+ и секунды regex)."""
+    compact = _dedupe_consecutive_lines(text)
+    if len(compact) <= max_chars:
+        return compact
+    unique = _unique_lines_preserve_order(compact, max_chars=max_chars)
+    return unique if unique else compact[:max_chars]
+
+
+def load_docx_content(docx_path: Path | str) -> tuple[str, list[list[list[str]]]]:
+    """
+    Один проход по .docx: абзацы + таблицы.
+
+    Горизонтальные merge-ячейки схлопываются (иначе python-docx отдаёт
+    один и тот же текст 7–11 раз → 60k+ символов и долгий regex).
+    """
     from docx import Document
 
     path = Path(docx_path)
     doc = Document(str(path))
-    parts: list[str] = []
+
+    para_parts: list[str] = []
     for paragraph in doc.paragraphs:
-        if paragraph.text.strip():
-            parts.append(paragraph.text.strip())
+        t = paragraph.text.strip()
+        if t:
+            para_parts.append(t)
+    text = _dedupe_consecutive_lines("\n".join(para_parts))
+
+    tables: list[list[list[str]]] = []
     for table in doc.tables:
+        cleaned: list[list[str]] = []
+        prev_row_key: tuple[str, ...] | None = None
         for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if cells:
-                parts.append(" ".join(cells))
-    return "\n".join(parts)
+            raw = [cell.text.strip() for cell in row.cells]
+            collapsed = _collapse_horizontal_merge_cells(raw)
+            if not any(collapsed):
+                continue
+            # подряд одинаковые строки (вертикальный merge / повтор шаблона)
+            row_key = tuple(collapsed)
+            if row_key == prev_row_key:
+                continue
+            prev_row_key = row_key
+            cleaned.append(collapsed)
+        if cleaned:
+            tables.append(cleaned)
+    return text, tables
+
+
+def extract_text_from_docx(docx_path: Path | str) -> str:
+    """Извлекает текст из Word (.docx): абзацы + схлопнутые таблицы."""
+    text, tables = load_docx_content(docx_path)
+    return build_search_text(text, tables)
 
 
 def extract_tables_from_docx(docx_path: Path | str) -> list[list[list[str]]]:
-    """Таблицы Word в том же формате, что pdfplumber — для table-first направлений."""
-    from docx import Document
-
-    path = Path(docx_path)
-    doc = Document(str(path))
-    tables: list[list[list[str]]] = []
-    for table in doc.tables:
-        cleaned = [
-            [cell.text.strip() for cell in row.cells]
-            for row in table.rows
-        ]
-        if any(any(cell for cell in row) for row in cleaned):
-            tables.append(cleaned)
+    """Таблицы Word (merge-ячейки схлопнуты) — для table-first направлений."""
+    _text, tables = load_docx_content(docx_path)
     return tables
 
 
@@ -1559,21 +1678,40 @@ def _build_extraction_result(
     is_scanned: bool = False,
     ocr_used: bool = False,
 ) -> PdfExtractionResult:
-    """Собирает результат: марки + организации из текста заявки."""
-    search_text = build_search_text(text, tables)
-    organizations = finalize_organizations(extract_organizations(search_text), search_text)
+    """Собирает результат: марки + организации из текста заявки (без ассистента)."""
+    t0 = time.perf_counter()
+    search_text = _compact_text_for_marks(build_search_text(text, tables))
+    t_compact = time.perf_counter()
+    cable_marks = _resolve_cable_marks(text, tables or [])
+    t_marks = time.perf_counter()
+    organizations = finalize_organizations(
+        extract_organizations(search_text), search_text
+    )
+    t_orgs = time.perf_counter()
     resolved = source_path if source_path.is_absolute() or source_path.exists() else source_path
     try:
         path_str = str(resolved.resolve())
     except OSError:
         path_str = str(source_path)
+    logger.info(
+        "parse timing file=%s marks=%.3fs orgs=%.3fs compact=%.3fs total=%.3fs "
+        "n_marks=%d n_orgs=%d search_chars=%d",
+        Path(path_str).name,
+        t_marks - t_compact,
+        t_orgs - t_marks,
+        t_compact - t0,
+        t_orgs - t0,
+        len(cable_marks),
+        len(organizations),
+        len(search_text),
+    )
     return PdfExtractionResult(
         source_path=path_str,
         source_type=source_type,
         page_count=page_count,
         text=text,
         tables=tables or [],
-        cable_marks=_resolve_cable_marks(text, tables or []),
+        cable_marks=cable_marks,
         organizations=organizations,
         customer_name=pick_customer_name(organizations),
         manufacturer_name=pick_manufacturer_name(organizations),
@@ -1640,16 +1778,37 @@ def extract_from_document(
             progress=progress,
         )
     if suffix == ".docx":
+        # Word: OCR не нужен. Один проход Document (не два), merge-ячейки схлопнуты.
+        # Ассистент/fuzzy/Ollama сюда не входят — только детерминированный разбор.
+        t_start = time.perf_counter()
         prog("Чтение Word…", current=10, total=100, stage="text")
-        text = extract_text_from_docx(file_path)
-        tables = extract_tables_from_docx(file_path)
-        prog("Поиск марок и организаций…", current=80, total=100, stage="marks")
+        text, tables = load_docx_content(file_path)
+        t_open = time.perf_counter()
+        prog(
+            f"Поиск марок… (текст {len(text)} симв., таблиц {len(tables)})",
+            current=70,
+            total=100,
+            stage="marks",
+        )
         result = _build_extraction_result(
             source_path=file_path,
             source_type="docx",
             text=text,
             tables=tables,
+            page_count=1,
         )
+        t_done = time.perf_counter()
         prog("Готово", current=100, total=100, stage="done")
+        logger.info(
+            "docx extract file=%s open=%.3fs build=%.3fs total=%.3fs "
+            "text_chars=%s tables=%s marks=%s",
+            file_path.name,
+            t_open - t_start,
+            t_done - t_open,
+            t_done - t_start,
+            len(text),
+            len(tables),
+            len(result.cable_marks),
+        )
         return result
     raise ValueError(f"Неподдерживаемый формат: {suffix}. Используйте PDF или .docx")

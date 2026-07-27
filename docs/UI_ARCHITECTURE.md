@@ -10,12 +10,14 @@ ui/
   app.py              # RequestProcessorApp (mixins + tk.Tk)
   state.py            # CalcTestEntry, ExtractionDraft, RequestPageState
   theme.py            # AppStyles + design tokens (#F5F7FA / #1677FF)
+  extract_job.py      # 2026-07-27: worker extract (Queue), no tkinter
   shell/
     app_shell.py      # __init__(progress=…), _build_ui (sidebar + notebook)
     menubar.py        # Файл / Вид / Данные / Сервис / Справка
   tabs/
-    pdf_tab.py        # страница «Заявки» (редизайн)
-    calc_tab.py, kp_tab.py, orders_tab.py, ...
+    pdf_tab.py        # «Заявки»: _run_extract_pdf → extract_job + poll Queue
+    calc_tab.py       # picker: Canvas + Checkbutton, _picker_active_category
+    kp_tab.py, orders_tab.py, ...
   widgets/
     splash.py         # тёмный splash + progress bar + этапы [Старт]
     clipboard.py      # Ctrl+C/V/X, context menus for entries
@@ -23,6 +25,25 @@ ui/
     components.py     # PageHeader, StepIndicator, UploadPanel,
                       # EmptyState, BottomActionBar, StatusBadge, CardFrame
 ```
+
+## Extract / progress (2026-07-27)
+
+- **Worker** (`extract_job.run_extract_job`): только `extract_from_document` +
+  `prepare_extraction_draft` → `queue.Queue[GuiExtractEvent]`.  
+  Запрещено: `self.after`, `StringVar.get`, `messagebox`, `destroy`.
+- **Main** (`pdf_tab._run_extract_pdf`): читает tk-vars → dialog →
+  `after` poll Queue → `_apply_extraction_draft_ui` → 💡 hints отдельно.
+- Progress: этап, детали, elapsed, indeterminate bar, кнопка **Отмена**
+  (`cancel_event`). Без `grab_set` / `wait_window`.
+- Диагностика: log tag `ExtractTimeline`, `data/logs/gui_extract_trace.log`,
+  `runtime fingerprint` (path/sha `pdf_tab.py`).
+- Py 3.12+: `tk.StringVar(master=dlg)` на Toplevel (default root).
+
+## Calc picker (2026-07-27)
+
+- Источник фильтра категории: `_picker_active_category` (не combobox StringVar).
+- Список: scroll Canvas + `ttk.Checkbutton` + стабильные `BooleanVar`.
+- Combobox values обновлять после load прайса, не на каждый refresh.
 
 ## Старт (splash)
 

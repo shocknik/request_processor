@@ -515,6 +515,22 @@ class AppStyles:
             background=c["card"],
             foreground=c["text"],
             font=FONT_UI,
+            # без синей «заливки» индикатора при фокусе (clam)
+            focuscolor=c["card"],
+            # !selected = border, иначе белый индикатор на белой карточке «исчезает»
+            indicatorcolor=c["border"],
+            indicatorrelief="solid",
+            indicatormargin=2,
+        )
+        style.map(
+            "Card.TCheckbutton",
+            background=[("active", c["card"]), ("selected", c["card"])],
+            indicatorcolor=[
+                ("selected", c["accent"]),
+                ("!selected", c["border"]),
+                ("active", c["muted"]),
+            ],
+            focuscolor=[("!focus", c["card"]), ("focus", c["card"])],
         )
         style.configure("TRadiobutton", background=c["bg"], font=FONT_UI)
         style.configure(

@@ -119,15 +119,92 @@ class MarkCorrector:
         *,
         context: AssistantContext | None = None,
         only_changed: bool = True,
+        use_llm: bool = False,
     ) -> list[MarkSuggestion]:
-        """Пакет подсказок (для GUI-диалога)."""
+        """
+        Пакет подсказок: один candidate pool, дедуп одинаковых строк, без LLM
+        по умолчанию (use_llm=False — не ходим в SQLite settings на каждую марку).
+        """
+        ctx = context or AssistantContext()
+        # прогрев кэша один раз на batch
+        if not ctx.known_brands:
+            ctx = AssistantContext(
+                document_text=ctx.document_text,
+                document_type=ctx.document_type,
+                known_brands=self._knowledge.brands(),
+            )
+        _ = self._candidate_pool(ctx)
+
         out: list[MarkSuggestion] = []
+        cache: dict[str, MarkSuggestion] = {}
         for m in marks:
-            s = self.suggest(m, context=context)
+            key = (m or "").strip()
+            if not key:
+                continue
+            if key in cache:
+                s = cache[key]
+            else:
+                if use_llm:
+                    s = self.suggest(m, context=ctx)
+                else:
+                    s = self._suggest_no_llm(m, context=ctx)
+                cache[key] = s
             if only_changed and not s.changed:
                 continue
             out.append(s)
         return out
+
+    def _suggest_no_llm(
+        self,
+        raw_mark: str,
+        *,
+        context: AssistantContext,
+    ) -> MarkSuggestion:
+        """Fuzzy/deterministic без чтения LLM settings и без Ollama."""
+        raw = (raw_mark or "").strip()
+        if not raw:
+            return MarkSuggestion(
+                raw=raw_mark or "",
+                suggested=raw_mark or "",
+                confidence=0.0,
+                source="deterministic",
+                reason="Пустая марка",
+            )
+        brands = context.known_brands or self._knowledge.brands()
+        normalized = normalize_mark_after_ocr(raw, known_brands=brands)
+        if normalized != raw:
+            snap, score = self._try_fuzzy(normalized, context)
+            if snap and snap != normalized:
+                return MarkSuggestion(
+                    raw=raw_mark,
+                    suggested=snap,
+                    confidence=min(0.93, 0.75 + score * 0.2),
+                    source="brand_db",
+                    reason=f"OCR-нормализация + fuzzy snap ({score:.0%})",
+                )
+            return MarkSuggestion(
+                raw=raw_mark,
+                suggested=normalized,
+                confidence=0.88,
+                source="brand_db" if brands else "deterministic",
+                reason="Латиница→кириллица и/или snap по cable_marks",
+            )
+        snap, score = self._try_fuzzy(raw, context)
+        if snap and snap != raw:
+            return MarkSuggestion(
+                raw=raw_mark,
+                suggested=snap,
+                confidence=min(0.92, 0.70 + score * 0.25),
+                source="brand_db",
+                reason=f"Fuzzy snap к cable_marks ({score:.0%})",
+            )
+        return MarkSuggestion(
+            raw=raw_mark,
+            suggested=normalized,
+            confidence=0.95,
+            source="deterministic",
+            reason="OCR-нормализация без изменений",
+        )
 
     def candidates(
         self,

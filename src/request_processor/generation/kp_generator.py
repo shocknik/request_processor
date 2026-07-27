@@ -211,7 +211,7 @@ def generate_kp_docx(
 
     doc.add_paragraph()
     lead = doc.add_paragraph(
-        "Стоимость испытаний по маркам кабельной продукции (руб., без детализации по видам испытаний):"
+        "Стоимость испытаний по маркам кабельной продукции:"
     )
     for run in lead.runs:
         _set_run_font(run, size=10, color=colors["muted"])
@@ -276,15 +276,14 @@ def generate_kp_docx(
     doc.add_paragraph()
 
     validity = doc.add_paragraph(
-        f"Предложение действительно в течение {proposal.validity_days} календарных дней "
-        f"с даты составления."
+        f"Срок выполнения: {proposal.validity_days} рабочих дней "
+        f"с даты поступления образцов."
     )
     for run in validity.runs:
         _set_run_font(run, size=10, color=colors["muted"])
 
     footer = doc.add_paragraph(
         "Срок выполнения работ и условия оплаты согласовываются дополнительно. "
-        "Настоящее предложение не является публичной офертой."
     )
     for run in footer.runs:
         _set_run_font(run, size=9, color=RGBColor(0x94, 0xA3, 0xB8))

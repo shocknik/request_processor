@@ -319,7 +319,19 @@ class KpTabMixin:
         subject = self._kp_subject_text()
         note = self.kp_note_text.get("1.0", "end").strip() or None
 
-        safe_customer = re.sub(r'[<>:"/\\|?*«»]', "_", customer).strip("._ ")[:40] or "заказчик"
+        if not customer:
+            if not messagebox.askyesno(
+                "КП",
+                "Заказчик не указан — файл будет «КП_заказчик_…», "
+                "в документе поле заказчика пустое.\n\n"
+                "Продолжить без заказчика?\n"
+                "(Нет — вернитесь и выберите/введите заказчика.)",
+            ):
+                return
+
+        from ...generation.document_pack import safe_filename_part
+
+        safe_customer = safe_filename_part(customer, max_len=40, default="заказчик")
         out_dir = self.generated_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / f"КП_{safe_customer}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"

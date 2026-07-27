@@ -400,7 +400,24 @@ class OrgsTabMixin:
 
     def _fill_draft_org_fields(self, draft: ExtractionDraft) -> None:
         report = draft.report
-        self.draft_customer_var.set(report.customer_name)
+        customer = (report.customer_name or "").strip()
+        if not customer:
+            from ...extraction.organization_extractor import (
+                suggest_customer_from_source_path,
+            )
+
+            hint = suggest_customer_from_source_path(
+                draft.source_path or draft.result.source_path
+            )
+            if hint:
+                customer = hint
+                get_logger(__name__).info(
+                    "customer path-hint=%r source=%s",
+                    customer[:80],
+                    Path(draft.source_path).name if draft.source_path else "?",
+                    extra={"tag": "Заявка"},
+                )
+        self.draft_customer_var.set(customer)
         self.draft_manufacturer_var.set(report.manufacturer_name)
         self.draft_recipient_var.set(report.recipient_name or "—")
 
