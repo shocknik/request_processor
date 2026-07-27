@@ -444,8 +444,10 @@ class AppStyles:
         )
         style.map(
             "Treeview",
-            background=[("selected", c["accent_light"])],
-            foreground=[("selected", c["text"])],
+            # Яркий selected: tag_background строк (warning/ok) иначе
+            # «съедает» выделение — оператор не видит, что строка выбрана.
+            background=[("selected", c["accent"])],
+            foreground=[("selected", c["text_on_accent"])],
         )
         style.map(
             "Treeview.Heading",

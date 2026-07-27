@@ -30,9 +30,19 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 # НЕ включайте -IncludeAppDb для обновления боя (иначе соблазн перезаписать БД)
 ```
 
-Актуальный релиз **2026-07-27:** `dist\request_processor_0.9.1_20260727.zip`  
-(calc filter, extract Queue, DOCX perf, prod-hot marks).  
-На work: положить в `W:\inbox\`, затем `scripts\update.ps1 -ZipPath …`.
+Актуальный релиз **2026-07-27 (день):** `dist\request_processor_0.9.1_20260727.zip`  
+(calc filter, extract Queue, DOCX perf, prod-hot marks).
+
+**Вечер 2026-07-27 (после zip, в `main` — нужен новый zip при выкладке на work):**
+- DOCX: `result.text` = абзацы+таблицы; нормализация «Общество…» → ООО  
+- HITL: «Подтвердить» всегда кликабельна; выделение марок (tag `sel`); редактор/диалог пакета не 1×1  
+- Расчёт: галочки → слева; поле «Марка кабеля» после «→ В расчёт»  
+- КП: tk-переменные только с main thread (без `main thread is not in main loop`)  
+- Пакет: сборка на main thread; пошаговые логи `[Пакет]` / `[КП]` / `[Расчёт]`  
+- Тесты: `tests/test_workflow_e2e_cycle.py`, `tests/test_workflow_confirm_calc.py` (~259 tests)
+
+На work: положить zip в `W:\inbox\`, затем `scripts\update.ps1 -ZipPath …`.  
+**После вечерних фиксов** — пересобрать zip (`scripts\build_release_zip.ps1`) и обновить work.
 
 Скопируйте zip на рабочий ПК (флешка / сеть).
 

@@ -18,9 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from ..config import GENERATED_DIR
+from ..logging_setup import get_logger
 from ..persistence.sqlite_repo import DB_PATH_DEFAULT, get_order_details
 from .application_generator import generate_application_from_order
 from .protocol_generator import generate_protocol_draft_from_order
+
+_log = get_logger("generation.document_pack")
 
 
 def safe_filename_part(
@@ -59,51 +62,155 @@ def build_document_pack(
     Returns:
         dict с ключами: pack_dir, files (list[str]), order_id, summary_path
     """
+    _log.info(
+        "build_document_pack begin order_id=%s output_dir=%s pack_folder=%r db=%s",
+        order_id,
+        output_dir,
+        pack_folder_name,
+        db_path,
+        extra={"tag": "Пакет"},
+    )
     details = get_order_details(order_id, db_path=db_path)
     if not details:
+        _log.error(
+            "build_document_pack abort: order not found id=%s db=%s",
+            order_id,
+            db_path,
+            extra={"tag": "Пакет"},
+        )
         raise ValueError(f"Заказ №{order_id} не найден")
 
     customer = details.get("customer_name") or "заказчик"
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     base = Path(output_dir) if output_dir else GENERATED_DIR
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _log.exception(
+            "build_document_pack cannot mkdir base=%s: %s",
+            base,
+            exc,
+            extra={"tag": "Пакет"},
+        )
+        raise
     if pack_folder_name and pack_folder_name.strip():
         folder = _safe_name(pack_folder_name.strip(), max_len=80)
     else:
         folder = f"pack_order{order_id}_{_safe_name(customer)}_{stamp}"
     pack_dir = base / folder
-    pack_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        pack_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _log.exception(
+            "build_document_pack cannot mkdir pack_dir=%s: %s",
+            pack_dir,
+            exc,
+            extra={"tag": "Пакет"},
+        )
+        raise
 
     files: list[str] = []
+    _log.info(
+        "build_document_pack pack_dir=%s customer=%r kp_src=%r app_src=%r marks=%s",
+        pack_dir,
+        customer[:80],
+        details.get("kp_output_path"),
+        details.get("application_path"),
+        len(details.get("marks") or []),
+        extra={"tag": "Пакет"},
+    )
 
     # КП
     kp_src = details.get("kp_output_path")
     if kp_src and Path(kp_src).exists():
         kp_dst = pack_dir / Path(kp_src).name
-        shutil.copy2(kp_src, kp_dst)
-        files.append(str(kp_dst))
+        try:
+            shutil.copy2(kp_src, kp_dst)
+            files.append(str(kp_dst))
+            _log.info("pack step KP copied → %s", kp_dst.name, extra={"tag": "Пакет"})
+        except OSError as exc:
+            _log.exception(
+                "pack step KP copy failed src=%s: %s",
+                kp_src,
+                exc,
+                extra={"tag": "Пакет"},
+            )
+            raise
+    elif kp_src:
+        _log.warning(
+            "pack step KP missing on disk path=%s (order has path but file absent)",
+            kp_src,
+            extra={"tag": "Пакет"},
+        )
+    else:
+        _log.warning(
+            "pack step KP skipped: no kp_output_path on order_id=%s",
+            order_id,
+            extra={"tag": "Пакет"},
+        )
 
     # Заявка
     app_path: Path | None = None
     existing_app = details.get("application_path")
-    if existing_app and Path(existing_app).exists() and not regenerate_application:
-        app_path = pack_dir / Path(existing_app).name
-        shutil.copy2(existing_app, app_path)
-    else:
-        app_path = generate_application_from_order(
+    try:
+        if existing_app and Path(existing_app).exists() and not regenerate_application:
+            app_path = pack_dir / Path(existing_app).name
+            shutil.copy2(existing_app, app_path)
+            _log.info(
+                "pack step application copied → %s",
+                app_path.name,
+                extra={"tag": "Пакет"},
+            )
+        else:
+            if existing_app and not Path(existing_app).exists():
+                _log.warning(
+                    "pack step application path stale, regenerating: %s",
+                    existing_app,
+                    extra={"tag": "Пакет"},
+                )
+            app_path = generate_application_from_order(
+                order_id,
+                output_path=pack_dir
+                / f"Заявка_заказ{order_id}_{stamp}.docx",
+                db_path=db_path,
+            )
+            _log.info(
+                "pack step application generated → %s size=%s",
+                app_path.name,
+                app_path.stat().st_size if app_path.exists() else 0,
+                extra={"tag": "Пакет"},
+            )
+    except Exception as exc:
+        _log.exception(
+            "pack step application failed order_id=%s: %s",
             order_id,
-            output_path=pack_dir
-            / f"Заявка_заказ{order_id}_{stamp}.docx",
-            db_path=db_path,
+            exc,
+            extra={"tag": "Пакет"},
         )
+        raise
     files.append(str(app_path))
 
     # Макет протокола
-    protocol_path = generate_protocol_draft_from_order(
-        order_id,
-        output_path=pack_dir / f"Протокол_макет_заказ{order_id}_{stamp}.docx",
-        db_path=db_path,
-    )
+    try:
+        protocol_path = generate_protocol_draft_from_order(
+            order_id,
+            output_path=pack_dir / f"Протокол_макет_заказ{order_id}_{stamp}.docx",
+            db_path=db_path,
+        )
+        _log.info(
+            "pack step protocol → %s size=%s",
+            protocol_path.name,
+            protocol_path.stat().st_size if protocol_path.exists() else 0,
+            extra={"tag": "Пакет"},
+        )
+    except Exception as exc:
+        _log.exception(
+            "pack step protocol failed order_id=%s: %s",
+            order_id,
+            exc,
+            extra={"tag": "Пакет"},
+        )
+        raise
     files.append(str(protocol_path))
 
     # Технический снимок (JSON) — для аудита и обучения
@@ -153,6 +260,14 @@ def build_document_pack(
     )
     files.append(str(readme))
 
+    _log.info(
+        "build_document_pack done order_id=%s pack_dir=%s n_files=%s names=%s",
+        order_id,
+        pack_dir,
+        len(files),
+        [Path(f).name for f in files],
+        extra={"tag": "Пакет"},
+    )
     return {
         "pack_dir": str(pack_dir),
         "files": files,

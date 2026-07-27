@@ -498,9 +498,10 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | **4 RAG** | 🔜 | Embeddings, поиск по ТУ/ГОСТ |
 | **5 Assistant** | 🟡 | MarkCorrector в GUI; LLM opt-in (Ollama) |
 | **6 Production** | 🟡 | Эксплуатация v0.9.1, polish под боевой ПК |
+| **Cycle polish (27.07)** | ✅ | DOCX HITL, calc/KP/pack reliability, e2e tests, ops logs |
 
 Карта S1–S5: [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md).  
-Журнал и планы: Obsidian `Python/Проект request-processor/`.
+Журнал и планы: Obsidian `Python/Проект request-processor/` (сессия **66–68**, 2026-07-27).
 
 ---
 

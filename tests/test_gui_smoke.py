@@ -448,6 +448,149 @@ def test_use_mark_in_calc_from_draft(gui_app: RequestProcessorApp, tmp_path) -> 
     )
 
 
+def test_marks_selection_visible_and_empty_not_blocking(
+    gui_app: RequestProcessorApp, tmp_path
+) -> None:
+    """Выделение видно (tag sel); EmptyState не перехватывает клики."""
+    from pathlib import Path
+
+    from request_processor.models import FieldStatus, MarkValidation, PdfExtractionResult
+    from request_processor.ui.gui import ExtractionDraft
+    from request_processor.validation.extraction_validator import validate_extraction
+
+    marks = [
+        MarkValidation(
+            mark="ВВГ 3х1,5",
+            confidence=0.8,
+            status=FieldStatus.warning,
+            accepted=True,
+            warnings=["P1-3"],
+        ),
+        MarkValidation(
+            mark="ПВС 2х1,5",
+            confidence=0.9,
+            status=FieldStatus.ok,
+            accepted=True,
+        ),
+    ]
+    result = PdfExtractionResult(
+        source_path="t.pdf",
+        source_type="pdf",
+        page_count=1,
+        text="test",
+        cable_marks=[],
+    )
+    draft = ExtractionDraft(
+        result=result,
+        report=validate_extraction(result),
+        source_path=Path("t.pdf"),
+        json_path=tmp_path / "t.json",
+        marks=marks,
+        original_marks=[m.model_copy(deep=True) for m in marks],
+    )
+    draft.json_path.write_text("{}", encoding="utf-8")
+    gui_app.deiconify()
+    gui_app._extraction_draft = draft
+    gui_app._refresh_marks_tree()
+    gui_app.update_idletasks()
+    # empty overlay снят (grid_remove), дерево в grid
+    assert gui_app.marks_empty.grid_info() == {}
+    assert gui_app._marks_tree_wrap.grid_info().get("row") == 0
+    gui_app.marks_tree.selection_set("0")
+    gui_app._on_draft_mark_select()
+    tags = gui_app.marks_tree.item("0", "tags")
+    assert "sel" in tags
+    assert gui_app.marks_tree.selection() == ("0",)
+
+
+def test_mark_editor_has_size_and_fields(gui_app: RequestProcessorApp, tmp_path) -> None:
+    """Редактор марки — не окно 1×1; поля заполнены seed."""
+    import tkinter as tk
+    from pathlib import Path
+    from tkinter import ttk
+
+    from request_processor.models import FieldStatus, MarkValidation, PdfExtractionResult
+    from request_processor.ui.gui import ExtractionDraft
+    from request_processor.validation.extraction_validator import validate_extraction
+
+    mark = MarkValidation(
+        mark="АПуВ 1х6",
+        brand="АПуВ",
+        cores_count=1,
+        confidence=0.9,
+        status=FieldStatus.ok,
+        accepted=True,
+    )
+    result = PdfExtractionResult(
+        source_path="t.pdf",
+        source_type="pdf",
+        page_count=1,
+        text="t",
+        cable_marks=[],
+    )
+    draft = ExtractionDraft(
+        result=result,
+        report=validate_extraction(result),
+        source_path=Path("t.pdf"),
+        json_path=tmp_path / "e.json",
+        marks=[mark],
+        original_marks=[mark.model_copy(deep=True)],
+    )
+    draft.json_path.write_text("{}", encoding="utf-8")
+    gui_app.deiconify()
+    gui_app._extraction_draft = draft
+    gui_app._refresh_marks_tree()
+    gui_app.marks_tree.selection_set("0")
+    gui_app._edit_draft_mark()
+    gui_app.update()
+    tops = [w for w in gui_app.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert tops, "editor Toplevel missing"
+    dlg = tops[-1]
+    gui_app.update_idletasks()
+    w, h = dlg.winfo_width(), dlg.winfo_height()
+    geom = dlg.geometry()
+    assert not geom.startswith("1x1"), f"editor still 1x1: {geom}"
+    assert w >= 200 or "560x" in geom or "x520" in geom, f"geom={geom} wh={w}x{h}"
+    found = False
+
+    def walk(widget: tk.Misc) -> None:
+        nonlocal found
+        for ch in widget.winfo_children():
+            if isinstance(ch, ttk.Entry):
+                try:
+                    val = ch.get()
+                    if "АПуВ" in val or "1х6" in val:
+                        found = True
+                except tk.TclError:
+                    pass
+            walk(ch)
+
+    walk(dlg)
+    assert found, "editor fields empty / seed mark missing"
+    dlg.destroy()
+
+
+def test_picker_toggle_adds_row_to_left_list(gui_app: RequestProcessorApp) -> None:
+    """Галочка справа → строка слева (не только BooleanVar)."""
+    gui_app.deiconify()
+    gui_app.go_section("calc")
+    gui_app.mark_var.set("Тест-марка")
+    gui_app.update()
+    gui_app._clear_calc_tests()
+    gui_app._refresh_calc_picker()
+    gui_app.update()
+    assert gui_app._calc_picker_visible_codes, "picker empty"
+    code = gui_app._calc_picker_visible_codes[0]
+    cb = gui_app._calc_picker_checkbuttons[code]
+    before = len(gui_app._calc_entries)
+    cb.invoke()
+    gui_app.update_idletasks()
+    assert len(gui_app._calc_entries) == before + 1
+    assert any(e.code == code for e in gui_app._calc_entries)
+    assert gui_app._calc_entries[-1].row_frame is not None
+    assert int(gui_app.calc_count_var.get().split()[-1]) == len(gui_app._calc_entries)
+
+
 def test_draft_mark_double_click_opens_editor(gui_app: RequestProcessorApp, tmp_path) -> None:
     """Двойной клик открывает редактор (не сразу в расчёт)."""
     from pathlib import Path

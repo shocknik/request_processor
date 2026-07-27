@@ -222,7 +222,8 @@ class TestsTabMixin:
         hours_var: tk.StringVar | None = None
         if rule_type == "time_based":
             hours_var = tk.StringVar(
-                value=str(self._default_hours_for(code, hours_key, rule_params))
+                master=self,
+                value=str(self._default_hours_for(code, hours_key, rule_params)),
             )
 
         entry = CalcTestEntry(
@@ -231,15 +232,29 @@ class TestsTabMixin:
             rule_type=rule_type,
             hours_key=hours_key,
             hours_var=hours_var,
-            quantity_var=tk.StringVar(value="1"),
+            quantity_var=tk.StringVar(master=self, value="1"),
         )
         self._calc_entries.append(entry)
-        self._render_calc_entry(entry, len(self._calc_entries) - 1)
         self._hide_calc_empty_hint()
+        self._render_calc_entry(entry, len(self._calc_entries) - 1)
         self._sync_picker_var(entry.code, True)
 
         self._update_calc_count_label()
-        self.status.set(f"Добавлено в расчёт: {test['name'][:50]} (остаётесь в справочнике)")
+        # Прокрутить левый список к новой строке
+        try:
+            if entry.row_frame is not None and hasattr(self, "_calc_canvas"):
+                self._calc_canvas.update_idletasks()
+                self._calc_canvas.yview_moveto(1.0)
+        except tk.TclError:
+            pass
+        _log.info(
+            "add_test_to_calc code=%s name=%r left_n=%s",
+            code,
+            test["name"][:50],
+            len(self._calc_entries),
+            extra={"tag": "Расчёт"},
+        )
+        self.status.set(f"В расчёте: {test['name'][:50]} · всего {len(self._calc_entries)}")
 
     def _expand_all_categories(self) -> None:
         for item in self.tests_tree.get_children(""):

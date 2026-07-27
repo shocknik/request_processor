@@ -1680,7 +1680,10 @@ def _build_extraction_result(
 ) -> PdfExtractionResult:
     """Собирает результат: марки + организации из текста заявки (без ассистента)."""
     t0 = time.perf_counter()
-    search_text = _compact_text_for_marks(build_search_text(text, tables))
+    # Word-направления: абзацы часто пустые (весь текст в таблицах).
+    # result.text должен содержать таблицы — иначе validate/type/HITL видят ".".
+    full_text = build_search_text(text, tables) if tables else (text or "")
+    search_text = _compact_text_for_marks(full_text)
     t_compact = time.perf_counter()
     cable_marks = _resolve_cable_marks(text, tables or [])
     t_marks = time.perf_counter()
@@ -1695,7 +1698,7 @@ def _build_extraction_result(
         path_str = str(source_path)
     logger.info(
         "parse timing file=%s marks=%.3fs orgs=%.3fs compact=%.3fs total=%.3fs "
-        "n_marks=%d n_orgs=%d search_chars=%d",
+        "n_marks=%d n_orgs=%d search_chars=%d result_text_chars=%d para_chars=%d tables=%d",
         Path(path_str).name,
         t_marks - t_compact,
         t_orgs - t_marks,
@@ -1704,12 +1707,15 @@ def _build_extraction_result(
         len(cable_marks),
         len(organizations),
         len(search_text),
+        len(full_text),
+        len(text or ""),
+        len(tables or []),
     )
     return PdfExtractionResult(
         source_path=path_str,
         source_type=source_type,
         page_count=page_count,
-        text=text,
+        text=full_text,
         tables=tables or [],
         cable_marks=cable_marks,
         organizations=organizations,
@@ -1801,14 +1807,16 @@ def extract_from_document(
         prog("Готово", current=100, total=100, stage="done")
         logger.info(
             "docx extract file=%s open=%.3fs build=%.3fs total=%.3fs "
-            "text_chars=%s tables=%s marks=%s",
+            "para_chars=%s result_text_chars=%s tables=%s marks=%s customer_len=%s",
             file_path.name,
             t_open - t_start,
             t_done - t_open,
             t_done - t_start,
             len(text),
+            len(result.text or ""),
             len(tables),
             len(result.cable_marks),
+            len(result.customer_name or ""),
         )
         return result
     raise ValueError(f"Неподдерживаемый формат: {suffix}. Используйте PDF или .docx")

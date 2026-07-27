@@ -44,6 +44,7 @@
 - Пакет данных prod export/import
 - GUI под 1920×1080
 - Паспорт экспериментальной эксплуатации
+- **2026-07-27 (вечер, cycle polish):** DOCX full text + org name clean; HITL confirm/selection/dialogs; calc mark field + picker→left; KP thread-safe style; document pack sync + diagnostics logs; e2e workflow tests
 
 ### v0.8.x
 

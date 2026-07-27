@@ -296,6 +296,12 @@ class KpTabMixin:
     def _run_generate_kp(self) -> None:
         ids = self._get_selected_kp_calc_ids()
         if not ids:
+            n_loaded = len(self.kp_calc_tree.get_children()) if hasattr(self, "kp_calc_tree") else -1
+            _log.warning(
+                "KP abort: no calc selected (tree_n=%s)",
+                n_loaded,
+                extra={"tag": "КП"},
+            )
             messagebox.showwarning(
                 "КП",
                 "Выберите один или несколько расчётов в таблице ниже (Ctrl+клик).\n\n"
@@ -308,6 +314,10 @@ class KpTabMixin:
             and self._extraction_draft
             and not self._extraction_confirmed
         ):
+            _log.warning(
+                "KP abort: extraction not confirmed (confirm_only=True)",
+                extra={"tag": "КП"},
+            )
             messagebox.showwarning(
                 "КП",
                 "Сначала подтвердите заявку на вкладке «1. Заявка» "
@@ -320,6 +330,7 @@ class KpTabMixin:
         note = self.kp_note_text.get("1.0", "end").strip() or None
 
         if not customer:
+            _log.warning("KP: empty customer, ask operator", extra={"tag": "КП"})
             if not messagebox.askyesno(
                 "КП",
                 "Заказчик не указан — файл будет «КП_заказчик_…», "
@@ -327,6 +338,7 @@ class KpTabMixin:
                 "Продолжить без заказчика?\n"
                 "(Нет — вернитесь и выберите/введите заказчика.)",
             ):
+                _log.info("KP abort: operator refused empty customer", extra={"tag": "КП"})
                 return
 
         from ...generation.document_pack import safe_filename_part
@@ -349,23 +361,33 @@ class KpTabMixin:
 
         manufacturer = self._last_manufacturer_name.strip() or None
         doc_extraction_id = self._last_document_extraction_id
+        # Все tk-переменные — только main thread (иначе RuntimeError:
+        # «main thread is not in main loop» → КП/заказ/пакет ломаются).
+        style = (
+            self.kp_style_var.get().strip()
+            if hasattr(self, "kp_style_var")
+            else None
+        ) or None
+        db_path = self.db_path
+        _log.info(
+            "KP worker payload style=%r manufacturer=%r extraction_id=%s",
+            style,
+            (manufacturer or "")[:60],
+            doc_extraction_id,
+            extra={"tag": "КП"},
+        )
 
         def work() -> None:
             saved_path: Path | None = None
             order_id: int | None = None
             error: str | None = None
             try:
-                style = (
-                    self.kp_style_var.get().strip()
-                    if hasattr(self, "kp_style_var")
-                    else None
-                )
                 saved_path = generate_kp_from_db(
                     customer=customer,
                     subject=subject,
                     calculation_ids=ids,
                     output_path=out_file,
-                    db_path=self.db_path,
+                    db_path=db_path,
                     note=note,
                     style=style,
                 )
@@ -377,12 +399,13 @@ class KpTabMixin:
                     calculation_ids=ids,
                     kp_output_path=str(saved_path),
                     document_extraction_id=doc_extraction_id,
-                    db_path=self.db_path,
+                    db_path=db_path,
                 )
                 _log.info(
-                    "KP ok path=%s order_id=%s",
+                    "KP ok path=%s order_id=%s style=%r",
                     saved_path,
                     order_id,
+                    style,
                     extra={"tag": "КП"},
                 )
             except Exception as exc:
@@ -391,12 +414,28 @@ class KpTabMixin:
 
             def done() -> None:
                 if error:
-                    messagebox.showerror("Ошибка КП", error)
+                    messagebox.showerror(
+                        "Ошибка КП",
+                        f"{error}\n\n"
+                        "Если ошибка про main loop / thread — перезапустите GUI "
+                        "после обновления.",
+                    )
                     self.status.set("Ошибка формирования КП")
                     return
                 assert saved_path is not None
+                assert order_id is not None
                 self.status.set(f"Заказ №{order_id} · КП: {saved_path.name}")
                 self._load_orders_table()
+                # Авто-выбор заказа — сразу можно «Пакет документов»
+                try:
+                    if hasattr(self, "orders_tree"):
+                        iid = str(order_id)
+                        if iid in self.orders_tree.get_children(""):
+                            self.orders_tree.selection_set(iid)
+                            self.orders_tree.see(iid)
+                            self.orders_tree.focus(iid)
+                except tk.TclError:
+                    pass
                 try:
                     import os
 
@@ -406,10 +445,18 @@ class KpTabMixin:
                 messagebox.showinfo(
                     "Заказ оформлен",
                     f"Заказ №{order_id} сохранён.\n"
-                    f"КП открыт в Word:\n{saved_path}",
+                    f"КП открыт в Word:\n{saved_path}\n\n"
+                    "Далее: вкладка «Заказы» → выделите заказ → «Пакет документов».",
                 )
 
-            self.after(0, done)
+            try:
+                self.after(0, done)
+            except RuntimeError:
+                # нет mainloop (тесты) — не падать в worker
+                _log.warning(
+                    "KP done: cannot schedule after() — no main loop",
+                    extra={"tag": "КП"},
+                )
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -417,23 +464,35 @@ class KpTabMixin:
         """Диалог: базовая папка + имя подпапки пакета."""
         pack_settings = get_document_pack_settings(self.db_path)
         default_base = pack_settings.base_dir.strip() or str(self.generated_dir)
+        default_name = self._suggest_pack_folder_name(order_id)
+        _log.info(
+            "pack dialog open order_id=%s base=%r name=%r",
+            order_id,
+            default_base[:120],
+            default_name,
+            extra={"tag": "Пакет"},
+        )
 
         dlg = tk.Toplevel(self)
         dlg.title(f"Пакет документов · заказ №{order_id}")
         dlg.transient(self)
-        dlg.grab_set()
         dlg.configure(bg=COLORS["bg"])
+        dlg.minsize(520, 280)
+        # grab_set / geometry — после сборки виджетов (иначе 1×1 «пустое» окно)
+
         frame = ttk.Frame(dlg, padding=16, style="Card.TFrame")
         frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
 
-        base_var = tk.StringVar(value=default_base)
-        name_var = tk.StringVar(value=self._suggest_pack_folder_name(order_id))
+        base_var = tk.StringVar(master=dlg, value=default_base)
+        name_var = tk.StringVar(master=dlg, value=default_name)
 
         ttk.Label(frame, text="Сохранить в папку:", style="Card.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 4)
         )
         base_row = ttk.Frame(frame, style="Card.TFrame")
-        base_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        base_row.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        base_row.columnconfigure(0, weight=1)
         base_entry = ttk.Entry(base_row, textvariable=base_var, width=48)
         base_entry.pack(side="left", fill="x", expand=True)
         ttk.Button(
@@ -442,11 +501,13 @@ class KpTabMixin:
             command=lambda: self._browse_into_var(base_var, "Папка для пакета"),
         ).pack(side="left", padx=(6, 0))
 
+        row_next = 2
         if pack_settings.recent_paths:
             ttk.Label(frame, text="Недавние пакеты:", style="CardMuted.TLabel").grid(
-                row=2, column=0, sticky="w"
+                row=row_next, column=0, sticky="w"
             )
-            recent_var = tk.StringVar()
+            row_next += 1
+            recent_var = tk.StringVar(master=dlg)
             recent_cb = ttk.Combobox(
                 frame,
                 textvariable=recent_var,
@@ -454,7 +515,8 @@ class KpTabMixin:
                 width=54,
                 state="readonly",
             )
-            recent_cb.grid(row=3, column=0, sticky="ew", pady=(2, 10))
+            recent_cb.grid(row=row_next, column=0, sticky="ew", pady=(2, 10))
+            row_next += 1
 
             def _use_recent(_e: object = None) -> None:
                 p = recent_var.get().strip()
@@ -464,11 +526,13 @@ class KpTabMixin:
             recent_cb.bind("<<ComboboxSelected>>", _use_recent)
 
         ttk.Label(frame, text="Имя папки пакета:", style="Card.TLabel").grid(
-            row=4, column=0, sticky="w", pady=(0, 4)
+            row=row_next, column=0, sticky="w", pady=(0, 4)
         )
+        row_next += 1
         ttk.Entry(frame, textvariable=name_var, width=54).grid(
-            row=5, column=0, sticky="ew", pady=(0, 16)
+            row=row_next, column=0, sticky="ew", pady=(0, 16)
         )
+        row_next += 1
 
         result: dict[str, str] = {}
 
@@ -481,23 +545,59 @@ class KpTabMixin:
             if not name:
                 messagebox.showwarning("Пакет", "Укажите имя папки пакета.", parent=dlg)
                 return
+            try:
+                Path(base).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                messagebox.showerror(
+                    "Пакет",
+                    f"Не удалось создать/открыть папку:\n{base}\n\n{exc}",
+                    parent=dlg,
+                )
+                return
             result["output_dir"] = base
             result["pack_folder_name"] = name
+            _log.info(
+                "pack dialog ok order_id=%s base=%r name=%r",
+                order_id,
+                base[:120],
+                name,
+                extra={"tag": "Пакет"},
+            )
             dlg.destroy()
 
         def _cancel() -> None:
+            _log.info("pack dialog cancelled order_id=%s", order_id, extra={"tag": "Пакет"})
             dlg.destroy()
 
         btns = ttk.Frame(frame, style="Card.TFrame")
-        btns.grid(row=6, column=0, sticky="w")
+        btns.grid(row=row_next, column=0, sticky="ew")
         self._accent_button(btns, "Собрать", _ok).pack(side="left")
         ttk.Button(btns, text="Отмена", command=_cancel).pack(side="left", padx=8)
 
         dlg.update_idletasks()
-        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
-        x = self.winfo_rootx() + max(0, (self.winfo_width() - w) // 2)
-        y = self.winfo_rooty() + max(0, (self.winfo_height() - h) // 2)
-        dlg.geometry(f"+{x}+{y}")
+        # Явный размер — не только «+x+y» (на Windows reqsize=1 до map → пустое окно)
+        fit_window_to_screen(dlg, prefer_w=560, prefer_h=320)
+        try:
+            geom = dlg.geometry()
+            if geom.startswith("1x1") or dlg.winfo_width() < 200:
+                sw = max(dlg.winfo_screenwidth(), 800)
+                sh = max(dlg.winfo_screenheight(), 600)
+                w, h = 560, 320
+                x = max(0, (sw - w) // 2)
+                y = max(0, (sh - h) // 2)
+                dlg.geometry(f"{w}x{h}+{x}+{y}")
+        except tk.TclError:
+            dlg.geometry("560x320")
+        dlg.deiconify()
+        dlg.lift()
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            base_entry.focus_set()
+        except tk.TclError:
+            pass
         dlg.wait_window()
         return result or None
 

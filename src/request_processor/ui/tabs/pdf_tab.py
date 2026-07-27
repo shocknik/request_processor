@@ -364,6 +364,8 @@ class PdfTabMixin:
             self.marks_tree.column(
                 col, width=width, anchor=anchor, stretch=stretch, minwidth=min(width, 48)
             )
+        # Статусные фоны только для НЕвыделенных строк. Выделение — tag «sel»
+        # (иначе на Windows/clam tag bg перекрывает Treeview selected).
         self.marks_tree.tag_configure("ok", background=COLORS["card"])
         self.marks_tree.tag_configure("warning", background=COLORS["warn_bg"])
         self.marks_tree.tag_configure("error", background=COLORS["error_bg"])
@@ -371,6 +373,11 @@ class PdfTabMixin:
             "rejected", background="#f1f5f9", foreground=COLORS["muted"]
         )
         self.marks_tree.tag_configure("assist", background=COLORS["accent_light"])
+        self.marks_tree.tag_configure(
+            "sel",
+            background=COLORS["accent"],
+            foreground=COLORS["text_on_accent"],
+        )
         ysb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.marks_tree.yview)
         xsb = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self.marks_tree.xview)
         self.marks_tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
@@ -787,15 +794,27 @@ class PdfTabMixin:
             _log.debug("INN visual invalid len=%s", len(raw), extra={"tag": "UI"})
 
     def _show_marks_empty(self, show: bool) -> None:
-        """Переключить EmptyState / Treeview для карточки марок."""
+        """Переключить EmptyState / Treeview для карточки марок.
+
+        EmptyState убираем из grid (не lower): иначе прозрачный/полный overlay
+        перехватывает клики — «марки не выделяются».
+        """
         if not hasattr(self, "marks_empty"):
             return
         if show:
+            try:
+                self._marks_tree_wrap.grid_remove()
+            except tk.TclError:
+                pass
+            self.marks_empty.grid(row=0, column=0, sticky="nsew")
             self.marks_empty.lift()
-            self._marks_tree_wrap.lower()
         else:
+            try:
+                self.marks_empty.grid_remove()
+            except tk.TclError:
+                pass
+            self._marks_tree_wrap.grid(row=0, column=0, sticky="nsew")
             self._marks_tree_wrap.lift()
-            self.marks_empty.lower()
 
     def _set_mark_action_buttons_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -862,6 +881,14 @@ class PdfTabMixin:
             codes = self._suggested_test_codes_for_mark(mark)
             suggestions = []
 
+        _log.info(
+            "apply suggested from request: mark=%r codes=%s has_req=%s entry=%s",
+            mark[:80],
+            codes,
+            bool(entry and entry.requirements_raw),
+            entry is not None,
+            extra={"tag": "Расчёт"},
+        )
         if not codes:
             messagebox.showinfo(
                 "Испытания из заявки",
@@ -1095,9 +1122,23 @@ class PdfTabMixin:
             cat = "Низкая"
         return f"{pct} · {cat}"
 
-    def _refresh_marks_tree(self, *, rebuild_hints: bool = False) -> None:
+    def _refresh_marks_tree(
+        self,
+        *,
+        rebuild_hints: bool = False,
+        select_idx: int | None = None,
+    ) -> None:
         if not hasattr(self, "marks_tree"):
             return
+        # сохранить выделение: иначе «Принять / отклонить» молча no-op после redraw
+        prev_sel = select_idx
+        if prev_sel is None:
+            try:
+                sel = self.marks_tree.selection()
+                if sel:
+                    prev_sel = int(sel[0])
+            except (ValueError, TypeError, tk.TclError):
+                prev_sel = None
         for item in self.marks_tree.get_children():
             self.marks_tree.delete(item)
         if not self._extraction_draft:
@@ -1136,12 +1177,45 @@ class PdfTabMixin:
                     self._confidence_label(mark.confidence),
                 ),
             )
-        self._set_mark_action_buttons_enabled(False)
+        restored = False
+        if prev_sel is not None and 0 <= prev_sel < len(marks):
+            try:
+                iid = str(prev_sel)
+                self.marks_tree.selection_set(iid)
+                self.marks_tree.focus(iid)
+                self.marks_tree.see(iid)
+                restored = True
+            except tk.TclError:
+                restored = False
+        self._apply_marks_selection_tags()
+        self._set_mark_action_buttons_enabled(restored)
         _log.debug(
-            "marks_tree refreshed n=%s",
+            "marks_tree refreshed n=%s select=%s restored=%s",
             len(marks),
+            prev_sel,
+            restored,
             extra={"tag": "Заявка"},
         )
+
+    def _apply_marks_selection_tags(self) -> None:
+        """Подсветить выбранную строку tag «sel» (поверх status tags)."""
+        if not hasattr(self, "marks_tree") or not self._extraction_draft:
+            return
+        selected = set(self.marks_tree.selection())
+        for iid in self.marks_tree.get_children(""):
+            try:
+                idx = int(iid)
+            except ValueError:
+                continue
+            if not (0 <= idx < len(self._extraction_draft.marks)):
+                continue
+            mark = self._extraction_draft.marks[idx]
+            has_hint = idx in getattr(self, "_assistant_hints", {})
+            base = self._mark_tree_tag(mark, has_hint=has_hint)
+            if iid in selected:
+                self.marks_tree.item(iid, tags=(base, "sel"))
+            else:
+                self.marks_tree.item(iid, tags=(base,))
 
     def _toggle_validation_warnings(self) -> None:
         """Развернуть/свернуть длинный список предупреждений (не съедает mid)."""
@@ -1310,11 +1384,25 @@ class PdfTabMixin:
                 if needs_review
                 else RequestPageState.READY_TO_CONFIRM
             )
-            # block_confirm → primary disabled, но state всё равно review
-            self.render_request_state(
-                page_state,
-                primary_enabled=not report.block_confirm,
+            # Primary всегда активна в review: иначе оператор «заперт» без
+            # объяснения (block_confirm раньше гасил кнопку). Блок — в _confirm_extraction.
+            accepted_n = (
+                sum(1 for m in self._extraction_draft.marks if m.accepted)
+                if self._extraction_draft
+                else 0
             )
+            _log.info(
+                "draft status bar: state=%s block_confirm=%s flags=%s "
+                "accepted_marks=%s/%s customer_len=%s",
+                page_state.value,
+                report.block_confirm,
+                list(report.flags[:6]),
+                accepted_n,
+                len(self._extraction_draft.marks) if self._extraction_draft else 0,
+                len(report.customer_name or ""),
+                extra={"tag": "Заявка"},
+            )
+            self.render_request_state(page_state, primary_enabled=True)
             if file_name and hasattr(self, "page_header"):
                 self.page_header.set_title(f"Заявка · {file_name}")
         elif state == "confirmed":
@@ -1771,6 +1859,7 @@ class PdfTabMixin:
     def _on_draft_mark_select(self, _event=None) -> None:
         sel = self.marks_tree.selection()
         has_sel = bool(sel)
+        self._apply_marks_selection_tags()
         self._set_mark_action_buttons_enabled(has_sel and bool(self._extraction_draft))
         if not self._extraction_draft or not sel:
             self._show_context_placeholder(True)
@@ -1782,7 +1871,13 @@ class PdfTabMixin:
                 self.mark_context_text,
                 self._format_mark_context_panel(self._extraction_draft.marks[idx]),
             )
-            _log.debug("mark selected idx=%s", idx, extra={"tag": "Заявка"})
+            _log.info(
+                "mark selected idx=%s mark=%r accepted=%s",
+                idx,
+                (self._extraction_draft.marks[idx].mark or "")[:60],
+                self._extraction_draft.marks[idx].accepted,
+                extra={"tag": "Заявка"},
+            )
 
     def _show_context_placeholder(self, show: bool) -> None:
         """Показать подсказку или текст контекста марки."""
@@ -1803,14 +1898,32 @@ class PdfTabMixin:
 
     def _toggle_draft_mark(self) -> None:
         if not self._extraction_draft:
+            messagebox.showinfo("Марки", "Сначала извлеките заявку.")
             return
         sel = self.marks_tree.selection()
         if not sel:
+            _log.info("toggle mark: no selection", extra={"tag": "Заявка"})
+            messagebox.showinfo(
+                "Марки",
+                "Выберите марку в таблице, затем нажмите «Принять / отклонить».\n\n"
+                "Статус «Не проверено» уже означает, что марка принята, "
+                "но есть предупреждение (например, нет ТУ).",
+            )
             return
         idx = int(sel[0])
+        if not (0 <= idx < len(self._extraction_draft.marks)):
+            return
         mark = self._extraction_draft.marks[idx]
         mark.accepted = not mark.accepted
-        self._revalidate_draft()
+        _log.info(
+            "toggle mark idx=%s accepted=%s mark=%r status=%s",
+            idx,
+            mark.accepted,
+            (mark.mark or "")[:80],
+            getattr(mark.status, "value", mark.status),
+            extra={"tag": "Заявка"},
+        )
+        self._revalidate_draft(select_idx=idx)
 
     def _format_mark_size(self, mark: MarkValidation) -> str:
         if mark.characteristic_size is None:
@@ -1846,9 +1959,9 @@ class PdfTabMixin:
         dialog = tk.Toplevel(self)
         dialog.title(title)
         dialog.transient(self)
-        dialog.grab_set()
-        dialog.minsize(520, 480)
         dialog.configure(bg=COLORS["bg"])
+        # Не grab_set до geometry: на части Windows окно остаётся 1×1 «пустым».
+        dialog.minsize(520, 480)
         # Кнопки снизу ВСЕГДА видны (pack bottom first), форма — остаток
         btns = ttk.Frame(dialog, padding=(12, 8, 12, 12))
         btns.pack(side="bottom", fill="x")
@@ -1860,31 +1973,42 @@ class PdfTabMixin:
             accepted=True,
         )
 
+        # master=dialog обязателен (Py 3.14 / multi-window): иначе Entry «пустые».
         fields: dict[str, tk.Variable] = {
-            "mark": tk.StringVar(value=seed.mark),
-            "brand": tk.StringVar(value=seed.brand or ""),
-            "fire_class": tk.StringVar(value=seed.fire_class or ""),
+            "mark": tk.StringVar(master=dialog, value=seed.mark or ""),
+            "brand": tk.StringVar(master=dialog, value=seed.brand or ""),
+            "fire_class": tk.StringVar(master=dialog, value=seed.fire_class or ""),
             "cores_count": tk.StringVar(
-                value=str(seed.cores_count) if seed.cores_count else ""
+                master=dialog,
+                value=str(seed.cores_count) if seed.cores_count else "",
             ),
             "structural_element_type": tk.StringVar(
-                value=seed.structural_element_type or "жила"
+                master=dialog,
+                value=seed.structural_element_type or "жила",
             ),
             "structural_elements_count": tk.StringVar(
+                master=dialog,
                 value=str(seed.structural_elements_count)
                 if seed.structural_elements_count
-                else ""
+                else "",
             ),
             "characteristic_size": tk.StringVar(
-                value=str(seed.characteristic_size) if seed.characteristic_size else ""
+                master=dialog,
+                value=str(seed.characteristic_size) if seed.characteristic_size else "",
             ),
-            "size_unit": tk.StringVar(value=seed.size_unit or "mm2"),
-            "document": tk.StringVar(value=seed.document or ""),
+            "size_unit": tk.StringVar(master=dialog, value=seed.size_unit or "mm2"),
+            "document": tk.StringVar(master=dialog, value=seed.document or ""),
         }
 
         form = ttk.Frame(dialog, padding=12)
         form.pack(side="top", fill="both", expand=True)
         form.columnconfigure(1, weight=1)
+        _log.info(
+            "open mark editor title=%r seed_mark=%r",
+            title,
+            (seed.mark or "")[:80],
+            extra={"tag": "Заявка"},
+        )
 
         hint = ttk.Label(
             form,
@@ -2093,8 +2217,44 @@ class PdfTabMixin:
 
         dialog.bind("<Return>", lambda _e: save())
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        # Явный размер + lift: fit_window иногда даёт 1×1 до map на Windows.
+        dialog.update_idletasks()
         fit_window_to_screen(dialog, prefer_w=560, prefer_h=520)
+        try:
+            geom = dialog.geometry()
+            # geometry «1x1+…» — принудительно нормальный размер
+            if geom.startswith("1x1") or dialog.winfo_width() < 200:
+                sw = max(dialog.winfo_screenwidth(), 800)
+                sh = max(dialog.winfo_screenheight(), 600)
+                w, h = 560, 520
+                x = max(0, (sw - w) // 2)
+                y = max(0, (sh - h) // 2)
+                dialog.geometry(f"{w}x{h}+{x}+{y}")
+                _log.warning(
+                    "mark editor geometry was tiny (%s) — forced %sx%s",
+                    geom,
+                    w,
+                    h,
+                    extra={"tag": "Заявка"},
+                )
+        except tk.TclError:
+            dialog.geometry("560x520")
+        dialog.deiconify()
+        dialog.lift()
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
         dialog.focus_force()
+        try:
+            # фокус в первое поле
+            for child in form.winfo_children():
+                if isinstance(child, ttk.Entry):
+                    child.focus_set()
+                    child.selection_range(0, "end")
+                    break
+        except tk.TclError:
+            pass
 
     def _add_draft_mark(self) -> None:
         if not self._extraction_draft:
@@ -2169,11 +2329,16 @@ class PdfTabMixin:
             return accepted[0]
         return None
 
-    def _revalidate_draft(self) -> None:
+    def _revalidate_draft(self, *, select_idx: int | None = None) -> None:
         if not self._extraction_draft:
             return
         accepted_matches = [
-            CableMarkMatch(mark=m.mark, context=m.context, document=m.document)
+            CableMarkMatch(
+                mark=m.mark,
+                context=m.context,
+                document=m.document,
+                requirements_raw=m.requirements_raw,
+            )
             for m in self._extraction_draft.marks
             if m.accepted
         ]
@@ -2196,6 +2361,8 @@ class PdfTabMixin:
                             "confidence": fv.confidence,
                             "status": fv.status,
                             "warnings": fv.warnings,
+                            "suggested_tests": fv.suggested_tests or entry.suggested_tests,
+                            "requirements_raw": fv.requirements_raw or entry.requirements_raw,
                         }
                     )
                 )
@@ -2211,8 +2378,16 @@ class PdfTabMixin:
             ocr_used=self._extraction_draft.result.ocr_used,
         )
         self._extraction_draft.report = report.model_copy(update={"marks": updated_marks})
+        _log.info(
+            "revalidate draft: block_confirm=%s flags=%s accepted=%s suggested_total=%s",
+            report.block_confirm,
+            list(report.flags[:6]),
+            sum(1 for m in updated_marks if m.accepted),
+            sum(len(m.suggested_tests or []) for m in updated_marks),
+            extra={"tag": "Заявка"},
+        )
         self._update_validation_warnings(report)
-        self._refresh_marks_tree()
+        self._refresh_marks_tree(select_idx=select_idx)
         self._update_validation_status_bar(
             state="draft" if not self._extraction_confirmed else "confirmed",
             file_name=Path(self._extraction_draft.source_path).name,
@@ -2586,67 +2761,99 @@ class PdfTabMixin:
         mark_validations: list[MarkValidation] | None = None,
     ) -> int:
         db_stats = {"saved": 0, "errors": 0}
-        if self.save_marks_var.get():
-            if mark_validations:
-                db_stats = save_cable_marks_from_validations(
-                    mark_validations,
-                    source=str(result.source_path),
-                    db_path=self.db_path,
+        try:
+            if self.save_marks_var.get():
+                if mark_validations:
+                    db_stats = save_cable_marks_from_validations(
+                        mark_validations,
+                        source=str(result.source_path),
+                        db_path=self.db_path,
+                    )
+                elif result.cable_marks:
+                    db_stats = save_cable_marks_from_matches(
+                        result.cable_marks,
+                        source=str(result.source_path),
+                        db_path=self.db_path,
+                    )
+            org_ids: dict[str, int | None] = {}
+            if self.save_orgs_var.get():
+                # Всегда пытаемся сохранить заказчика/производителя из полей GUI,
+                # даже если extract.organizations пуст (ручной ввод).
+                has_org_fields = bool(
+                    (result.customer_name or "").strip()
+                    or (result.manufacturer_name or "").strip()
+                    or result.organizations
                 )
-            elif result.cable_marks:
-                db_stats = save_cable_marks_from_matches(
-                    result.cable_marks,
-                    source=str(result.source_path),
-                    db_path=self.db_path,
-                )
-        org_ids: dict[str, int | None] = {}
-        if self.save_orgs_var.get():
-            # Всегда пытаемся сохранить заказчика/производителя из полей GUI,
-            # даже если extract.organizations пуст (ручной ввод).
-            has_org_fields = bool(
-                (result.customer_name or "").strip()
-                or (result.manufacturer_name or "").strip()
-                or result.organizations
+                if has_org_fields:
+                    # fuzzy: если имя новое и есть похожие — спросить оператора
+                    org_ids = self._save_orgs_with_dedup_prompt(result)
+            extraction_id = save_document_extraction(
+                source_path=str(result.source_path),
+                source_type=result.source_type,
+                text=result.text,
+                marks_count=len(result.cable_marks),
+                customer_org_id=org_ids.get("customer_org_id"),
+                manufacturer_org_id=org_ids.get("manufacturer_org_id"),
+                db_path=self.db_path,
             )
-            if has_org_fields:
-                # fuzzy: если имя новое и есть похожие — спросить оператора
-                org_ids = self._save_orgs_with_dedup_prompt(result)
-        extraction_id = save_document_extraction(
-            source_path=str(result.source_path),
-            source_type=result.source_type,
-            text=result.text,
-            marks_count=len(result.cable_marks),
-            customer_org_id=org_ids.get("customer_org_id"),
-            manufacturer_org_id=org_ids.get("manufacturer_org_id"),
-            db_path=self.db_path,
-        )
-        self._last_document_extraction_id = extraction_id
-        self._last_manufacturer_name = result.manufacturer_name or ""
-        return extraction_id
+            self._last_document_extraction_id = extraction_id
+            self._last_manufacturer_name = result.manufacturer_name or ""
+            _log.info(
+                "persist extraction id=%s marks_saved=%s marks_err=%s "
+                "customer_org=%s mfg_org=%s source=%s",
+                extraction_id,
+                db_stats.get("saved"),
+                db_stats.get("errors"),
+                org_ids.get("customer_org_id"),
+                org_ids.get("manufacturer_org_id"),
+                Path(result.source_path).name if result.source_path else "",
+                extra={"tag": "Заявка"},
+            )
+            return extraction_id
+        except Exception:
+            _log.exception(
+                "persist extraction failed source=%s",
+                getattr(result, "source_path", None),
+                extra={"tag": "Заявка"},
+            )
+            raise
 
     def _confirm_extraction(self) -> None:
         if not self._extraction_draft:
+            _log.warning("confirm abort: no draft", extra={"tag": "Заявка"})
             messagebox.showinfo("Заявка", "Нет данных для подтверждения.")
             return
         self._revalidate_draft()
-        if self._extraction_draft.report.block_confirm:
+        report = self._extraction_draft.report
+        if report.block_confirm:
             _log.warning(
-                "confirm blocked flags=%s",
-                self._extraction_draft.report.flags[:8],
+                "confirm blocked flags=%s customer_len=%s accepted=%s",
+                report.flags[:8],
+                len(self.draft_customer_var.get() or ""),
+                sum(1 for m in self._extraction_draft.marks if m.accepted),
                 extra={"tag": "Заявка"},
             )
+            tips = "\n".join(f"• {f}" for f in report.flags[:8]) or "• критичные ошибки валидации"
             messagebox.showerror(
                 "Подтверждение заблокировано",
-                "Исправьте критичные поля (красные/⛔) перед сохранением.\n\n"
-                + "\n".join(self._extraction_draft.report.flags[:6]),
+                "Исправьте критичные поля перед сохранением, затем снова "
+                "«Подтвердить заявку».\n\n"
+                f"{tips}\n\n"
+                "Частые причины:\n"
+                "• слишком длинное имя заказчика — сократите в поле «Заказчик»\n"
+                "• заказчик = испытательный центр — укажите реального заказчика\n"
+                "• нет марок — добавьте/примите хотя бы одну",
             )
             return
 
         accepted_count = sum(1 for m in self._extraction_draft.marks if m.accepted)
         if accepted_count == 0:
+            _log.warning("confirm: no accepted marks", extra={"tag": "Заявка"})
             messagebox.showwarning(
                 "Заявка",
-                "Нет принятых марок. Добавьте или включите хотя бы одну марку.",
+                "Нет принятых марок.\n\n"
+                "Выберите строку → «Принять / отклонить» (статус должен стать "
+                "«Принято» / «Не проверено», не «Отклонено»).",
             )
             return
 

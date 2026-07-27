@@ -463,7 +463,14 @@ def resolve_org_addresses(org: dict | OrganizationExtract | None) -> tuple[str, 
     return legal or "—", actual or "—"
 
 
+_FULL_OOO_FORM = re.compile(
+    r"Общество\s+с\s+ограниченной\s+ответственностью",
+    re.IGNORECASE,
+)
+
+
 def _clean_org_name(raw: str) -> str:
+    """Нормализует название: полное «Общество…» → ООО, без двойного префикса."""
     name = re.sub(r"\s+", " ", raw).strip(" .,;:{}\"")
 
     name = re.sub(r"(?:л|1)\s*$", "", name, flags=re.IGNORECASE)
@@ -473,12 +480,34 @@ def _clean_org_name(raw: str) -> str:
     if re.search(r"АКЦИОНЕРНОЕ\s+ОБЩЕСТВО|АО\s*«", name, re.IGNORECASE):
         return name.strip()
 
-    if name and not name.upper().startswith("ООО"):
-        short = name.strip()
+    # «Общество с ограниченной ответственностью «X»» → «ООО «X»»
+    # и снятие двойного «ООО «Общество…»»
+    while True:
+        collapsed = re.sub(
+            rf"^(?:ООО\s*)?[«\"']?\s*{_FULL_OOO_FORM.pattern}\s*",
+            "ООО ",
+            name,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        collapsed = collapsed.strip().lstrip("«\"'").strip()
+        if collapsed == name or not collapsed:
+            break
+        name = collapsed
+
+    if name and not re.match(r"^(?:ООО|АО|ПАО|ЗАО)\b", name, re.IGNORECASE):
+        short = name.strip().strip("«»\"'")
         if len(short) >= 4:
-            return f'ООО «{short}»'
-    if "«" not in name and "»" not in name:
+            return f"ООО «{short}»"
+    if re.match(r"^ООО\b", name, re.IGNORECASE) and "«" not in name and "»" not in name:
         core = re.sub(r"^ООО\s+", "", name, flags=re.IGNORECASE).strip()
+        if core:
+            return f"ООО «{core}»"
+    # убрать ««…»» после склейки
+    name = re.sub(r"«\s*«", "«", name)
+    name = re.sub(r"»\s*»", "»", name)
+    if re.match(r"^ООО\b", name, re.IGNORECASE) and not name.startswith("ООО «"):
+        core = re.sub(r"^ООО\s+", "", name, flags=re.IGNORECASE).strip().strip("«»\"'")
         if core:
             return f"ООО «{core}»"
     return name

@@ -16,8 +16,11 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
+from ..logging_setup import get_logger
 from ..models import CommercialProposal, KPMarkLine
 from .lab_profile import LabProfile, load_lab_profile
+
+_log = get_logger("generation.kp")
 
 LAB_NAME = "ООО «Испытательный центр»"
 LAB_TAGLINE = "Испытательный центр кабельной продукции"
@@ -354,11 +357,26 @@ def generate_kp_from_db(
     if db_path is None:
         db_path = DB_PATH_DEFAULT
 
+    _log.info(
+        "generate_kp_from_db begin ids=%s customer=%r style=%r out=%s",
+        calculation_ids,
+        (customer or "")[:80],
+        style,
+        output_path,
+        extra={"tag": "КП"},
+    )
     if not calculation_ids:
+        _log.error("generate_kp_from_db: empty calculation_ids", extra={"tag": "КП"})
         raise ValueError("Выберите хотя бы один расчёт для КП")
 
     rows = get_calculations_for_kp(calculation_ids, db_path=db_path)
     if not rows:
+        _log.error(
+            "generate_kp_from_db: no rows for ids=%s db=%s",
+            calculation_ids,
+            db_path,
+            extra={"tag": "КП"},
+        )
         raise ValueError("Расчёты не найдены в БД")
 
     proposal = proposal_from_calculations(
@@ -367,11 +385,28 @@ def generate_kp_from_db(
         calculations=rows,
         note=note,
     )
-    path = generate_kp_docx(proposal, output_path, style=style)
+    try:
+        path = generate_kp_docx(proposal, output_path, style=style)
+    except Exception as exc:
+        _log.exception(
+            "generate_kp_docx failed out=%s: %s",
+            output_path,
+            exc,
+            extra={"tag": "КП"},
+        )
+        raise
     proposal.output_path = str(path)
     for line in proposal.marks:
         if line.calculation_id:
             update_calculation_output_path(line.calculation_id, str(path), db_path)
+    _log.info(
+        "generate_kp_from_db ok path=%s size=%s marks=%s total_vat=%s",
+        path,
+        path.stat().st_size if path.exists() else 0,
+        len(proposal.marks),
+        getattr(proposal, "total_with_vat", None),
+        extra={"tag": "КП"},
+    )
     return path
 
 

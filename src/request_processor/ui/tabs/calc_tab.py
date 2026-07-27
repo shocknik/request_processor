@@ -122,11 +122,14 @@ class CalcTabMixin:
 
         inner = ttk.Frame(top, style="Card.TFrame")
         inner.pack(fill="x")
-        self.mark_var = tk.StringVar()
+        # master=self: на Py 3.14 StringVar без master иногда «не цепляется» к Entry
+        self.mark_var = tk.StringVar(master=self)
         mark_row = ttk.Frame(inner, style="Card.TFrame")
         mark_row.pack(fill="x")
-        mark_entry = ttk.Entry(mark_row, textvariable=self.mark_var, font=("Segoe UI", 11))
-        mark_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.calc_mark_entry = ttk.Entry(
+            mark_row, textvariable=self.mark_var, font=("Segoe UI", 11)
+        )
+        self.calc_mark_entry.pack(side="left", fill="x", expand=True, ipady=4)
         self._secondary_button(
             mark_row,
             "Испытания из заявки",
@@ -220,11 +223,25 @@ class CalcTabMixin:
         )
         calc_scroll = ttk.Scrollbar(canvas_frame, orient="vertical", command=self._calc_canvas.yview)
         self.calc_tests_inner = ttk.Frame(self._calc_canvas, style="Card.TFrame")
-        self.calc_tests_inner.bind(
-            "<Configure>",
-            lambda e: self._calc_canvas.configure(scrollregion=self._calc_canvas.bbox("all")),
+        self._calc_canvas_window = self._calc_canvas.create_window(
+            (0, 0), window=self.calc_tests_inner, anchor="nw"
         )
-        self._calc_canvas.create_window((0, 0), window=self.calc_tests_inner, anchor="nw")
+
+        def _on_calc_inner_configure(_event=None) -> None:
+            try:
+                self._calc_canvas.configure(scrollregion=self._calc_canvas.bbox("all"))
+            except tk.TclError:
+                pass
+
+        def _on_calc_canvas_configure(event: tk.Event) -> None:
+            # Без ширины inner=1px — строки «есть», но слева пусто.
+            try:
+                self._calc_canvas.itemconfigure(self._calc_canvas_window, width=max(event.width, 1))
+            except tk.TclError:
+                pass
+
+        self.calc_tests_inner.bind("<Configure>", _on_calc_inner_configure)
+        self._calc_canvas.bind("<Configure>", _on_calc_canvas_configure)
         self._calc_canvas.configure(yscrollcommand=calc_scroll.set)
         self._calc_canvas.pack(side="left", fill="both", expand=True)
         calc_scroll.pack(side="right", fill="y")
@@ -913,26 +930,64 @@ class CalcTabMixin:
 
     def _on_picker_toggle(self, code: str) -> None:
         if self._calc_picker_syncing:
+            _log.debug("picker toggle ignored (syncing) code=%s", code)
             return
         var = self._calc_picker_vars.get(code)
         if var is None:
+            _log.warning("picker toggle: no var for code=%s", code, extra={"tag": "Расчёт"})
             return
-        if var.get():
-            if not any(e.code == code for e in self._calc_entries):
-                self._add_test_to_calc(code)
-        else:
-            entry = next((e for e in self._calc_entries if e.code == code), None)
-            if entry:
-                self._remove_calc_entry(entry)
+        checked = bool(var.get())
+        _log.info(
+            "picker toggle code=%s checked=%s left_before=%s",
+            code,
+            checked,
+            len(self._calc_entries),
+            extra={"tag": "Расчёт"},
+        )
+        try:
+            if checked:
+                if not any(e.code == code for e in self._calc_entries):
+                    self._add_test_to_calc(code)
+            else:
+                entry = next((e for e in self._calc_entries if e.code == code), None)
+                if entry:
+                    self._remove_calc_entry(entry)
+            _log.info(
+                "picker toggle done code=%s left_after=%s count_label=%r",
+                code,
+                len(self._calc_entries),
+                self.calc_count_var.get() if hasattr(self, "calc_count_var") else "",
+                extra={"tag": "Расчёт"},
+            )
+            # гарантировать, что левая панель видна и canvas обновлён
+            try:
+                self._calc_canvas.update_idletasks()
+                if hasattr(self, "_calc_canvas_window"):
+                    self._calc_canvas.itemconfigure(
+                        self._calc_canvas_window,
+                        width=max(int(self._calc_canvas.winfo_width()), 1),
+                    )
+                self._calc_canvas.configure(scrollregion=self._calc_canvas.bbox("all"))
+            except tk.TclError:
+                pass
+        except Exception as exc:
+            _log.exception("picker toggle failed code=%s: %s", code, exc, extra={"tag": "Расчёт"})
+            messagebox.showerror("Расчёт", f"Не удалось добавить испытание:\n{exc}")
 
     def _picker_select_suggested(self) -> None:
         """Отметить все испытания из заявки для текущей марки."""
         mark = self.mark_var.get().strip()
         if not mark:
+            _log.warning("picker_select_suggested: empty mark", extra={"tag": "Расчёт"})
             messagebox.showinfo("Расчёт", "Сначала укажите марку кабеля.")
             return
         codes = self._suggested_test_codes_for_mark(mark)
         if not codes:
+            _log.info(
+                "picker_select_suggested: no suggested codes mark=%r",
+                mark[:80],
+                extra={"tag": "Расчёт"},
+            )
             messagebox.showinfo(
                 "Расчёт",
                 "Для этой марки нет подсказок из заявки.\n"
@@ -1095,16 +1150,26 @@ class CalcTabMixin:
                     variable=var,
                     command=lambda c=code: self._on_picker_toggle(c),
                     style="Card.TCheckbutton",
-                    takefocus=False,
+                    takefocus=True,
                 )
                 cb.pack(side="left", anchor="w", fill="x", expand=True)
-                self._calc_picker_checkbuttons[code] = cb
-                ttk.Label(
+                # Клик по коду справа — тот же toggle (иногда CB «не ловит» hit-area)
+                def _row_click(_event=None, c=code, v=var) -> str:
+                    if self._calc_picker_syncing:
+                        return "break"
+                    v.set(not bool(v.get()))
+                    self._on_picker_toggle(c)
+                    return "break"
+
+                code_lbl = ttk.Label(
                     row,
                     text=code,
                     style="CardMuted.TLabel",
                     width=22,
-                ).pack(side="right", padx=(4, 0))
+                )
+                code_lbl.pack(side="right", padx=(4, 0))
+                code_lbl.bind("<Button-1>", _row_click)
+                self._calc_picker_checkbuttons[code] = cb
 
         if hasattr(self, "calc_picker_stats_var"):
             self.calc_picker_stats_var.set(
@@ -1119,9 +1184,21 @@ class CalcTabMixin:
     def _run_calculate(self) -> None:
         mark = self.mark_var.get().strip()
         if not mark:
+            _log.warning(
+                "calculate abort: empty mark (entry=%r left_n=%s)",
+                getattr(self, "calc_mark_entry", None) and self.calc_mark_entry.get(),
+                len(self._calc_entries),
+                extra={"tag": "Расчёт"},
+            )
             messagebox.showwarning("Расчёт", "Укажите марку кабеля.")
             return
         if not self._calc_entries:
+            _log.warning(
+                "calculate abort: no tests selected mark=%r picker_visible=%s",
+                mark[:80],
+                len(getattr(self, "_calc_picker_visible_codes", []) or []),
+                extra={"tag": "Расчёт"},
+            )
             messagebox.showwarning(
                 "Расчёт",
                 "Отметьте испытания справа (поиск / категории) или «Из заявки →».",
@@ -1133,19 +1210,45 @@ class CalcTabMixin:
         hours = self._build_hours_map()
         try:
             discount = float(self.calc_discount_var.get().replace(",", "."))
-        except ValueError:
+        except ValueError as exc:
+            _log.warning(
+                "calculate: bad discount %r → 0 (%s)",
+                self.calc_discount_var.get(),
+                exc,
+                extra={"tag": "Расчёт"},
+            )
             discount = 0.0
         try:
             markup = float(self.calc_markup_var.get().replace(",", "."))
-        except ValueError:
+        except ValueError as exc:
+            _log.warning(
+                "calculate: bad markup %r → 0 (%s)",
+                self.calc_markup_var.get(),
+                exc,
+                extra={"tag": "Расчёт"},
+            )
             markup = 0.0
         has_armor = self.calc_armor_var.get() or None
         self.status.set("Расчёт…")
+        db_path = self.db_path
+        _log.info(
+            "GUI calculate start mark=%r n_tests=%s codes=%s discount=%s markup=%s "
+            "armor=%s qty=%s hours_keys=%s",
+            mark[:80],
+            len(test_list),
+            test_list,
+            discount,
+            markup,
+            has_armor,
+            quantities,
+            list(hours.keys())[:12],
+            extra={"tag": "Расчёт"},
+        )
 
         def work() -> None:
             try:
                 _log.info(
-                    "GUI calculate mark=%r codes=%s",
+                    "GUI calculate worker mark=%r codes=%s",
                     mark[:80],
                     test_list,
                     extra={"tag": "Расчёт"},
@@ -1154,13 +1257,13 @@ class CalcTabMixin:
                     mark,
                     test_list,
                     hours,
-                    self.db_path,
+                    db_path,
                     quantities=quantities,
                     discount_percent=discount,
                     markup_percent=markup,
                     has_armor=has_armor,
                 )
-                calc_id = save_calculation(calc, self.db_path)
+                calc_id = save_calculation(calc, db_path)
                 _log.info(
                     "GUI calculate ok id=%s total_with_vat=%s lines=%s",
                     calc_id,
@@ -1169,19 +1272,28 @@ class CalcTabMixin:
                     extra={"tag": "Расчёт"},
                 )
                 text = format_breakdown(calc) + f"\n\n✓ Сохранено в БД (id={calc_id})"
-                self.after(0, lambda: self._show_calc_result_mode(text))
-                self.after(0, self._load_history)
-                self.after(0, self._load_kp_calculations)
-                self.after(0, lambda: self.status.set("Расчёт выполнен"))
+                try:
+                    self.after(0, lambda: self._show_calc_result_mode(text))
+                    self.after(0, self._load_history)
+                    self.after(0, self._load_kp_calculations)
+                    self.after(0, lambda: self.status.set("Расчёт выполнен"))
+                except RuntimeError:
+                    _log.warning(
+                        "calculate done: cannot schedule after() — no main loop",
+                        extra={"tag": "Расчёт"},
+                    )
             except Exception as exc:
                 _log.exception("GUI calculate failed: %s", exc, extra={"tag": "Расчёт"})
-                self.after(0, lambda: messagebox.showerror("Ошибка расчёта", str(exc)))
-                self.after(0, lambda: self.status.set("Ошибка"))
+                try:
+                    self.after(0, lambda: messagebox.showerror("Ошибка расчёта", str(exc)))
+                    self.after(0, lambda: self.status.set("Ошибка"))
+                except RuntimeError:
+                    pass
 
         threading.Thread(target=work, daemon=True).start()
 
     def _clear_calc(self) -> None:
-        self.mark_var.set("")
+        self._set_calc_mark_field("")
         self._clear_calc_tests()
         self._show_calc_picker_mode()
         self._set_text(self.calc_output, "")
@@ -1189,6 +1301,7 @@ class CalcTabMixin:
 
     def _use_mark_in_calc(self) -> None:
         if not self._extraction_draft:
+            _log.warning("use_mark_in_calc abort: no draft", extra={"tag": "Расчёт"})
             messagebox.showinfo(
                 "Расчёт",
                 "Сначала извлеките заявку на вкладке «1. Заявка».",
@@ -1197,6 +1310,18 @@ class CalcTabMixin:
 
         entry = self._selected_draft_mark()
         if entry is None:
+            n = len(self._extraction_draft.marks) if self._extraction_draft else 0
+            sel = ()
+            try:
+                sel = self.marks_tree.selection() if hasattr(self, "marks_tree") else ()
+            except tk.TclError:
+                pass
+            _log.warning(
+                "use_mark_in_calc abort: no mark selected draft_marks=%s tree_sel=%s",
+                n,
+                sel,
+                extra={"tag": "Расчёт"},
+            )
             messagebox.showinfo(
                 "Расчёт",
                 "Выберите марку в таблице (клик по строке), затем «→ В расчёт» или двойной клик.",
@@ -1204,31 +1329,104 @@ class CalcTabMixin:
             return
 
         if not entry.accepted:
+            _log.info(
+                "use_mark_in_calc: mark not accepted, ask operator mark=%r",
+                (entry.mark or "")[:60],
+                extra={"tag": "Расчёт"},
+            )
             if not messagebox.askyesno(
                 "Марка снята",
                 f"Марка «{entry.mark[:60]}» не принята (—).\nВсё равно подставить в расчёт?",
             ):
+                _log.info("use_mark_in_calc abort: operator refused unaccepted", extra={"tag": "Расчёт"})
                 return
 
         if not self._extraction_confirmed and self.confirm_only_var.get():
+            _log.info(
+                "use_mark_in_calc: draft not confirmed, ask operator",
+                extra={"tag": "Расчёт"},
+            )
             if not messagebox.askyesno(
                 "Черновик",
                 "Заявка ещё не подтверждена. Подставить марку из черновика?",
             ):
+                _log.info("use_mark_in_calc abort: operator refused draft", extra={"tag": "Расчёт"})
                 return
 
-        mark_text = entry.mark
-        self.mark_var.set(mark_text)
-        if self.notebook:
+        mark_text = (entry.mark or "").strip()
+        # Сначала вкладка «Расчёт», потом запись в поле — иначе Entry на скрытой
+        # вкладке иногда не показывает textvariable (Windows/ttk).
+        if hasattr(self, "go_section"):
+            self.go_section("calc")
+        elif self.notebook:
             self.notebook.select(self.tab_calc)
+        self.update_idletasks()
+        self._set_calc_mark_field(mark_text)
+        self._show_calc_picker_mode()
         self._update_calc_suggestions_hint()
+        self._refresh_calc_picker()
         codes = self._suggested_test_codes_for_mark(mark_text)
+        shown = (self.mark_var.get() or "").strip()
+        entry_shown = ""
+        try:
+            if hasattr(self, "calc_mark_entry"):
+                entry_shown = self.calc_mark_entry.get().strip()
+        except tk.TclError:
+            entry_shown = "<tcl-error>"
+        _log.info(
+            "use_mark_in_calc mark=%r var=%r entry=%r accepted=%s suggested=%s "
+            "req=%r confirmed=%s picker_codes=%s",
+            mark_text[:80],
+            shown[:80],
+            entry_shown[:80],
+            entry.accepted,
+            codes,
+            (entry.requirements_raw or "")[:120],
+            self._extraction_confirmed,
+            len(getattr(self, "_calc_picker_visible_codes", []) or []),
+            extra={"tag": "Расчёт"},
+        )
+        if shown != mark_text or (entry_shown and entry_shown != mark_text):
+            _log.warning(
+                "use_mark_in_calc display mismatch mark=%r var=%r entry=%r",
+                mark_text[:80],
+                shown[:80],
+                entry_shown[:80],
+                extra={"tag": "Расчёт"},
+            )
+            # повторная запись + icursor
+            self._set_calc_mark_field(mark_text)
         if codes:
             self.status.set(
-                f"Марка подставлена · из заявки: {', '.join(codes)} — «Испытания из заявки»"
+                f"Марка «{mark_text[:40]}» · ★ из заявки: {len(codes)} — "
+                "«Испытания из заявки» или галочки справа"
             )
         else:
-            self.status.set("Марка подставлена в расчёт — нажмите «Рассчитать»")
+            self.status.set(
+                f"Марка «{mark_text[:40]}» в поле «Марка кабеля» — отметьте "
+                "испытания справа и «Рассчитать»"
+            )
+
+    def _set_calc_mark_field(self, mark_text: str) -> None:
+        """Записать марку в StringVar и гарантировать отображение в Entry."""
+        text = (mark_text or "").strip()
+        self.mark_var.set(text)
+        entry = getattr(self, "calc_mark_entry", None)
+        if entry is not None:
+            try:
+                # Явная синхронизация widget ← var (на случай рассинхрона ttk)
+                current = entry.get()
+                if current != text:
+                    entry.delete(0, "end")
+                    entry.insert(0, text)
+                entry.icursor("end")
+                entry.xview_moveto(0)
+            except tk.TclError:
+                pass
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
 
     def _delete_selected_calculation(self) -> None:
         sel = self.history_tree.selection()
