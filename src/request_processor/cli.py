@@ -105,6 +105,68 @@ def migrate_db_cmd(db: str) -> None:
     click.echo(click.style("✓ Миграция выполнена.", fg="green"))
 
 
+@cli.command("db-info")
+@click.option("--db", default="data/app.db", show_default=True)
+def db_info_cmd(db: str) -> None:
+    """Показывает роль БД: dev / work_copy / work (см. docs/db_profile.example.yaml)."""
+    from .persistence.db_profile import format_db_info, load_db_profile
+
+    prof = load_db_profile(db)
+    click.echo(format_db_info(db, profile=prof))
+    if prof.is_dev_scratch:
+        click.echo(
+            click.style(
+                "\n→ Это тестовая/неразмеченная БД. Не считайте org/заказы источником истины.",
+                fg="yellow",
+            )
+        )
+    elif prof.role == "work_copy":
+        click.echo(
+            click.style(
+                "\n→ Копия с рабочего ПК: для данных — источник истины на этом компьютере.",
+                fg="green",
+            )
+        )
+    elif prof.role == "work":
+        click.echo(click.style("\n→ Боевая БД рабочего ПК.", fg="green"))
+
+
+@cli.command("db-role")
+@click.option(
+    "--set",
+    "role",
+    required=True,
+    type=click.Choice(["dev", "work_copy", "work"], case_sensitive=False),
+    help="Роль: dev | work_copy | work",
+)
+@click.option("--source", default="", help="Откуда БД, напр. «рабочий ПК USB 2026-07-28»")
+@click.option("--notes", default="", help="Заметка для себя/агента")
+@click.option("--label", default="", help="Короткая подпись в GUI (иначе по роли)")
+@click.option("--db", default="data/app.db", show_default=True)
+def db_role_cmd(role: str, source: str, notes: str, label: str, db: str) -> None:
+    """Помечает активную data/app.db: тестовая или копия/рабочая.
+
+    После копирования app.db с рабочего ПК на dev::
+
+        request-processor db-role --set work_copy --source "рабочий ПК 2026-07-28"
+
+    Вернуть scratch на dev::
+
+        request-processor db-role --set dev --notes "локальные эксперименты"
+    """
+    from .persistence.db_profile import format_db_info, set_db_role
+
+    prof = set_db_role(
+        role.lower(),  # type: ignore[arg-type]
+        db_path=db,
+        source=source,
+        notes=notes,
+        label=label,
+    )
+    click.echo(click.style(f"✓ Роль БД: {prof.role} ({prof.ui_label()})", fg="green"))
+    click.echo(format_db_info(db, profile=prof))
+
+
 @cli.command("load-data")
 @click.option("--price", required=True, type=click.Path(exists=True), help="Путь к прайс-листу .xlsx")
 @click.option("--db", default="data/app.db", show_default=True)

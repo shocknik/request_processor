@@ -6,7 +6,8 @@
 
 - **Имя продукта:** Lab_request  
 - **Пакет / CLI:** `request-processor`  
-- **Версия:** см. `pyproject.toml` (`0.9.1`)  
+- **Версия приложения:** **только** `pyproject.toml` `[project].version` (см. `docs/VERSIONING.md`). README/zip — не SoT.  
+
 - **Стек:** Python ≥ 3.10, tkinter GUI, SQLite (`data/app.db`), Click CLI, pytest  
 - **Код:** `src/request_processor/`  
 - **Не коммитить:** `data/` (кроме `templates/`, `families/`), `.venv/`, `dist/`, `*.db`, локальные yaml/knowledge
@@ -19,6 +20,30 @@
 4. **LLM** — opt-in (Ollama); не делать обязательной зависимостью.  
 5. **Секреты / prod-пути** — не хардкодить `W:\`, логины, ключи в коде.
 6. ТУ и другие документы нельзя коммитить НИКОГДА, они должны храниться на локальном компьютере, а потом может быть выгрузим в облако. Максимум, что можно будед делать это передавать БАЗУ между рабочим ПК и ПК разработки. БАЗУ - где есть структурированая информация о ТУ.
+
+### Роли БД (dev vs рабочая) — обязательно разделять
+
+Активный файл всегда `data/app.db`. **Что это за БД** — в метке `data/db_profile.local.yaml` (не в git):
+
+| role | Где | Смысл |
+|------|-----|--------|
+| **dev** | ПК разработки | Тестовая/scratch. **Не** источник истины (org, заказы, «как в проде»). |
+| **work_copy** | ПК разработки | Копия с рабочего ПК. Для орг/заказов/прайса — **истина**. |
+| **work** | Рабочий ПК | Боевая БД оператора. |
+
+```powershell
+request-processor db-info
+# после копирования app.db с рабочего ПК:
+request-processor db-role --set work_copy --source "рабочий ПК 2026-07-28"
+# scratch снова:
+request-processor db-role --set dev --notes "локальные эксперименты"
+```
+
+- GUI: заголовок `Lab_request · БД: … [DEV|WORK-COPY|WORK]`.
+- Без метки → считаем **dev** («не размечена»).
+- Метка **на файл**: `data/app.db` → `data/db_profile.local.yaml`; другие `*.db` → `*.db.profile.yaml`.
+- **Не** чинить «грязные» org в local dev как prod-данные; **не** копировать dev-`app.db` на рабочий ПК.
+- Пример: `docs/db_profile.example.yaml`. Версии: `docs/VERSIONING.md`.
 
 ## Архитектура (куда класть код)
 

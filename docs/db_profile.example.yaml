@@ -1,0 +1,28 @@
+# Метка роли — рядом с файлом БД (каталог data/ не в git):
+#   data/app.db              → data/db_profile.local.yaml
+#   data/test_smoke.db       → data/test_smoke.db.profile.yaml
+#   path/to/other.db         → path/to/other.db.profile.yaml
+#
+# CLI:
+#   request-processor db-role --set work_copy --source "рабочий ПК 2026-07-28"
+#   request-processor db-info
+#
+# Активный файл по умолчанию: data/app.db (или --db).
+# Метка говорит, ЧТО сейчас лежит в этом файле.
+
+# --- роли ---
+# dev        — локальная тестовая на ПК разработки. НЕ источник истины.
+# work_copy  — копия с рабочего ПК (на dev). Для орг/заказов/прайса — истина.
+# work       — боевая БД на рабочем ПК (оператор).
+
+role: dev
+label: тестовая
+source: ""
+notes: "Scratch на dev. Не копировать на рабочий ПК."
+# marked_at / size_bytes / mtime_iso — пишет CLI db-role автоматически
+
+# Пример после привоза БД с работы:
+# role: work_copy
+# label: копия рабочей
+# source: "рабочий ПК, USB 2026-07-28"
+# notes: "Источник истины для org/заказов. Не prepare-prod-db."

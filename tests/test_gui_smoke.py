@@ -138,16 +138,7 @@ def test_calc_picker_has_search_and_category(gui_app: RequestProcessorApp) -> No
     gui_app._refresh_calc_picker()
     if n_catalog:
         assert len(gui_app._calc_picker_visible_codes) == n_catalog
-    # смена «режима» (если var ещё есть) не должна прятать прайс
-    if hasattr(gui_app, "calc_picker_mode_var"):
-        gui_app.calc_picker_mode_var.set("selected")
-        gui_app._refresh_calc_picker()
-        if n_catalog:
-            assert len(gui_app._calc_picker_visible_codes) == n_catalog
-        gui_app.calc_picker_mode_var.set("suggested")
-        gui_app._refresh_calc_picker()
-        if n_catalog:
-            assert len(gui_app._calc_picker_visible_codes) == n_catalog
+    # radio «режим» убран — прайс всегда полный (mode_var больше нет)
 
 
 def _seed_picker_tests(gui_app: RequestProcessorApp) -> None:

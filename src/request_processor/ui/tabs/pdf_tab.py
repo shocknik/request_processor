@@ -141,7 +141,7 @@ class PdfTabMixin:
         root.rowconfigure(4, weight=1)  # mid pane row (index after dynamic pack — use pack)
 
         # --- hidden path var (используется extract/browse) ---
-        self.pdf_path_var = tk.StringVar()
+        self.pdf_path_var = tk.StringVar(master=self)
         self.pdf_path_var.trace_add("write", lambda *_: self._on_pdf_path_changed())
 
         # --- Page header ---
@@ -171,11 +171,11 @@ class PdfTabMixin:
         # OCR / флаги сохранения — свёрнуты; открываются «Параметры OCR»
         self.pdf_opts_frame = ttk.Frame(root, style="Card.TFrame", padding=8)
         opts = self.pdf_opts_frame
-        self.ocr_var = tk.BooleanVar(value=True)
+        self.ocr_var = tk.BooleanVar(master=self, value=True)
         ttk.Checkbutton(opts, text="OCR для сканов", variable=self.ocr_var, style="Card.TCheckbutton").pack(
             side="left"
         )
-        self.ocr_pytorch_var = tk.BooleanVar(value=False)
+        self.ocr_pytorch_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(
             opts,
             text="torch-CV (эксперимент)",
@@ -184,7 +184,7 @@ class PdfTabMixin:
             style="Card.TCheckbutton",
         ).pack(side="left", padx=(10, 0))
         ttk.Label(opts, text="DPI:", style="CardMuted.TLabel").pack(side="left", padx=(12, 2))
-        self.ocr_dpi_var = tk.IntVar(value=SCAN_OCR_DPI)
+        self.ocr_dpi_var = tk.IntVar(master=self, value=SCAN_OCR_DPI)
         self.ocr_dpi_combo = ttk.Combobox(
             opts,
             textvariable=self.ocr_dpi_var,
@@ -193,7 +193,7 @@ class PdfTabMixin:
             state="readonly",
         )
         self.ocr_dpi_combo.pack(side="left")
-        self.confirm_only_var = tk.BooleanVar(value=True)
+        self.confirm_only_var = tk.BooleanVar(master=self, value=True)
         ttk.Checkbutton(
             opts,
             text="Сохранять только после подтверждения",
@@ -201,11 +201,11 @@ class PdfTabMixin:
             command=self._on_confirm_only_toggle,
             style="Card.TCheckbutton",
         ).pack(side="left", padx=(8, 0))
-        self.save_marks_var = tk.BooleanVar(value=False)
+        self.save_marks_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(
             opts, text="Марки в БД сразу", variable=self.save_marks_var, style="Card.TCheckbutton"
         ).pack(side="left", padx=(12, 0))
-        self.save_orgs_var = tk.BooleanVar(value=False)
+        self.save_orgs_var = tk.BooleanVar(master=self, value=False)
         ttk.Checkbutton(
             opts, text="Орг. в БД сразу", variable=self.save_orgs_var, style="Card.TCheckbutton"
         ).pack(side="left", padx=(8, 0))
@@ -217,7 +217,7 @@ class PdfTabMixin:
         self.validation_warn_frame = tk.Frame(root, bg=COLORS["warn_bg"], padx=8, pady=4)
         warn_header = tk.Frame(self.validation_warn_frame, bg=COLORS["warn_bg"])
         warn_header.pack(fill="x")
-        self.validation_warn_summary_var = tk.StringVar(value="")
+        self.validation_warn_summary_var = tk.StringVar(master=self, value="")
         tk.Label(
             warn_header,
             textvariable=self.validation_warn_summary_var,
@@ -270,7 +270,7 @@ class PdfTabMixin:
         self.confirm_btn_top = None
         # validation strip (legacy color bar — keep for tests/status updates)
         self.validation_status_bar = tk.Frame(root, bg=COLORS["muted"], width=0, height=0)
-        self.validation_status_var = tk.StringVar(value="Документ не обработан")
+        self.validation_status_var = tk.StringVar(master=self, value="Документ не обработан")
 
         # --- Mid: Марки (≈62%) | Организации (≈38%) ---
         mid = ttk.PanedWindow(root, orient="horizontal")
@@ -459,11 +459,11 @@ class PdfTabMixin:
         org_form.pack(fill="x")
         org_form.columnconfigure(0, weight=1)
 
-        self.draft_customer_var = tk.StringVar()
-        self.draft_customer_inn_var = tk.StringVar()
-        self.draft_customer_addr_var = tk.StringVar()
-        self.draft_manufacturer_var = tk.StringVar()
-        self.draft_recipient_var = tk.StringVar()
+        self.draft_customer_var = tk.StringVar(master=self)
+        self.draft_customer_inn_var = tk.StringVar(master=self)
+        self.draft_customer_addr_var = tk.StringVar(master=self)
+        self.draft_manufacturer_var = tk.StringVar(master=self)
+        self.draft_recipient_var = tk.StringVar(master=self)
         self.draft_customer_inn_var.trace_add("write", lambda *_: self._on_inn_changed())
 
         # tk.Entry (не только ttk): надёжный selection/copy/paste на Windows + ПКМ
@@ -542,7 +542,8 @@ class PdfTabMixin:
             anchor="w",
         ).pack(fill="x")
         self._context_placeholder_var = tk.StringVar(
-            value="Выберите марку в таблице, чтобы увидеть контекст распознавания."
+            master=self,
+            value="Выберите марку в таблице, чтобы увидеть контекст распознавания.",
         )
         self._context_placeholder = tk.Label(
             ctx,
@@ -1956,12 +1957,10 @@ class PdfTabMixin:
         save_label: str,
         on_save,
     ) -> None:
-        dialog = tk.Toplevel(self)
-        dialog.title(title)
-        dialog.transient(self)
-        dialog.configure(bg=COLORS["bg"])
-        # Не grab_set до geometry: на части Windows окно остаётся 1×1 «пустым».
-        dialog.minsize(520, 480)
+        # D4: create_modal → widgets → present_modal (grab после geometry)
+        from ..modal import create_modal, present_modal
+
+        dialog = create_modal(self, title=title, minsize=(520, 480))
         # Кнопки снизу ВСЕГДА видны (pack bottom first), форма — остаток
         btns = ttk.Frame(dialog, padding=(12, 8, 12, 12))
         btns.pack(side="bottom", fill="x")
@@ -2217,44 +2216,24 @@ class PdfTabMixin:
 
         dialog.bind("<Return>", lambda _e: save())
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
-        # Явный размер + lift: fit_window иногда даёт 1×1 до map на Windows.
-        dialog.update_idletasks()
-        fit_window_to_screen(dialog, prefer_w=560, prefer_h=520)
+        first_entry: ttk.Entry | None = None
         try:
-            geom = dialog.geometry()
-            # geometry «1x1+…» — принудительно нормальный размер
-            if geom.startswith("1x1") or dialog.winfo_width() < 200:
-                sw = max(dialog.winfo_screenwidth(), 800)
-                sh = max(dialog.winfo_screenheight(), 600)
-                w, h = 560, 520
-                x = max(0, (sw - w) // 2)
-                y = max(0, (sh - h) // 2)
-                dialog.geometry(f"{w}x{h}+{x}+{y}")
-                _log.warning(
-                    "mark editor geometry was tiny (%s) — forced %sx%s",
-                    geom,
-                    w,
-                    h,
-                    extra={"tag": "Заявка"},
-                )
-        except tk.TclError:
-            dialog.geometry("560x520")
-        dialog.deiconify()
-        dialog.lift()
-        try:
-            dialog.grab_set()
-        except tk.TclError:
-            pass
-        dialog.focus_force()
-        try:
-            # фокус в первое поле
             for child in form.winfo_children():
                 if isinstance(child, ttk.Entry):
-                    child.focus_set()
-                    child.selection_range(0, "end")
+                    first_entry = child
                     break
         except tk.TclError:
+            first_entry = None
+        present_modal(dialog, prefer_w=560, prefer_h=520, focus=first_entry)
+        try:
+            dialog.focus_force()
+        except tk.TclError:
             pass
+        if first_entry is not None:
+            try:
+                first_entry.selection_range(0, "end")
+            except tk.TclError:
+                pass
 
     def _add_draft_mark(self) -> None:
         if not self._extraction_draft:
@@ -3071,14 +3050,17 @@ class PdfTabMixin:
                         confirm_only=confirm_only,
                     )
                 except Exception as exc:
+                    err_msg = str(exc)
                     _log.exception("free-text extract failed")
 
-                    def fail() -> None:
-                        messagebox.showerror("Текст", str(exc))
+                    def fail(msg: str = err_msg) -> None:
+                        messagebox.showerror("Текст", msg)
                         self.status.set("Ошибка разбора текста")
                         self._update_validation_status_bar(state="error")
 
-                    self.after(0, fail)
+                    from ..bg_job import schedule_ui
+
+                    schedule_ui(self, fail, tag="Заявка")
 
             threading.Thread(target=work, daemon=True).start()
 

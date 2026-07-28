@@ -1,6 +1,7 @@
 # Документация request-processor
 
-**Версия:** 0.9.1  
+**Версия приложения:** см. корневой `pyproject.toml` · [VERSIONING.md](./VERSIONING.md)  
+
 **GitHub:** https://github.com/shocknik/request_processor  
 
 ## Для установки на рабочий ПК (начните здесь)
@@ -16,12 +17,14 @@
 | Файл | Назначение |
 |------|------------|
 | **[DEV_AGENT_SETUP.md](./DEV_AGENT_SETUP.md)** | VS Code + Grok: как настроить IDE/агента |
+| **[VERSIONING.md](./VERSIONING.md)** | Версии по осям: package / схема БД / protocol_meta / роль данных |
+| **[db_profile.example.yaml](./db_profile.example.yaml)** | Метка роли БД (dev / work_copy / work) |
 | `ARCHITECTURE_ROADMAP.md` | Карта S1–S5 |
-| `UI_ARCHITECTURE.md` | Sidebar, splash, tabs |
+| `UI_ARCHITECTURE.md` | Sidebar, splash, bg_job, modal, tabs |
 | `TEST_PROGRAMS.md` | Программы испытаний (S4) |
 | `REQUIREMENTS_BASE.md` | Нормы / aliases (S5) |
 | `PROTOCOL_GENERATOR_BRIDGE.md` | JSON → protocol_generator |
-| `UPDATE.md` | Обновление in-place |
+| `UPDATE.md` | Обновление in-place · zip `0.9.1_20260728` |
 | `client_profiles.example.yaml` | Пример локальных профилей клиентов |
 | `lab_profile.example.yaml` | Реквизиты лаборатории |
 | `План_Итерации_2.md` | Исторический план (если есть в полной копии) |
@@ -31,7 +34,7 @@
 ## Obsidian (только на машине разработчика)
 
 Полный журнал: `Python/Проект request-processor/`  
-Ключевые заметки: 40 (LLM), 41 (данные prod), 43 (развёртывание на рабочий ПК), 44 (паспорт).
+Ключевые заметки: **69** (версии и потоки), 41 (данные prod), 43 (развёртывание), 44 (паспорт), 65–68 (июль 2026).
 
 ---
 
@@ -45,6 +48,7 @@
 - GUI под 1920×1080
 - Паспорт экспериментальной эксплуатации
 - **2026-07-27 (вечер, cycle polish):** DOCX full text + org name clean; HITL confirm/selection/dialogs; calc mark field + picker→left; KP thread-safe style; document pack sync + diagnostics logs; e2e workflow tests
+- **2026-07-28 (debt + org + ops):** `ui/bg_job`, `ui/modal`; org-адреса без подмены чужим заводом; `db-info`/`db-role`; `VERSIONING.md`; zip `request_processor_0.9.1_20260728`; ~283 tests
 
 ### v0.8.x
 

@@ -120,13 +120,16 @@ def build_document_pack(
         extra={"tag": "Пакет"},
     )
 
-    # КП
+    # КП (optional — если нет, пишем в README, не падаем)
     kp_src = details.get("kp_output_path")
+    kp_attached = False
+    kp_note: str | None = None
     if kp_src and Path(kp_src).exists():
         kp_dst = pack_dir / Path(kp_src).name
         try:
             shutil.copy2(kp_src, kp_dst)
             files.append(str(kp_dst))
+            kp_attached = True
             _log.info("pack step KP copied → %s", kp_dst.name, extra={"tag": "Пакет"})
         except OSError as exc:
             _log.exception(
@@ -137,12 +140,14 @@ def build_document_pack(
             )
             raise
     elif kp_src:
+        kp_note = "КП не приложен: путь в заказе есть, файла на диске нет."
         _log.warning(
             "pack step KP missing on disk path=%s (order has path but file absent)",
             kp_src,
             extra={"tag": "Пакет"},
         )
     else:
+        kp_note = "КП не приложен: в заказе нет kp_output_path."
         _log.warning(
             "pack step KP skipped: no kp_output_path on order_id=%s",
             order_id,
@@ -228,9 +233,11 @@ def build_document_pack(
         "application_path": str(app_path),
         "protocol_path": str(protocol_path),
         "files": [Path(f).name for f in files],
+        "kp_attached": kp_attached,
         "note": (
             "Пакет v1: заявка + КП (если был) + макет протокола + JSON. "
             "Набор выдержек из ТУ/ПМИ — в следующих итерациях (rag_corpus)."
+            + (f" {kp_note}" if kp_note else "")
         ),
     }
     summary_path = pack_dir / "summary.json"
@@ -242,22 +249,27 @@ def build_document_pack(
 
     # README для оператора
     readme = pack_dir / "README.txt"
-    readme.write_text(
-        "\n".join(
-            [
-                f"Пакет документов · заказ №{order_id}",
-                f"Заказчик: {customer}",
-                f"Сформирован: {stamp}",
-                "",
-                "Содержимое:",
-                *[f"  - {Path(f).name}" for f in files],
-                "",
-                "Макет протокола — черновик для доработки оператором.",
-                "Проверьте реквизиты, НД, объём испытаний и результаты.",
-            ]
-        ),
-        encoding="utf-8",
+    readme_lines = [
+        f"Пакет документов · заказ №{order_id}",
+        f"Заказчик: {customer}",
+        f"Сформирован: {stamp}",
+        "",
+        "Содержимое:",
+        *[f"  - {Path(f).name}" for f in files],
+        "",
+    ]
+    if kp_note:
+        # D9: явная строка, если КП optional silent
+        readme_lines.extend([f"⚠ {kp_note}", ""])
+    elif kp_attached:
+        readme_lines.extend(["КП: приложен (копия из заказа).", ""])
+    readme_lines.extend(
+        [
+            "Макет протокола — черновик для доработки оператором.",
+            "Проверьте реквизиты, НД, объём испытаний и результаты.",
+        ]
     )
+    readme.write_text("\n".join(readme_lines), encoding="utf-8")
     files.append(str(readme))
 
     _log.info(

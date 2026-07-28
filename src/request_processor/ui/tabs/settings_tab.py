@@ -698,16 +698,13 @@ class SettingsTabMixin:
                 initial_code = row.get("test_code") or ""
                 initial_note = row.get("note") or ""
 
-        dialog = tk.Toplevel(self)
-        dialog.title(title)
-        dialog.geometry("520x260")
-        dialog.configure(bg=COLORS["bg"])
-        dialog.transient(self)
-        dialog.grab_set()
+        from ..modal import create_modal, present_modal
 
-        pattern_var = tk.StringVar(value=initial_pattern)
-        code_var = tk.StringVar(value=initial_code)
-        note_var = tk.StringVar(value=initial_note)
+        dialog = create_modal(self, title=title, minsize=(480, 220))
+
+        pattern_var = tk.StringVar(master=dialog, value=initial_pattern)
+        code_var = tk.StringVar(master=dialog, value=initial_code)
+        note_var = tk.StringVar(master=dialog, value=initial_note)
         codes = self._mapping_test_codes()
 
         ttk.Label(dialog, text="Фраза из заявки (подстрока):").grid(
@@ -757,6 +754,7 @@ class SettingsTabMixin:
             row=3, column=0, columnspan=2, pady=14
         )
         dialog.columnconfigure(1, weight=1)
+        present_modal(dialog, prefer_w=520, prefer_h=260)
 
     def _add_mapping_dialog(self) -> None:
         self._open_mapping_editor(mapping_id=None, title="Новый маппинг", save_label="Добавить")

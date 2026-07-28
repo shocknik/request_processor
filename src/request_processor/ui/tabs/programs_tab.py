@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 import tkinter as tk
 from datetime import datetime
@@ -272,51 +271,54 @@ class ProgramsTabMixin:
             return
         self.status.set("Импорт программы…")
         self.update_idletasks()
+        db_path = self.db_path
 
-        def work() -> None:
-            result = None
-            error = None
-            try:
-                from ...generation.program_importer import import_program_from_docx
+        from ..bg_job import run_bg_job
 
-                result = import_program_from_docx(path, db_path=self.db_path)
-            except Exception as exc:
-                error = str(exc)
+        def work() -> dict:
+            from ...generation.program_importer import import_program_from_docx
 
-            def done() -> None:
-                if error or not result:
-                    messagebox.showerror("Программы", error or "ошибка")
-                    self.status.set("Ошибка импорта программы")
-                    return
-                self._load_programs_table()
-                self.programs_tree.selection_set(str(result["program_id"]))
-                self._show_program_details()
-                self.status.set(
-                    f"Программа #{result['program_id']}: {result['items_count']} пунктов"
-                )
-                _log.info(
-                    "imported program id=%s items=%s from %s",
-                    result["program_id"],
-                    result["items_count"],
-                    path,
-                    extra={"tag": "Программа"},
-                )
-                m = int(result.get("matched") or 0)
-                u = int(result.get("unmatched") or 0)
-                from ...mapping.program_price_matcher import match_rate_summary
+            return import_program_from_docx(path, db_path=db_path)
 
-                rate = result.get("summary") or match_rate_summary(m, m + u)
-                messagebox.showinfo(
-                    "Программа импортирована",
-                    f"id={result['program_id']}\n"
-                    f"{result['name'][:100]}\n\n"
-                    f"Пунктов: {result['items_count']}\n"
-                    f"Прайс: {rate}",
-                )
+        def on_ok(result: dict) -> None:
+            self._load_programs_table()
+            self.programs_tree.selection_set(str(result["program_id"]))
+            self._show_program_details()
+            self.status.set(
+                f"Программа #{result['program_id']}: {result['items_count']} пунктов"
+            )
+            _log.info(
+                "imported program id=%s items=%s from %s",
+                result["program_id"],
+                result["items_count"],
+                path,
+                extra={"tag": "Программа"},
+            )
+            m = int(result.get("matched") or 0)
+            u = int(result.get("unmatched") or 0)
+            from ...mapping.program_price_matcher import match_rate_summary
 
-            self.after(0, done)
+            rate = result.get("summary") or match_rate_summary(m, m + u)
+            messagebox.showinfo(
+                "Программа импортирована",
+                f"id={result['program_id']}\n"
+                f"{result['name'][:100]}\n\n"
+                f"Пунктов: {result['items_count']}\n"
+                f"Прайс: {rate}",
+            )
 
-        threading.Thread(target=work, daemon=True).start()
+        def on_err(exc: BaseException) -> None:
+            messagebox.showerror("Программы", str(exc))
+            self.status.set("Ошибка импорта программы")
+
+        run_bg_job(
+            self,
+            work,
+            on_success=on_ok,
+            on_error=on_err,
+            name="import_program",
+            tag="Программа",
+        )
 
     def _match_program_price(self) -> None:
         sel = self.programs_tree.selection()

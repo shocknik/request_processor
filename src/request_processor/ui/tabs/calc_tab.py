@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 import tkinter as tk
 from datetime import datetime
@@ -136,7 +135,7 @@ class CalcTabMixin:
             self._apply_suggested_tests_from_application,
         ).pack(side="left", padx=(8, 0))
         self._accent_button(mark_row, "Рассчитать", self._run_calculate).pack(side="left", padx=(8, 0))
-        self.calc_suggestions_var = tk.StringVar(value="")
+        self.calc_suggestions_var = tk.StringVar(master=self, value="")
         ttk.Label(
             inner,
             textvariable=self.calc_suggestions_var,
@@ -153,18 +152,14 @@ class CalcTabMixin:
             text="Пример: ВВГ-Пнг(А) 3х4ок(М,РЕ)-0,66",
             style="CardMuted.TLabel",
         ).pack(anchor="w", pady=(2, 0))
-        self.mark_var.trace_add(
-            "write",
-            lambda *_: (
-                self._update_calc_suggestions_hint(),
-                self._show_calc_picker_mode(),
-                self._refresh_calc_picker(),
-            ),
-        )
+        # Debounce: полный rebuild picker на каждый символ лагает (D8).
+        # _show_calc_picker_mode уже вызывает _refresh — не дублировать.
+        self._calc_mark_after: str | None = None
+        self.mark_var.trace_add("write", lambda *_: self._on_calc_mark_typed())
 
         opts = ttk.Frame(top, style="Card.TFrame")
         opts.pack(fill="x", pady=(8, 0))
-        self.calc_armor_var = tk.BooleanVar(value=False)
+        self.calc_armor_var = tk.BooleanVar(master=self, value=False)
         armor_cb = ttk.Checkbutton(
             opts,
             text="Бронированный кабель (+0.5 к сложности образца)",
@@ -174,7 +169,7 @@ class CalcTabMixin:
         )
         armor_cb.pack(side="left")
         ttk.Label(opts, text="Скидка, %", style="CardMuted.TLabel").pack(side="left", padx=(16, 4))
-        self.calc_discount_var = tk.StringVar(value="0")
+        self.calc_discount_var = tk.StringVar(master=self, value="0")
         ttk.Spinbox(
             opts,
             textvariable=self.calc_discount_var,
@@ -184,7 +179,7 @@ class CalcTabMixin:
             width=5,
         ).pack(side="left")
         ttk.Label(opts, text="Наценка, %", style="CardMuted.TLabel").pack(side="left", padx=(12, 4))
-        self.calc_markup_var = tk.StringVar(value="0")
+        self.calc_markup_var = tk.StringVar(master=self, value="0")
         ttk.Spinbox(
             opts,
             textvariable=self.calc_markup_var,
@@ -280,7 +275,7 @@ class CalcTabMixin:
         search_row = ttk.Frame(picker_toolbar, style="Card.TFrame")
         search_row.pack(fill="x")
         ttk.Label(search_row, text="Поиск:", style="Card.TLabel").pack(side="left")
-        self.calc_picker_search_var = tk.StringVar(value="")
+        self.calc_picker_search_var = tk.StringVar(master=self, value="")
         search_entry = ttk.Entry(search_row, textvariable=self.calc_picker_search_var, width=28)
         search_entry.pack(side="left", padx=(4, 8), fill="x", expand=True)
         # debounce поиска: не перестраивать 60+ строк на каждый символ
@@ -294,7 +289,7 @@ class CalcTabMixin:
         self._picker_active_category: str = "Все"
         self._picker_category_ui_lock: bool = False
         # textvariable оставляем для smoke-тестов и чтения, но фильтр его не слушает
-        self.calc_picker_category_var = tk.StringVar(value="Все")
+        self.calc_picker_category_var = tk.StringVar(master=self, value="Все")
         self.calc_picker_category_combo = ttk.Combobox(
             search_row,
             textvariable=self.calc_picker_category_var,
@@ -329,16 +324,15 @@ class CalcTabMixin:
             text="Снять видимые",
             command=self._picker_clear_visible,
         ).pack(side="left")
-        self.calc_picker_stats_var = tk.StringVar(value="")
+        self.calc_picker_stats_var = tk.StringVar(master=self, value="")
         ttk.Label(
             bulk_row,
             textvariable=self.calc_picker_stats_var,
             style="CardMuted.TLabel",
         ).pack(side="right")
 
-        # режим radio убран: «Из заявки»/«Выбранные» без данных обнуляли список
-        # (выглядело как баг). Всегда полный прайс; подсказки — ★ и кнопка «Из заявки →».
-        self.calc_picker_mode_var = tk.StringVar(value="all")
+        # Radio «Все/Из заявки/Выбранные» убран: без данных обнуляли список.
+        # Всегда полный прайс; подсказки — ★ и кнопка «Из заявки →».
 
         ttk.Label(
             self.calc_picker_frame,
@@ -350,7 +344,7 @@ class CalcTabMixin:
 
         picker_list_frame = ttk.Frame(self.calc_picker_frame, style="Card.TFrame")
         picker_list_frame.pack(fill="both", expand=True)
-        self.calc_picker_list_stats_var = tk.StringVar(value="")
+        self.calc_picker_list_stats_var = tk.StringVar(master=self, value="")
         ttk.Label(
             picker_list_frame,
             textvariable=self.calc_picker_list_stats_var,
@@ -403,7 +397,8 @@ class CalcTabMixin:
         self._calc_picker_geometry_after: str | None = None
 
         self.calc_picker_empty_var = tk.StringVar(
-            value="Укажите марку — появятся испытания из заявки или полный справочник."
+            master=self,
+            value="Укажите марку — появятся испытания из заявки или полный справочник.",
         )
         self._calc_picker_empty_label = ttk.Label(
             picker_list_frame,
@@ -626,6 +621,22 @@ class CalcTabMixin:
             self.calc_result_frame.pack(fill="both", expand=True)
         self.calc_right_panel.configure(text="Результат расчёта")
         self._set_text(self.calc_output, text)
+
+    def _on_calc_mark_typed(self) -> None:
+        """Debounce ввода марки: hint + picker, без двойного refresh (D8)."""
+        after_id = getattr(self, "_calc_mark_after", None)
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except (tk.TclError, ValueError):
+                pass
+        self._calc_mark_after = self.after(180, self._apply_calc_mark_typed)
+
+    def _apply_calc_mark_typed(self) -> None:
+        self._calc_mark_after = None
+        self._update_calc_suggestions_hint()
+        # mode switch сам делает _refresh_calc_picker — не вызывать дважды
+        self._show_calc_picker_mode()
 
     def _on_picker_search_typed(self) -> None:
         """Поиск с короткой задержкой — иначе UI «мигает» на каждый символ."""
@@ -1245,52 +1256,48 @@ class CalcTabMixin:
             extra={"tag": "Расчёт"},
         )
 
-        def work() -> None:
-            try:
-                _log.info(
-                    "GUI calculate worker mark=%r codes=%s",
-                    mark[:80],
-                    test_list,
-                    extra={"tag": "Расчёт"},
-                )
-                calc = calculate_cost(
-                    mark,
-                    test_list,
-                    hours,
-                    db_path,
-                    quantities=quantities,
-                    discount_percent=discount,
-                    markup_percent=markup,
-                    has_armor=has_armor,
-                )
-                calc_id = save_calculation(calc, db_path)
-                _log.info(
-                    "GUI calculate ok id=%s total_with_vat=%s lines=%s",
-                    calc_id,
-                    calc.total_cost_with_vat,
-                    len(calc.lines),
-                    extra={"tag": "Расчёт"},
-                )
-                text = format_breakdown(calc) + f"\n\n✓ Сохранено в БД (id={calc_id})"
-                try:
-                    self.after(0, lambda: self._show_calc_result_mode(text))
-                    self.after(0, self._load_history)
-                    self.after(0, self._load_kp_calculations)
-                    self.after(0, lambda: self.status.set("Расчёт выполнен"))
-                except RuntimeError:
-                    _log.warning(
-                        "calculate done: cannot schedule after() — no main loop",
-                        extra={"tag": "Расчёт"},
-                    )
-            except Exception as exc:
-                _log.exception("GUI calculate failed: %s", exc, extra={"tag": "Расчёт"})
-                try:
-                    self.after(0, lambda: messagebox.showerror("Ошибка расчёта", str(exc)))
-                    self.after(0, lambda: self.status.set("Ошибка"))
-                except RuntimeError:
-                    pass
+        from ..bg_job import run_bg_job
 
-        threading.Thread(target=work, daemon=True).start()
+        def work() -> tuple[int, str]:
+            # pure: без tk / vars (D1)
+            calc = calculate_cost(
+                mark,
+                test_list,
+                hours,
+                db_path,
+                quantities=quantities,
+                discount_percent=discount,
+                markup_percent=markup,
+                has_armor=has_armor,
+            )
+            calc_id = save_calculation(calc, db_path)
+            text = format_breakdown(calc) + f"\n\n✓ Сохранено в БД (id={calc_id})"
+            return calc_id, text
+
+        def on_ok(result: tuple[int, str]) -> None:
+            calc_id, text = result
+            _log.info(
+                "GUI calculate ok id=%s",
+                calc_id,
+                extra={"tag": "Расчёт"},
+            )
+            self._show_calc_result_mode(text)
+            self._load_history()
+            self._load_kp_calculations()
+            self.status.set("Расчёт выполнен")
+
+        def on_err(exc: BaseException) -> None:
+            messagebox.showerror("Ошибка расчёта", str(exc))
+            self.status.set("Ошибка")
+
+        run_bg_job(
+            self,
+            work,
+            on_success=on_ok,
+            on_error=on_err,
+            name="calculate",
+            tag="Расчёт",
+        )
 
     def _clear_calc(self) -> None:
         self._set_calc_mark_field("")

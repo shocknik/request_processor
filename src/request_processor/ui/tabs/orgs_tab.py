@@ -225,28 +225,34 @@ class OrgsTabMixin:
 
     def _open_organization_editor(self, row: dict | None) -> None:
         is_new = row is None
-        dialog = tk.Toplevel(self)
+        from ..modal import create_modal, present_modal
+
         title_name = (row or {}).get("name", "новая") if row else "новая"
-        dialog.title(
-            "Новая организация" if is_new else f"Организация — {str(title_name)[:40]}"
+        title = (
+            "Новая организация"
+            if is_new
+            else f"Организация — {str(title_name)[:40]}"
         )
-        dialog.geometry("520x540")
-        dialog.configure(bg=COLORS["bg"])
-        dialog.transient(self)
-        dialog.grab_set()
+        dialog = create_modal(self, title=title, minsize=(480, 480))
 
         row = row or {}
         fields: dict[str, tk.Variable] = {
-            "name": tk.StringVar(value=row.get("name") or ""),
-            "inn": tk.StringVar(value=row.get("inn") or ""),
-            "kpp": tk.StringVar(value=row.get("kpp") or ""),
-            "postal_code": tk.StringVar(value=row.get("postal_code") or ""),
-            "address": tk.StringVar(value=row.get("address") or ""),
-            "phone": tk.StringVar(value=row.get("phone") or ""),
-            "email": tk.StringVar(value=row.get("email") or ""),
-            "fsa_registry_number": tk.StringVar(value=row.get("fsa_registry_number") or ""),
-            "org_type": tk.StringVar(value=row.get("org_type") or "unknown"),
-            "is_accredited": tk.BooleanVar(value=bool(row.get("is_accredited"))),
+            "name": tk.StringVar(master=dialog, value=row.get("name") or ""),
+            "inn": tk.StringVar(master=dialog, value=row.get("inn") or ""),
+            "kpp": tk.StringVar(master=dialog, value=row.get("kpp") or ""),
+            "postal_code": tk.StringVar(master=dialog, value=row.get("postal_code") or ""),
+            "address": tk.StringVar(master=dialog, value=row.get("address") or ""),
+            "phone": tk.StringVar(master=dialog, value=row.get("phone") or ""),
+            "email": tk.StringVar(master=dialog, value=row.get("email") or ""),
+            "fsa_registry_number": tk.StringVar(
+                master=dialog, value=row.get("fsa_registry_number") or ""
+            ),
+            "org_type": tk.StringVar(
+                master=dialog, value=row.get("org_type") or "unknown"
+            ),
+            "is_accredited": tk.BooleanVar(
+                master=dialog, value=bool(row.get("is_accredited"))
+            ),
         }
 
         form = ttk.Frame(dialog, padding=12)
@@ -397,6 +403,7 @@ class OrgsTabMixin:
             command=save,
         ).pack(side="left")
         ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
+        present_modal(dialog, prefer_w=520, prefer_h=540)
 
     def _fill_draft_org_fields(self, draft: ExtractionDraft) -> None:
         report = draft.report

@@ -55,6 +55,7 @@ Thumbs.db
 # Логи и временные файлы
 *.log
 *.tmp
+tmp/
 
 # Служебные папки IDE/агента
 agent-tools/
@@ -67,6 +68,8 @@ tools/*.exe
 _mech_extract/
 _from_work/
 data/client_profiles.local.yaml
+data/db_profile.local.yaml
+*.db.profile.yaml
 data/knowledge/
 
 # IDE / session (не продукт)

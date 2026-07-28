@@ -321,22 +321,21 @@ class TestsTabMixin:
         self._refresh_calc_picker()
 
     def _add_test_dialog(self) -> None:
-        dialog = tk.Toplevel(self)
-        dialog.title("Новое испытание")
-        dialog.geometry("500x380")
-        dialog.configure(bg=COLORS["bg"])
-        dialog.transient(self)
-        dialog.grab_set()
+        from ..modal import create_modal, present_modal
+
+        dialog = create_modal(self, title="Новое испытание", minsize=(480, 320))
 
         fields: dict[str, tk.Variable] = {
-            "code": tk.StringVar(),
-            "name": tk.StringVar(),
-            "base_cost": tk.StringVar(value="100"),
-            "category": tk.StringVar(value="Внешние воздействующие факторы"),
-            "rule_type": tk.StringVar(value="fixed"),
-            "default_hours": tk.StringVar(value="2"),
-            "hours_key": tk.StringVar(),
-            "cost_per_hour": tk.StringVar(value="0"),
+            "code": tk.StringVar(master=dialog),
+            "name": tk.StringVar(master=dialog),
+            "base_cost": tk.StringVar(master=dialog, value="100"),
+            "category": tk.StringVar(
+                master=dialog, value="Внешние воздействующие факторы"
+            ),
+            "rule_type": tk.StringVar(master=dialog, value="fixed"),
+            "default_hours": tk.StringVar(master=dialog, value="2"),
+            "hours_key": tk.StringVar(master=dialog),
+            "cost_per_hour": tk.StringVar(master=dialog, value="0"),
         }
 
         row = 0
@@ -402,4 +401,5 @@ class TestsTabMixin:
             row=row, column=0, columnspan=2, pady=14
         )
         dialog.columnconfigure(1, weight=1)
+        present_modal(dialog, prefer_w=500, prefer_h=380)
 

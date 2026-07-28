@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 import tkinter as tk
 from datetime import datetime
@@ -119,7 +118,7 @@ class KpTabMixin:
         grid.columnconfigure(1, weight=1)
 
         ttk.Label(grid, text="Заказчик:", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=4)
-        self.kp_customer_var = tk.StringVar(value="")
+        self.kp_customer_var = tk.StringVar(master=self, value="")
         self.kp_customer_combo = ttk.Combobox(
             grid,
             textvariable=self.kp_customer_var,
@@ -133,7 +132,7 @@ class KpTabMixin:
         ttk.Label(grid, text="Вид испытаний:", style="Card.TLabel").grid(
             row=1, column=0, sticky="w", pady=4
         )
-        self.kp_test_type_var = tk.StringVar(value="Периодические")
+        self.kp_test_type_var = tk.StringVar(master=self, value="Периодические")
         self.kp_test_type_combo = ttk.Combobox(
             grid,
             textvariable=self.kp_test_type_var,
@@ -156,7 +155,7 @@ class KpTabMixin:
         ttk.Label(action, text="Стиль бланка:", style="Muted.TLabel").pack(side="left", padx=(0, 4))
         from ...generation.lab_profile import KP_STYLES, load_lab_profile
 
-        self.kp_style_var = tk.StringVar(value=load_lab_profile().kp_style)
+        self.kp_style_var = tk.StringVar(master=self, value=load_lab_profile().kp_style)
         ttk.Combobox(
             action,
             textvariable=self.kp_style_var,
@@ -179,7 +178,10 @@ class KpTabMixin:
             style="Muted.TLabel",
         ).pack(side="right", padx=(12, 0))
 
-        self.kp_preview_var = tk.StringVar(value="Выберите расчёты из списка (Ctrl+клик — несколько)")
+        self.kp_preview_var = tk.StringVar(
+            master=self,
+            value="Выберите расчёты из списка (Ctrl+клик — несколько)",
+        )
         ttk.Label(
             self.tab_kp,
             textvariable=self.kp_preview_var,
@@ -370,95 +372,89 @@ class KpTabMixin:
         ) or None
         db_path = self.db_path
         _log.info(
-            "KP worker payload style=%r manufacturer=%r extraction_id=%s",
+            "KP start style=%r manufacturer=%r extraction_id=%s",
             style,
             (manufacturer or "")[:60],
             doc_extraction_id,
             extra={"tag": "КП"},
         )
 
-        def work() -> None:
-            saved_path: Path | None = None
-            order_id: int | None = None
-            error: str | None = None
+        from ..bg_job import run_bg_job
+
+        def work() -> tuple[Path, int]:
+            # pure: без tk / vars (D1)
+            saved_path = generate_kp_from_db(
+                customer=customer,
+                subject=subject,
+                calculation_ids=ids,
+                output_path=out_file,
+                db_path=db_path,
+                note=note,
+                style=style,
+            )
+            order_id = create_order_from_kp(
+                customer_name=customer,
+                manufacturer_name=manufacturer,
+                subject=subject,
+                note=note,
+                calculation_ids=ids,
+                kp_output_path=str(saved_path),
+                document_extraction_id=doc_extraction_id,
+                db_path=db_path,
+            )
+            return saved_path, order_id
+
+        def on_ok(result: tuple[Path, int]) -> None:
+            saved_path, order_id = result
+            _log.info(
+                "KP ok path=%s order_id=%s style=%r",
+                saved_path,
+                order_id,
+                style,
+                extra={"tag": "КП"},
+            )
+            self.status.set(f"Заказ №{order_id} · КП: {saved_path.name}")
+            self._load_orders_table()
+            # Авто-выбор заказа — сразу можно «Пакет документов»
             try:
-                saved_path = generate_kp_from_db(
-                    customer=customer,
-                    subject=subject,
-                    calculation_ids=ids,
-                    output_path=out_file,
-                    db_path=db_path,
-                    note=note,
-                    style=style,
-                )
-                order_id = create_order_from_kp(
-                    customer_name=customer,
-                    manufacturer_name=manufacturer,
-                    subject=subject,
-                    note=note,
-                    calculation_ids=ids,
-                    kp_output_path=str(saved_path),
-                    document_extraction_id=doc_extraction_id,
-                    db_path=db_path,
-                )
-                _log.info(
-                    "KP ok path=%s order_id=%s style=%r",
-                    saved_path,
-                    order_id,
-                    style,
-                    extra={"tag": "КП"},
-                )
-            except Exception as exc:
-                error = str(exc)
-                _log.exception("KP generate failed: %s", exc, extra={"tag": "КП"})
-
-            def done() -> None:
-                if error:
-                    messagebox.showerror(
-                        "Ошибка КП",
-                        f"{error}\n\n"
-                        "Если ошибка про main loop / thread — перезапустите GUI "
-                        "после обновления.",
-                    )
-                    self.status.set("Ошибка формирования КП")
-                    return
-                assert saved_path is not None
-                assert order_id is not None
-                self.status.set(f"Заказ №{order_id} · КП: {saved_path.name}")
-                self._load_orders_table()
-                # Авто-выбор заказа — сразу можно «Пакет документов»
-                try:
-                    if hasattr(self, "orders_tree"):
-                        iid = str(order_id)
-                        if iid in self.orders_tree.get_children(""):
-                            self.orders_tree.selection_set(iid)
-                            self.orders_tree.see(iid)
-                            self.orders_tree.focus(iid)
-                except tk.TclError:
-                    pass
-                try:
-                    import os
-
-                    os.startfile(str(saved_path))
-                except OSError:
-                    pass
-                messagebox.showinfo(
-                    "Заказ оформлен",
-                    f"Заказ №{order_id} сохранён.\n"
-                    f"КП открыт в Word:\n{saved_path}\n\n"
-                    "Далее: вкладка «Заказы» → выделите заказ → «Пакет документов».",
-                )
-
+                if hasattr(self, "orders_tree"):
+                    iid = str(order_id)
+                    if iid in self.orders_tree.get_children(""):
+                        self.orders_tree.selection_set(iid)
+                        self.orders_tree.see(iid)
+                        self.orders_tree.focus(iid)
+            except tk.TclError:
+                pass
             try:
-                self.after(0, done)
-            except RuntimeError:
-                # нет mainloop (тесты) — не падать в worker
-                _log.warning(
-                    "KP done: cannot schedule after() — no main loop",
-                    extra={"tag": "КП"},
-                )
+                import os
 
-        threading.Thread(target=work, daemon=True).start()
+                os.startfile(str(saved_path))
+            except OSError:
+                pass
+            messagebox.showinfo(
+                "Заказ оформлен",
+                f"Заказ №{order_id} сохранён.\n"
+                f"КП открыт в Word:\n{saved_path}\n\n"
+                "Далее: вкладка «Заказы» → выделите заказ → «Пакет документов».",
+            )
+
+        def on_err(exc: BaseException) -> None:
+            messagebox.showerror(
+                "Ошибка КП",
+                f"{exc}\n\n"
+                "Если ошибка про main loop / thread — перезапустите GUI "
+                "после обновления.",
+            )
+            self.status.set("Ошибка формирования КП")
+
+        run_bg_job(
+            self,
+            work,
+            on_success=on_ok,
+            on_error=on_err,
+            name="generate_kp",
+            tag="КП",
+        )
 
     def _ask_document_pack_options(self, order_id: int) -> dict[str, str] | None:
         """Диалог: базовая папка + имя подпапки пакета."""
@@ -473,12 +469,14 @@ class KpTabMixin:
             extra={"tag": "Пакет"},
         )
 
-        dlg = tk.Toplevel(self)
-        dlg.title(f"Пакет документов · заказ №{order_id}")
-        dlg.transient(self)
-        dlg.configure(bg=COLORS["bg"])
-        dlg.minsize(520, 280)
-        # grab_set / geometry — после сборки виджетов (иначе 1×1 «пустое» окно)
+        # D4: create → widgets → run_modal (grab/geometry после pack)
+        from ..modal import create_modal, run_modal
+
+        dlg = create_modal(
+            self,
+            title=f"Пакет документов · заказ №{order_id}",
+            minsize=(520, 280),
+        )
 
         frame = ttk.Frame(dlg, padding=16, style="Card.TFrame")
         frame.pack(fill="both", expand=True)
@@ -574,30 +572,6 @@ class KpTabMixin:
         self._accent_button(btns, "Собрать", _ok).pack(side="left")
         ttk.Button(btns, text="Отмена", command=_cancel).pack(side="left", padx=8)
 
-        dlg.update_idletasks()
-        # Явный размер — не только «+x+y» (на Windows reqsize=1 до map → пустое окно)
-        fit_window_to_screen(dlg, prefer_w=560, prefer_h=320)
-        try:
-            geom = dlg.geometry()
-            if geom.startswith("1x1") or dlg.winfo_width() < 200:
-                sw = max(dlg.winfo_screenwidth(), 800)
-                sh = max(dlg.winfo_screenheight(), 600)
-                w, h = 560, 320
-                x = max(0, (sw - w) // 2)
-                y = max(0, (sh - h) // 2)
-                dlg.geometry(f"{w}x{h}+{x}+{y}")
-        except tk.TclError:
-            dlg.geometry("560x320")
-        dlg.deiconify()
-        dlg.lift()
-        try:
-            dlg.grab_set()
-        except tk.TclError:
-            pass
-        try:
-            base_entry.focus_set()
-        except tk.TclError:
-            pass
-        dlg.wait_window()
+        run_modal(dlg, prefer_w=560, prefer_h=320, focus=base_entry)
         return result or None
 

@@ -19,7 +19,11 @@ from .organization_extractor import (
     _INN_KPP_PATTERN,
     _PHONE_PATTERN,
     _EMAIL_PATTERN,
+    _PERIODIC_FACTORY_OCR_NAME,
+    _PERIODIC_FACTORY_POSTAL,
     _infer_org_type,
+    _is_periodic_letter_factory,
+    _name_has_other_cable_plant_hint,
     _fix_ocr_name,
     extract_periodic_factory_address,
     normalize_address_text,
@@ -123,8 +127,13 @@ def _trim_org_name(raw: str) -> str:
 
 
 def _collapse_periodic_factory_name(name: str) -> str:
-    """Сжимает OCR-мусор вокруг «Кабельный завод» до канонического имени на бланке."""
+    """Сжимает OCR-мусор вокруг «Кабельный завод» до канонического имени на бланке.
+
+    Не трогает реальные другие заводы (Тольятти, Кирскабель, …).
+    """
     if not name:
+        return name
+    if _name_has_other_cable_plant_hint(name):
         return name
     low = name.lower()
     if "кабельн" not in low or "завод" not in low:
@@ -244,7 +253,12 @@ def _extract_sender_name(header: str) -> str | None:
             return _collapse_periodic_factory_name(_fix_ocr_name(best))
         return _collapse_periodic_factory_name(_format_sender_from_candidate(best))
 
-    if re.search(r"KaayxKckni\s+KaGeAbHbIN|кабельн\w*\s+завод", header, re.I):
+    # Fallback только при сильных признаках бланка периодики (OCR Калуга / индекс профиля).
+    if _PERIODIC_FACTORY_OCR_NAME.search(header):
+        return 'ООО «Кабельный завод»'
+    if _PERIODIC_FACTORY_POSTAL and re.search(
+        rf"\b{re.escape(_PERIODIC_FACTORY_POSTAL)}\b", header
+    ) and re.search(r"кабельн\w*\s+завод", header, re.I):
         return 'ООО «Кабельный завод»'
 
     return None
@@ -377,7 +391,7 @@ def organizations_from_letter(text: str) -> list[OrganizationExtract]:
         org_type = "manufacturer"
 
     sender_addr = parsed.sender_legal_address
-    if parsed.sender_name and "кабельн" in parsed.sender_name.lower() and "завод" in parsed.sender_name.lower():
+    if parsed.sender_name and _is_periodic_letter_factory(parsed.sender_name, text):
         sender_addr = extract_periodic_factory_address(text) or sender_addr
 
     sender_name = _collapse_periodic_factory_name(parsed.sender_name)

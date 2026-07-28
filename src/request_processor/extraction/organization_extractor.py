@@ -88,6 +88,10 @@ _ADDRESS_STOP_MARKERS = (
     "Серийный выпуск",
     "Эксперт",
     "Эксп ерт",
+    "Цель проведения",
+    "Представленная заказчиком",
+    "(полное наименование",
+    "Адрес места осуществления",
     "т/ф ",
     "тел.",
     "ИНН",
@@ -104,6 +108,22 @@ _ADDRESS_STOP_MARKERS = (
     "ПВСнг",
     "NBCur",
     "Nposoa",
+)
+
+# Гео/бренды других заводов — не путать с бланком «Кабельный завод» (периодика, Калуга).
+_OTHER_CABLE_PLANT_HINT = re.compile(
+    r"тольят|тольятт|самарск|кирск|москв|петербург|ленинград|новосибир|"
+    r"екатерин|челябин|воронеж|нижегород|казан|перм|краснодар|ростов|"
+    r"волгоград|иркут|омск|тул[аы]|рязан|твер|белгород|липецк|"
+    r"энергокомплект|спецкабель|витебск|белорус|минск|урал|"
+    r"северн\w*\s+(?:ул|улиц)|северная",
+    re.IGNORECASE,
+)
+
+# OCR-имя именно Калужского бланка (не «любой кабельный завод»).
+_PERIODIC_FACTORY_OCR_NAME = re.compile(
+    r"KaayxKckni\s+KaGeAbHbIN",
+    re.IGNORECASE,
 )
 
 def _load_periodic_factory_profile() -> tuple[str, str]:
@@ -185,17 +205,69 @@ def _fix_periodic_settlement_errors(text: str) -> str:
     return text
 
 
-def _is_periodic_letter_factory(name: str, source_text: str = "") -> bool:
-    if "кабельн" in name.lower() and "завод" in name.lower():
+def _name_has_other_cable_plant_hint(name: str) -> bool:
+    """True, если название явно другого завода (Тольятти, Кирскабель, …)."""
+    if not name:
+        return False
+    return bool(_OTHER_CABLE_PLANT_HINT.search(name))
+
+
+def _is_generic_or_kaluga_cable_factory_name(name: str) -> bool:
+    """
+    Имя «того» завода с бланка периодики: голое «Кабельный завод» / Калужский / OCR.
+
+    Не матчит «Тольяттинский кабельный завод», «Кирскабель» и т.п.
+    """
+    if not name or not str(name).strip():
+        return False
+    if _name_has_other_cable_plant_hint(name):
+        return False
+    if _PERIODIC_FACTORY_OCR_NAME.search(name):
         return True
-    if source_text:
-        return bool(
-            re.search(
-                r"KaayxKckni\s+KaGeAbHbIN|кабельн\w*\s+завод",
-                source_text[:2500],
-                re.IGNORECASE,
-            )
-        )
+    low = normalize_org_name(name)
+    if not low:
+        return False
+    if re.search(r"калужск", low):
+        return "кабельн" in low or "завод" in low
+    # Только «кабельный завод» / «ооо кабельный завод» без города/бренда.
+    return bool(re.fullmatch(r"(?:ооо\s+)?кабельн\w*\s+завод\w*", low))
+
+
+def _source_looks_like_periodic_factory_letter(source_text: str) -> bool:
+    """Сильные признаки письма периодики Калужского завода (не любой документ с «завод»)."""
+    if not source_text or not str(source_text).strip():
+        return False
+    head = source_text[:2500]
+    if _PERIODIC_FACTORY_OCR_NAME.search(head):
+        return True
+    if _PERIODIC_FACTORY_POSTAL and re.search(rf"\b{re.escape(_PERIODIC_FACTORY_POSTAL)}\b", head):
+        return True
+    if re.search(r"калужск\w*\s+кабельн\w*\s+завод", head, re.IGNORECASE):
+        return True
+    if re.search(r"жилетово|Kuaetoso", head, re.IGNORECASE) and re.search(
+        r"промышленная|MpOMbiLuAeHHas|кабельн\w*\s+завод",
+        head,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def _is_periodic_letter_factory(name: str, source_text: str = "") -> bool:
+    """
+    True только для бланка периодики «Кабельный завод» (Калуга / OCR).
+
+    Важно: наличие в тексте документа «…кабельный завод…» само по себе
+    не делает *каждую* организацию «периодическим заводом» (см. направления
+    с Тольяттинским КЗ, ОС ЦЭТИ и т.д.).
+    """
+    if _name_has_other_cable_plant_hint(name):
+        return False
+    if _is_generic_or_kaluga_cable_factory_name(name):
+        return True
+    # Имя без «кабельный завод», но OCR-шапка именно Калуги — не трогаем чужие org.
+    # source_text здесь только как доп. подтверждение для generic-имени (уже выше).
+    _ = source_text  # сохранён в сигнатуре для совместимости вызовов
     return False
 
 
@@ -238,23 +310,28 @@ def finalize_organization_address(
     source_text: str = "",
 ) -> OrganizationExtract:
     """Нормализует адрес организации после OCR (кириллица, адрес завода)."""
-    name_low = org.name.lower()
     raw_addr = org.legal_address or org.address or ""
-    if _is_periodic_letter_factory(org.name, source_text):
+    is_periodic = _is_periodic_letter_factory(org.name, source_text)
+
+    if is_periodic:
         preferred: str | None = None
         if source_text:
             preferred = extract_periodic_factory_address(source_text)
         if not preferred and raw_addr:
             if re.search(r"Киевск", raw_addr, re.IGNORECASE) or (
-                _PERIODIC_FACTORY_POSTAL in raw_addr
+                _PERIODIC_FACTORY_POSTAL
+                and _PERIODIC_FACTORY_POSTAL in raw_addr
                 and "Промышленная" in raw_addr
-                and True
             ):
-                preferred = _PERIODIC_FACTORY_CANONICAL_ADDRESS
+                preferred = _PERIODIC_FACTORY_CANONICAL_ADDRESS or None
             else:
                 preferred = sanitize_address(raw_addr) or normalize_address_text(raw_addr)
         if preferred and not _looks_like_cable_marks(preferred):
-            postal = _postal_from_address(preferred) or org.postal_code or _PERIODIC_FACTORY_POSTAL
+            postal = (
+                _postal_from_address(preferred)
+                or org.postal_code
+                or (_PERIODIC_FACTORY_POSTAL or None)
+            )
             return org.model_copy(
                 update={
                     "address": preferred,
@@ -263,11 +340,10 @@ def finalize_organization_address(
                     "postal_code": postal,
                 }
             )
+
     if not raw_addr:
-        if source_text and (
-            ("кабельн" in name_low and "завод" in name_low)
-            or re.search(r"KaayxKckni\s+KaGeAbHbIN", source_text[:2500], re.I)
-        ):
+        # Пустой адрес: подставляем профиль только для *этого* завода, не для любого КЗ.
+        if is_periodic and source_text:
             fixed = extract_periodic_factory_address(source_text)
             if fixed:
                 return org.model_copy(
@@ -275,14 +351,19 @@ def finalize_organization_address(
                         "address": fixed,
                         "legal_address": fixed,
                         "actual_address": fixed,
-                        "postal_code": _PERIODIC_FACTORY_POSTAL,
+                        "postal_code": _PERIODIC_FACTORY_POSTAL or _postal_from_address(fixed),
                     }
                 )
         return org
 
-    if _PERIODIC_FACTORY_LATIN_ADDRESS.search(raw_addr) or (
-        ("кабельн" in name_low and "завод" in name_low) and re.search(r"[A-Za-z]{4,}", raw_addr)
-    ):
+    # Латиница OCR / профиль — только если это действительно бланк периодики
+    # или в самом адресе уже признаки Калуги (индекс/латиница шапки).
+    looks_latin_factory = bool(_PERIODIC_FACTORY_LATIN_ADDRESS.search(raw_addr))
+    if is_periodic and (looks_latin_factory or re.search(r"[A-Za-z]{4,}", raw_addr)):
+        fixed = extract_periodic_factory_address(source_text or raw_addr) or normalize_address_text(
+            raw_addr
+        )
+    elif looks_latin_factory and _source_looks_like_periodic_factory_letter(source_text or raw_addr):
         fixed = extract_periodic_factory_address(source_text or raw_addr) or normalize_address_text(
             raw_addr
         )
@@ -293,11 +374,19 @@ def finalize_organization_address(
         return org
 
     postal = _postal_from_address(fixed) or org.postal_code
+    # Не перетираем чужой actual_address «каноном» — только нормализуем address/legal.
+    actual = org.actual_address
+    if actual:
+        actual_clean = sanitize_address(actual)
+        actual = actual_clean or actual
+    else:
+        actual = fixed
+
     return org.model_copy(
         update={
             "address": fixed,
             "legal_address": fixed,
-            "actual_address": org.actual_address or fixed,
+            "actual_address": actual,
             "postal_code": postal,
         }
     )
@@ -325,11 +414,23 @@ def sanitize_address(address: str | None, *, max_len: int = 220) -> str | None:
     if len(text) < 8:
         return None
 
+    # Снять подписи полей из направлений/актов: «Место нахождения (…): 445043, …»
+    text = re.sub(
+        r"^(?:Место\s+нахождения|Адрес\s+места\s+осуществления|"
+        r"юридический\s+адрес|фактический\s+адрес)"
+        r"[^:]{0,80}:\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
     upper = text.upper()
     cut_at = len(text)
     for marker in _ADDRESS_STOP_MARKERS:
         idx = upper.find(marker.upper())
-        if idx > 15:
+        # idx > 8: индекс/город уже могут быть короче 15 символов
+        if idx > 8:
             cut_at = min(cut_at, idx)
     text = text[:cut_at].strip(" .,;")
 
@@ -421,7 +522,7 @@ def extract_manufacturer_details(text: str) -> tuple[str | None, str | None]:
     """Изготовитель и его адрес из блока «Изготовитель:»."""
     pattern = re.compile(
         r"Изготовитель\s*:\s*(.+?)(?:\n|\r)([\d\D]+?)"
-        r"(?=\n\s*(?:Серийный\s+выпуск|Код\s*\(|Допо|Эксп|$))",
+        r"(?=\n\s*(?:Серийный\s+выпуск|Код\s*\(|Допо|Эксп|Цель\s+проведения|$))",
         re.IGNORECASE,
     )
     match = pattern.search(text)
@@ -430,13 +531,23 @@ def extract_manufacturer_details(text: str) -> tuple[str | None, str | None]:
 
     name_raw = match.group(1).strip().strip('"«»')
     name = _clean_org_name(_fix_ocr_name(name_raw))
-    if '"' in name_raw and not name.endswith('"'):
-        name = name + '"'
     if len(normalize_org_name(name)) < 4:
         return None, None
 
     addr_raw = match.group(2).strip()
-    addr = sanitize_address(addr_raw)
+    # Предпочитаем явный юр. адрес из направления, а не весь хвост блока.
+    labeled = re.search(
+        r"(?:Место\s+нахождения|адрес\s+юридического\s+лица)\s*"
+        r"(?:\([^)]{0,80}\))?\s*:\s*(.+?)"
+        r"(?=\s*(?:Адрес\s+места|Цель\s+проведения|Представленная|"
+        r"\(полное\s+наименование|Серийный\s+выпуск|$))",
+        addr_raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if labeled:
+        addr = sanitize_address(labeled.group(1).strip())
+    else:
+        addr = sanitize_address(addr_raw)
     if not addr and _POSTAL_CODE_PATTERN.search(addr_raw):
         addr = sanitize_address(_POSTAL_CODE_PATTERN.sub(r"\1, ", addr_raw, count=1))
 
@@ -471,7 +582,12 @@ _FULL_OOO_FORM = re.compile(
 
 def _clean_org_name(raw: str) -> str:
     """Нормализует название: полное «Общество…» → ООО, без двойного префикса."""
-    name = re.sub(r"\s+", " ", raw).strip(" .,;:{}\"")
+    name = re.sub(r"\s+", " ", raw).strip(" .,;:{}")
+    # Снять внешние/внутренние ASCII-кавычки вокруг ядра («"ТОЛЬЯТТИ…» → «ТОЛЬЯТТИ…»).
+    name = name.strip().strip('"«»\'')
+    name = re.sub(r'[«"]\s*"', "«", name)
+    name = re.sub(r'"\s*[»"]', "»", name)
+    name = re.sub(r'"+', "", name)
 
     name = re.sub(r"(?:л|1)\s*$", "", name, flags=re.IGNORECASE)
     name = re.sub(r"\s+\d{6}.*$", "", name)
@@ -500,7 +616,7 @@ def _clean_org_name(raw: str) -> str:
         if len(short) >= 4:
             return f"ООО «{short}»"
     if re.match(r"^ООО\b", name, re.IGNORECASE) and "«" not in name and "»" not in name:
-        core = re.sub(r"^ООО\s+", "", name, flags=re.IGNORECASE).strip()
+        core = re.sub(r"^ООО\s+", "", name, flags=re.IGNORECASE).strip().strip("«»\"'")
         if core:
             return f"ООО «{core}»"
     # убрать ««…»» после склейки
@@ -510,7 +626,11 @@ def _clean_org_name(raw: str) -> str:
         core = re.sub(r"^ООО\s+", "", name, flags=re.IGNORECASE).strip().strip("«»\"'")
         if core:
             return f"ООО «{core}»"
-    return name
+    # Финальная зачистка: ООО «"X"» / ООО «X»"
+    name = re.sub(r"«\s*[\"']+", "«", name)
+    name = re.sub(r"[\"']+\s*»", "»", name)
+    name = re.sub(r"[\"']+$", "", name)
+    return name.strip()
 
 
 def _fix_ocr_name(name: str) -> str:
@@ -947,22 +1067,38 @@ def _build_org_from_header(text: str) -> OrganizationExtract | None:
 
 
 def extract_periodic_factory_address(text: str) -> str | None:
-    """Адрес ООО «Кабельный завод» из шапки письма (OCR)."""
-    if not re.search(r"KaayxKckni\s+KaGeAbHbIN|кабельн\w*\s+завод", text[:2500], re.I):
+    """Адрес завода с бланка периодики (OCR / профиль).
+
+    Не срабатывает на любом документе, где встречается «кабельный завод»
+    (напр. направление с Тольяттинским КЗ).
+    """
+    if not text or not str(text).strip():
         return None
-    block = _PERIODIC_FACTORY_ADDRESS_BLOCK.search(text[:2500])
-    if block:
-        raw = f"{_PERIODIC_FACTORY_POSTAL}, {block.group(1)}"
-        cleaned = sanitize_address(raw)
-        if cleaned and not _looks_like_cable_marks(cleaned):
-            return cleaned
-    postal = re.search(rf"\b{_PERIODIC_FACTORY_POSTAL}\b", text[:2500])
-    if postal:
-        chunk = text[postal.start() : postal.start() + 180]
-        cleaned = sanitize_address(chunk)
-        if cleaned and not _looks_like_cable_marks(cleaned):
-            return cleaned
-    return _PERIODIC_FACTORY_CANONICAL_ADDRESS
+    head = text[:2500]
+
+    # Чужой завод в шапке/теле без признаков Калуги → не подставлять профиль.
+    if _OTHER_CABLE_PLANT_HINT.search(head) and not _source_looks_like_periodic_factory_letter(head):
+        return None
+    if not _source_looks_like_periodic_factory_letter(head):
+        # Слабый OCR: только «кабельн…завод» без индекса/Калуги — недостаточно.
+        return None
+
+    if _PERIODIC_FACTORY_POSTAL:
+        block = _PERIODIC_FACTORY_ADDRESS_BLOCK.search(head)
+        if block:
+            raw = f"{_PERIODIC_FACTORY_POSTAL}, {block.group(1)}"
+            cleaned = sanitize_address(raw)
+            if cleaned and not _looks_like_cable_marks(cleaned):
+                return cleaned
+        postal = re.search(rf"\b{re.escape(_PERIODIC_FACTORY_POSTAL)}\b", head)
+        if postal:
+            chunk = text[postal.start() : postal.start() + 180]
+            cleaned = sanitize_address(chunk)
+            if cleaned and not _looks_like_cable_marks(cleaned):
+                return cleaned
+
+    # Канон только при сильных признаках (уже проверены выше).
+    return _PERIODIC_FACTORY_CANONICAL_ADDRESS or None
 
 
 def extract_organizations(text: str) -> list[OrganizationExtract]:

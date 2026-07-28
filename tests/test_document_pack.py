@@ -63,6 +63,33 @@ def test_document_pack_folder(db_with_order: tuple[Path, int], tmp_path: Path) -
     assert any("Протокол" in n for n in names)
     assert "summary.json" in names
     assert "README.txt" in names
+    readme = (pack_dir / "README.txt").read_text(encoding="utf-8")
+    assert "КП: приложен" in readme or "КП_" in "\n".join(names)
+
+
+def test_document_pack_without_kp(tmp_path: Path) -> None:
+    """D9: пакет без файла КП — README явно пишет «КП не приложен»."""
+    db = tmp_path / "pack_no_kp.db"
+    init_db(db)
+    calc_id = _save_demo_calc(db)
+    # путь в заказе есть, файла на диске нет (типичный silent miss)
+    missing_kp = tmp_path / "missing_kp.docx"
+    order_id = create_order_from_kp(
+        customer_name="ООО Без КП",
+        manufacturer_name=None,
+        subject="Периодические",
+        note=None,
+        calculation_ids=[calc_id],
+        kp_output_path=str(missing_kp),
+        document_extraction_id=None,
+        db_path=db,
+    )
+    pack = build_document_pack(order_id, output_dir=tmp_path / "packs", db_path=db)
+    pack_dir = Path(pack["pack_dir"])
+    readme = (pack_dir / "README.txt").read_text(encoding="utf-8")
+    assert "КП не приложен" in readme
+    summary = (pack_dir / "summary.json").read_text(encoding="utf-8")
+    assert '"kp_attached": false' in summary
 
 
 def test_document_pack_custom_folder_name(

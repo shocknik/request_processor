@@ -30,19 +30,24 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 # НЕ включайте -IncludeAppDb для обновления боя (иначе соблазн перезаписать БД)
 ```
 
-Актуальный релиз **2026-07-27 (день):** `dist\request_processor_0.9.1_20260727.zip`  
-(calc filter, extract Queue, DOCX perf, prod-hot marks).
+### Актуальный zip: **2026-07-28**
 
-**Вечер 2026-07-27 (после zip, в `main` — нужен новый zip при выкладке на work):**
-- DOCX: `result.text` = абзацы+таблицы; нормализация «Общество…» → ООО  
-- HITL: «Подтвердить» всегда кликабельна; выделение марок (tag `sel`); редактор/диалог пакета не 1×1  
-- Расчёт: галочки → слева; поле «Марка кабеля» после «→ В расчёт»  
-- КП: tk-переменные только с main thread (без `main thread is not in main loop`)  
-- Пакет: сборка на main thread; пошаговые логи `[Пакет]` / `[КП]` / `[Расчёт]`  
-- Тесты: `tests/test_workflow_e2e_cycle.py`, `tests/test_workflow_confirm_calc.py` (~259 tests)
+`dist\request_processor_0.9.1_20260728.zip` (~2.4 MB, **без** `app.db`)
 
-На work: положить zip в `W:\inbox\`, затем `scripts\update.ps1 -ZipPath …`.  
-**После вечерних фиксов** — пересобрать zip (`scripts\build_release_zip.ps1`) и обновить work.
+**В составе 28.07 (поверх 27.07 cycle polish):**
+
+| Тема | Что |
+|------|-----|
+| UI debt | `ui/bg_job.py`, `ui/modal.py`; calc/KP/orders/programs на helper; debounce расчёта |
+| Org-адреса | «кабельный завод» ≠ Калуга; Тольятти/ЦЭТИ не получают Жилетово |
+| Роли БД | `db-info` / `db-role` (dev · work_copy · work); заголовок GUI |
+| Версии | `docs/VERSIONING.md` — package / schema / protocol_meta / роль данных |
+| Тесты | ~283 passed (e2e cycle, org cross-factory, bg_job, modal) |
+
+**Вечер 2026-07-27** (уже в том же 0.9.1-линии): DOCX full text, HITL confirm/selection, pack sync + логи `[Пакет]`, e2e workflow.
+
+На work: zip → `W:\inbox\` (или `%TEMP%`) → `scripts\update.ps1 -ZipPath …` (**не** подменять `data\app.db`).  
+После update по желанию: `request-processor db-role --set work --source "рабочий ПК"`.
 
 Скопируйте zip на рабочий ПК (флешка / сеть).
 
@@ -118,6 +123,27 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 `
 | Распаковать zip **поверх** с заменой `data\app.db` | Затрёте рабочую БД, если в zip был IncludeAppDb |
 | Копировать dev-`app.db` на рабочий ПК | Грязные марки/тестовые заказы |
 | `prepare-prod-db` на рабочей БД «просто так» | Сотрёт заказы/марки |
+
+---
+
+## Роли БД: dev / work_copy / work
+
+Файл по умолчанию `data/app.db`. Метка — `data/db_profile.local.yaml`  
+(другие `*.db` → `*.db.profile.yaml`; см. `docs/db_profile.example.yaml`, версии — `docs/VERSIONING.md`).
+
+| Роль | Назначение |
+|------|------------|
+| `dev` | Тестовая на ПК разработки — **не** источник истины |
+| `work_copy` | Копия с рабочего ПК на dev — данные оператора авторитетны |
+| `work` | Боевая БД на рабочем ПК |
+
+```powershell
+request-processor db-info
+# на dev после привоза БД с работы:
+request-processor db-role --set work_copy --source "рабочий ПК YYYY-MM-DD"
+```
+
+GUI показывает роль в заголовке окна. Без метки приложение считает БД тестовой.
 
 ---
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import sys
 import traceback
 from datetime import date, datetime
@@ -109,6 +110,25 @@ def log_environment(logger: logging.Logger | None = None) -> None:
     log.info("cwd=%s", Path.cwd(), extra=extra)
     log.info("PROJECT_ROOT=%s", PROJECT_ROOT, extra=extra)
     log.info("package_version=%s", ver, extra=extra)
+    # D7: stale egg-info (0.8.x) при pyproject 0.9.x — не путать с source_sha
+    try:
+        pp = PROJECT_ROOT / "pyproject.toml"
+        if pp.is_file():
+            text = pp.read_text(encoding="utf-8")
+            m = re.search(r'(?m)^version\s*=\s*["\']([^"\']+)["\']', text)
+            if m:
+                src_ver = m.group(1)
+                log.info("pyproject_version=%s", src_ver, extra=extra)
+                if ver not in ("?", "0.0.0-dev") and src_ver != ver:
+                    log.warning(
+                        "version mismatch: package=%s pyproject=%s "
+                        "→ на dev: pip install -e .",
+                        ver,
+                        src_ver,
+                        extra=extra,
+                    )
+    except Exception:
+        pass
     log.info(
         "env LANG=%s PYTHONUTF8=%s REQUEST_PROCESSOR_LOG=%s",
         os.environ.get("LANG") or os.environ.get("LC_ALL") or "-",

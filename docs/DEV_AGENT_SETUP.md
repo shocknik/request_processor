@@ -348,6 +348,7 @@ grok
 - [ ] (опц.) `[memory] enabled = true`  
 - [ ] Trust папки `/hooks-trust`  
 - [ ] Знаете `docs/UPDATE.md` — не сносить `app.db`  
+- [ ] Понимаете роли БД: `db-info` / `db-role` (`dev` ≠ источник истины; `work_copy` = копия с работы)  
 
 ---
 

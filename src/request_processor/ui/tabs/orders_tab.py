@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 import tkinter as tk
 from datetime import datetime
@@ -398,53 +397,50 @@ class OrdersTabMixin:
         _log.info("export protocol_meta start order_id=%s", order_id, extra={"tag": "Протокол"})
         self.status.set("Экспорт JSON для protocol_generator…")
         self.update_idletasks()
+        db_path = self.db_path
 
-        def work() -> None:
-            path: Path | None = None
-            error: str | None = None
+        from ..bg_job import run_bg_job
+
+        def work() -> Path:
+            from ...generation.protocol_meta_export import export_protocol_meta_for_order
+
+            return export_protocol_meta_for_order(order_id, db_path=db_path)
+
+        def on_ok(path: Path) -> None:
+            self.status.set(f"JSON: {path.name}")
+            _log.info(
+                "protocol meta exported order=%s path=%s",
+                order_id,
+                path,
+                extra={"tag": "Протокол"},
+            )
+            messagebox.showinfo(
+                "JSON для protocol_generator",
+                f"Сохранено (без измеренных значений):\n{path}\n\n"
+                "На машине с protocol_generator:\n"
+                f'  cd D:\\My_projects\\protocol_generator\n'
+                f'  .\\venv\\Scripts\\python.exe main.py "{path}"\n\n'
+                "Или: scripts\\run_protocol_from_json.ps1",
+            )
             try:
-                from ...generation.protocol_meta_export import export_protocol_meta_for_order
+                import os
 
-                path = export_protocol_meta_for_order(order_id, db_path=self.db_path)
-            except Exception as exc:
-                error = str(exc)
-                _log.exception(
-                    "export protocol_meta failed order_id=%s: %s",
-                    order_id,
-                    exc,
-                    extra={"tag": "Протокол"},
-                )
+                os.startfile(str(path.parent))
+            except OSError:
+                pass
 
-            def done() -> None:
-                if error or path is None:
-                    self.status.set("Ошибка экспорта JSON")
-                    messagebox.showerror("JSON протокола", error or "unknown")
-                    return
-                self.status.set(f"JSON: {path.name}")
-                _log.info(
-                    "protocol meta exported order=%s path=%s",
-                    order_id,
-                    path,
-                    extra={"tag": "Протокол"},
-                )
-                messagebox.showinfo(
-                    "JSON для protocol_generator",
-                    f"Сохранено (без измеренных значений):\n{path}\n\n"
-                    "На машине с protocol_generator:\n"
-                    f'  cd D:\\My_projects\\protocol_generator\n'
-                    f'  .\\venv\\Scripts\\python.exe main.py "{path}"\n\n'
-                    "Или: scripts\\run_protocol_from_json.ps1",
-                )
-                try:
-                    import os
+        def on_err(exc: BaseException) -> None:
+            self.status.set("Ошибка экспорта JSON")
+            messagebox.showerror("JSON протокола", str(exc))
 
-                    os.startfile(str(path.parent))
-                except OSError:
-                    pass
-
-            self.after(0, done)
-
-        threading.Thread(target=work, daemon=True).start()
+        run_bg_job(
+            self,
+            work,
+            on_success=on_ok,
+            on_error=on_err,
+            name="protocol_meta",
+            tag="Протокол",
+        )
 
     def _generate_order_application(self) -> None:
         order_id = self._get_selected_order_id()
@@ -460,63 +456,50 @@ class OrdersTabMixin:
             extra={"tag": "Заявка"},
         )
 
-        def work() -> None:
-            saved_path: Path | None = None
-            error: str | None = None
+        from ..bg_job import run_bg_job
+
+        def work() -> Path:
+            from ...generation.application_generator import generate_application_from_order
+
+            return generate_application_from_order(order_id, db_path=db_path)
+
+        def on_ok(saved_path: Path) -> None:
+            _log.info(
+                "application generate ok order_id=%s path=%s",
+                order_id,
+                saved_path,
+                extra={"tag": "Заявка"},
+            )
+            self.status.set(f"Заказ №{order_id} · заявка: {saved_path.name}")
+            self._load_orders_table()
+            self._show_order_details()
             try:
-                from ...generation.application_generator import generate_application_from_order
-                saved_path = generate_application_from_order(
-                    order_id,
-                    db_path=db_path,
-                )
-                _log.info(
-                    "application generate ok order_id=%s path=%s",
-                    order_id,
-                    saved_path,
-                    extra={"tag": "Заявка"},
-                )
-            except Exception as exc:
-                error = str(exc)
-                _log.exception(
-                    "application generate failed order_id=%s: %s",
-                    order_id,
+                import os
+
+                os.startfile(str(saved_path))
+            except OSError as exc:
+                _log.warning(
+                    "application startfile failed: %s",
                     exc,
                     extra={"tag": "Заявка"},
                 )
+            messagebox.showinfo(
+                "Заявка сформирована",
+                f"Заявка на испытания сохранена:\n{saved_path}",
+            )
 
-            def done() -> None:
-                if error:
-                    self.status.set("Ошибка формирования заявки")
-                    messagebox.showerror("Заявка на испытания", error)
-                    return
-                assert saved_path is not None
-                self.status.set(f"Заказ №{order_id} · заявка: {saved_path.name}")
-                self._load_orders_table()
-                self._show_order_details()
-                try:
-                    import os
+        def on_err(exc: BaseException) -> None:
+            self.status.set("Ошибка формирования заявки")
+            messagebox.showerror("Заявка на испытания", str(exc))
 
-                    os.startfile(str(saved_path))
-                except OSError as exc:
-                    _log.warning(
-                        "application startfile failed: %s",
-                        exc,
-                        extra={"tag": "Заявка"},
-                    )
-                messagebox.showinfo(
-                    "Заявка сформирована",
-                    f"Заявка на испытания сохранена:\n{saved_path}",
-                )
-
-            try:
-                self.after(0, done)
-            except RuntimeError:
-                _log.warning(
-                    "application done: cannot schedule after()",
-                    extra={"tag": "Заявка"},
-                )
-
-        threading.Thread(target=work, daemon=True).start()
+        run_bg_job(
+            self,
+            work,
+            on_success=on_ok,
+            on_error=on_err,
+            name="application",
+            tag="Заявка",
+        )
 
     def _generate_order_protocol(self) -> None:
         order_id = self._get_selected_order_id()
@@ -527,61 +510,49 @@ class OrdersTabMixin:
         db_path = self.db_path
         _log.info("protocol draft start order_id=%s", order_id, extra={"tag": "Протокол"})
 
-        def work() -> None:
-            saved_path: Path | None = None
-            error: str | None = None
+        from ..bg_job import run_bg_job
+
+        def work() -> Path:
+            from ...generation.protocol_generator import generate_protocol_draft_from_order
+
+            return generate_protocol_draft_from_order(order_id, db_path=db_path)
+
+        def on_ok(saved_path: Path) -> None:
+            _log.info(
+                "protocol draft ok order_id=%s path=%s",
+                order_id,
+                saved_path,
+                extra={"tag": "Протокол"},
+            )
+            self.status.set(f"Заказ №{order_id} · протокол: {saved_path.name}")
             try:
-                from ...generation.protocol_generator import generate_protocol_draft_from_order
-                saved_path = generate_protocol_draft_from_order(
-                    order_id, db_path=db_path
-                )
-                _log.info(
-                    "protocol draft ok order_id=%s path=%s",
-                    order_id,
-                    saved_path,
-                    extra={"tag": "Протокол"},
-                )
-            except Exception as exc:
-                error = str(exc)
-                _log.exception(
-                    "protocol draft failed order_id=%s: %s",
-                    order_id,
+                import os
+
+                os.startfile(str(saved_path))
+            except OSError as exc:
+                _log.warning(
+                    "protocol startfile failed: %s",
                     exc,
                     extra={"tag": "Протокол"},
                 )
+            messagebox.showinfo(
+                "Макет протокола",
+                f"Черновик протокола сохранён:\n{saved_path}\n\n"
+                "Доработайте результаты испытаний вручную.",
+            )
 
-            def done() -> None:
-                if error:
-                    self.status.set("Ошибка макета протокола")
-                    messagebox.showerror("Макет протокола", error)
-                    return
-                assert saved_path is not None
-                self.status.set(f"Заказ №{order_id} · протокол: {saved_path.name}")
-                try:
-                    import os
+        def on_err(exc: BaseException) -> None:
+            self.status.set("Ошибка макета протокола")
+            messagebox.showerror("Макет протокола", str(exc))
 
-                    os.startfile(str(saved_path))
-                except OSError as exc:
-                    _log.warning(
-                        "protocol startfile failed: %s",
-                        exc,
-                        extra={"tag": "Протокол"},
-                    )
-                messagebox.showinfo(
-                    "Макет протокола",
-                    f"Черновик протокола сохранён:\n{saved_path}\n\n"
-                    "Доработайте результаты испытаний вручную.",
-                )
-
-            try:
-                self.after(0, done)
-            except RuntimeError:
-                _log.warning(
-                    "protocol done: cannot schedule after()",
-                    extra={"tag": "Протокол"},
-                )
-
-        threading.Thread(target=work, daemon=True).start()
+        run_bg_job(
+            self,
+            work,
+            on_success=on_ok,
+            on_error=on_err,
+            name="protocol_draft",
+            tag="Протокол",
+        )
 
     def _build_order_document_pack(self) -> None:
         """North Star: заявка + КП + макет протокола + summary в одну папку.

@@ -11,6 +11,8 @@ ui/
   state.py            # CalcTestEntry, ExtractionDraft, RequestPageState
   theme.py            # AppStyles + design tokens (#F5F7FA / #1677FF)
   extract_job.py      # 2026-07-27: worker extract (Queue), no tkinter
+  bg_job.py           # 2026-07-28: run_bg_job / schedule_ui (короткие Thread-jobs)
+  modal.py            # 2026-07-28: create_modal / present_modal / run_modal (D4)
   shell/
     app_shell.py      # __init__(progress=…), _build_ui (sidebar + notebook)
     menubar.py        # Файл / Вид / Данные / Сервис / Справка
@@ -39,11 +41,44 @@ ui/
   `runtime fingerprint` (path/sha `pdf_tab.py`).
 - Py 3.12+: `tk.StringVar(master=dlg)` на Toplevel (default root).
 
+## Background jobs (2026-07-28, D1)
+
+Два стиля (не смешивать tk в worker):
+
+| Когда | Модуль | Паттерн |
+|-------|--------|---------|
+| Длинный job + progress / cancel | `extract_job` | Queue + poll main |
+| Короткий (расчёт, КП, Word) | `bg_job.run_bg_job` | Thread + `after(0)` |
+
+- `work()` — pure, без tk/vars; `on_success` / `on_error` — только main.
+- `schedule_ui(root, cb)` — безопасный `after(0)` (pytest без mainloop → warning).
+- На `run_bg_job`: calc, KP, orders (application / protocol / protocol_meta), programs import.
+- Extract по-прежнему Queue; pack documents — sync main thread.
+
+## Modal dialogs (2026-07-28, D4)
+
+```
+create_modal(parent, title=…)  →  pack widgets  →  present_modal / run_modal
+```
+
+- **Не** `grab_set` до geometry (Windows 1×1).
+- Vars: `StringVar(master=dlg, …)`.
+- Уже: pack options, mark editor, org editor, test add, mapping editor.
+
+## Роль БД в заголовке (2026-07-28)
+
+`app_shell` при старте читает `persistence.db_profile` и ставит title:
+
+`Lab_request · БД: тестовая [DEV]` / `копия рабочей [WORK-COPY]` / `рабочая [WORK]`.
+
+CLI: `request-processor db-info`, `db-role --set …`. См. `docs/VERSIONING.md`, `docs/db_profile.example.yaml`.
+
 ## Calc picker (2026-07-27)
 
 - Источник фильтра категории: `_picker_active_category` (не combobox StringVar).
 - Список: scroll Canvas + `ttk.Checkbutton` + стабильные `BooleanVar`.
 - Combobox values обновлять после load прайса, не на каждый refresh.
+- Ввод марки / поиск: debounce **180 ms** (не rebuild на каждый символ).
 
 ## Старт (splash)
 

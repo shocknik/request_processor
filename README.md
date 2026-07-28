@@ -2,7 +2,8 @@
 
 Автоматизация расчёта стоимости испытаний кабельной продукции: извлечение данных из заявок (PDF/Word/текст), валидация оператором, расчёт, КП, заявка на испытания, программы ПМИ, нормы и мост к генератору протоколов.
 
-**Версия:** 0.9.1  
+**Версия приложения:** см. `pyproject.toml` (`[project].version`) · политика: `docs/VERSIONING.md`  
+
 **Продуктовое имя:** Lab_request  
 **Репозиторий:** https://github.com/shocknik/request_processor  
 **Python:** ≥ 3.10 (рекомендуется 3.11/3.12)
@@ -70,10 +71,11 @@
 - **export/import-prod-data**, **prepare-prod-db** для переноса на рабочий ПК
 - **MarkCorrector** + fuzzy + BrandKnowledgeBase; LLM **opt-in** (Ollama, `assistant-llm-*`)
 - Снимки парсинга и вкладка **«Сравнение»**
+- **Роли БД** (`db-info` / `db-role`): dev · work_copy · work — не путать тестовую БД с рабочей
 
 ### Тестирование
 
-- **pytest** — **~205** тестов (экстракция, OCR, GUI smoke/splash, программы, нормы, KP styles, protocol_meta, prod data, …)
+- **pytest** — **~280+** тестов (экстракция, org-адреса, OCR, GUI smoke/e2e cycle, bg_job/modal, программы, нормы, protocol_meta, prod data, …)
 
 ---
 
@@ -366,6 +368,8 @@ UI-архитектура: [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md).
 ```powershell
 request-processor init-db
 request-processor migrate-db
+request-processor db-info
+request-processor db-role --set work_copy --source "рабочий ПК YYYY-MM-DD"
 request-processor prepare-prod-db --yes
 request-processor load-data --price data/прайс.xlsx
 request-processor import-tests --file tests.xlsx
@@ -499,9 +503,10 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | **5 Assistant** | 🟡 | MarkCorrector в GUI; LLM opt-in (Ollama) |
 | **6 Production** | 🟡 | Эксплуатация v0.9.1, polish под боевой ПК |
 | **Cycle polish (27.07)** | ✅ | DOCX HITL, calc/KP/pack reliability, e2e tests, ops logs |
+| **Debt + org (28.07)** | ✅ | `bg_job`/`modal`, org-адреса без cross-factory, роли БД, VERSIONING |
 
 Карта S1–S5: [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md).  
-Журнал и планы: Obsidian `Python/Проект request-processor/` (сессия **66–68**, 2026-07-27).
+Журнал: Obsidian `Python/Проект request-processor/` (**66–69**, 2026-07-27…28).
 
 ---
 
@@ -510,12 +515,15 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | Документ | Назначение |
 |----------|------------|
 | [INSTALL.md](INSTALL.md) | Установка на рабочий ПК |
-| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса |
+| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса · zip `0.9.1_20260728` |
+| [docs/VERSIONING.md](docs/VERSIONING.md) | Версии по осям (package / схема / protocol_meta / роль БД) |
+| [docs/db_profile.example.yaml](docs/db_profile.example.yaml) | Роли dev / work_copy / work |
 | [docs/UPDATE_WORK_PC_2026-07-21.md](docs/UPDATE_WORK_PC_2026-07-21.md) | Заметки конкретного релиза |
 | [docs/44 - Паспорт…](docs/) | Паспорт и экспериментальная эксплуатация |
-| [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md) | UI: splash, sidebar, tabs |
+| [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md) | UI: splash, sidebar, bg_job, modal |
 | [docs/TEST_PROGRAMS.md](docs/TEST_PROGRAMS.md) | Программы испытаний (S4) |
 | [docs/REQUIREMENTS_BASE.md](docs/REQUIREMENTS_BASE.md) | Нормы / aliases (S5) |
+| [AGENTS.md](AGENTS.md) | Правила для AI-агента |
 | [docs/PROTOCOL_GENERATOR_BRIDGE.md](docs/PROTOCOL_GENERATOR_BRIDGE.md) | JSON → protocol_generator |
 | [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md) | Карта S1–S5 |
 | [docs/README.md](docs/README.md) | Индекс docs/ |

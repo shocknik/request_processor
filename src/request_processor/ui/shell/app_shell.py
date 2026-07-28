@@ -138,6 +138,16 @@ class ShellMixin:
         except Exception as exc:
             _log.debug("icon/mousewheel init: %s", exc, extra={"tag": "UI"})
 
+        # Роль БД (dev / work_copy / work) — до ensure_db, чтобы title был сразу
+        self._db_profile = None
+        try:
+            from ...persistence.db_profile import load_db_profile
+
+            self._db_profile = load_db_profile(self.db_path)
+            self.title(f"Lab_request · {self._db_profile.window_title_suffix()}")
+        except Exception as exc:
+            _log.debug("db_profile load: %s", exc, extra={"tag": "Старт"})
+
         self._tests_by_code: dict[str, dict] = {}
         self._calc_entries: list[CalcTestEntry] = []
         self._calc_picker_vars: dict[str, tk.BooleanVar] = {}
@@ -175,8 +185,27 @@ class ShellMixin:
             return now
 
         t = _phase("init shell", t0, pct=55, label="Окно приложения…", detail="инициализация")
-        _report(58, "База данных…", detail=str(self.db_path))
+        db_detail = str(self.db_path)
+        if self._db_profile is not None:
+            db_detail = f"{self._db_profile.role}: {self.db_path}"
+        _report(58, "База данных…", detail=db_detail)
         self._ensure_db()
+        # После migrate/ensure — обновить fingerprint-метку в title (файл мог только создаться)
+        try:
+            from ...persistence.db_profile import load_db_profile
+
+            self._db_profile = load_db_profile(self.db_path)
+            self.title(f"Lab_request · {self._db_profile.window_title_suffix()}")
+            _log.info(
+                "db role=%s truth=%s source=%r path=%s",
+                self._db_profile.role,
+                self._db_profile.is_source_of_truth,
+                self._db_profile.source or "",
+                self.db_path,
+                extra={"tag": "Старт"},
+            )
+        except Exception as exc:
+            _log.debug("db_profile refresh: %s", exc, extra={"tag": "Старт"})
         t = _phase(
             "ensure_db",
             t,
@@ -213,6 +242,11 @@ class ShellMixin:
             self.winfo_screenheight(),
             extra={"tag": "Старт"},
         )
+        if getattr(self, "status", None) is not None and self._db_profile is not None:
+            try:
+                self.status.set(self._db_profile.status_line())
+            except Exception:
+                pass
         _report(99, "Почти готово…", detail=f"инициализация {total_ms:.0f} ms")
 
     def _make_readonly_text(self, parent: tk.Misc, **kwargs) -> scrolledtext.ScrolledText:
@@ -390,7 +424,7 @@ class ShellMixin:
 
         install_menubar(self)
 
-        self.status = tk.StringVar(value="Готово")
+        self.status = tk.StringVar(master=self, value="Готово")
         status_wrap = tk.Frame(self, bg=COLORS["status_bg"], height=28)
         status_wrap.pack(side="bottom", fill="x")
         status_wrap.pack_propagate(False)
@@ -409,7 +443,8 @@ class ShellMixin:
         parse_inner = tk.Frame(parse_bar, bg=COLORS["parse_bg"])
         parse_inner.pack(side="left", fill="x", expand=True)
         self.parse_info_var = tk.StringVar(
-            value="Документ не обработан — раздел «Заявки» или меню Файл → Открыть"
+            master=self,
+            value="Документ не обработан — раздел «Заявки» или меню Файл → Открыть",
         )
         self.parse_info_label = tk.Label(
             parse_inner,
