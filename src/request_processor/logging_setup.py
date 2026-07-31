@@ -47,17 +47,45 @@ _CHILD_PACKAGES = (
 )
 
 
+def _user_log_fallback_dir() -> Path:
+    """Запасной каталог логов, если data/logs на сетевом диске недоступен."""
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or str(Path.home())
+    return Path(base) / "Lab_request" / "logs"
+
+
+def resolve_logs_dir(preferred: Path | None = None) -> Path:
+    """Каталог, куда реально пишем логи (с fallback)."""
+    preferred = Path(preferred or LOGS_DIR)
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        probe = preferred / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return preferred
+    except OSError:
+        fallback = _user_log_fallback_dir()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def _resolve_app_log_paths(preferred_dir: Path | None = None) -> tuple[Path, Path]:
+    """(log_dir, log_file) для app_YYYY-MM-DD.log."""
+    log_dir = resolve_logs_dir(preferred_dir)
+    return log_dir, log_dir / f"app_{date.today().isoformat()}.log"
+
+
 def log_path_for(kind: str = "app", day: date | None = None) -> Path:
     """Путь к файлу лога: app | scripts | tests."""
     d = day or date.today()
     prefix = {"app": "app", "scripts": "scripts", "tests": "tests"}.get(kind, kind)
+    # app — в фактически используемый каталог (может быть fallback)
+    if kind == "app":
+        return resolve_logs_dir() / f"{prefix}_{d.isoformat()}.log"
     return Path(LOGS_DIR) / f"{prefix}_{d.isoformat()}.log"
 
 
 def _ensure_logs_dir() -> Path:
-    p = Path(LOGS_DIR)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    return resolve_logs_dir()
 
 
 class _TagFilter(logging.Filter):
@@ -189,9 +217,9 @@ def setup_logging(
     if env_level in ("DEBUG", "INFO", "WARNING", "ERROR"):
         level = getattr(logging, env_level)
 
-    log_dir = Path(log_dir or LOGS_DIR)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"app_{date.today().isoformat()}.log"
+    # data/logs рядом с установкой; если сеть/права (W:) — fallback %LOCALAPPDATA%
+    preferred_dir = Path(log_dir or LOGS_DIR)
+    log_dir, log_file = _resolve_app_log_paths(preferred_dir)
 
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
@@ -200,7 +228,15 @@ def setup_logging(
     fmt = _make_formatter()
     tag_filter = _TagFilter()
 
-    fh = logging.FileHandler(log_file, encoding="utf-8")
+    try:
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+    except OSError:
+        # второй шанс: только LOCALAPPDATA
+        fallback_dir = _user_log_fallback_dir()
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = fallback_dir
+        log_file = log_dir / f"app_{date.today().isoformat()}.log"
+        fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     fh.addFilter(tag_filter)

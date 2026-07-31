@@ -1735,7 +1735,8 @@ def extract_from_text(
     """
     Вход «речь/текст заказчика» или любой свободный текст заявки.
 
-    Без OCR: сразу извлекает марки, организации и вид испытаний-эвристики.
+    Без OCR: structural find_cable_marks + speech-эвристики (бренд без NхM,
+    нг(А)-FRLS без сечения, пункты ТУ в requirements_raw).
     """
     cleaned = (text or "").strip()
     if not cleaned:
@@ -1747,6 +1748,43 @@ def extract_from_text(
         source_type="text",
         text=cleaned,
         page_count=1,
+    )
+    # Доп. проход: письма/речь без «марка + размер» (КАГЭ, МГЛФ, Энергия-…FRLS)
+    from .speech_text_extractor import find_speech_marks, merge_marks_prefer_richer
+
+    structural_n = len(result.cable_marks)
+    speech_marks = find_speech_marks(cleaned)
+    merged = merge_marks_prefer_richer(list(result.cable_marks), speech_marks)
+    # отбросить явный мусор (кривой structural OCR-фрагмент), если есть нормальные
+    from .mark_lexicon import lookup_brand
+    from .speech_text_extractor import is_plausible_speech_mark
+
+    def _ok_free_text_mark(mark: str) -> bool:
+        # structural иногда даёт «UТР-3нг…» (смесь латиницы и кириллицы) — мусор
+        has_cyr = bool(re.search(r"[А-Яа-яЁё]", mark))
+        has_lat = bool(re.search(r"[A-Za-z]", mark))
+        if has_cyr and has_lat:
+            if not re.search(
+                r"(?:СПЕЦЛАН|SPECLAN|Cat\s*\d|/(?:U?TP|FTP)|FLEXICORE|VicabFLEX)",
+                mark,
+                re.I,
+            ):
+                return False
+        if lookup_brand(mark) or is_plausible_speech_mark(mark):
+            return True
+        return is_plausible_mark(mark)
+
+    cleaned_marks = [m for m in merged if _ok_free_text_mark(m.mark)]
+    if cleaned_marks:
+        result = result.model_copy(update={"cable_marks": cleaned_marks})
+    elif merged:
+        result = result.model_copy(update={"cable_marks": merged})
+    logger.info(
+        "free-text marks structural=%s speech=%s kept=%s sample=%s",
+        structural_n,
+        len(speech_marks),
+        len(result.cable_marks),
+        [m.mark for m in result.cable_marks[:5]],
     )
     return result.model_copy(update={"source_path": f"text://{label}"})
 

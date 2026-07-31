@@ -136,40 +136,64 @@ class PdfTabMixin:
         Состояние обновляется централизованно через ``render_request_state``.
         """
         root = self.tab_pdf
-        # grid: header/steps/upload fixed; mid expands; bottom fixed
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(4, weight=1)  # mid pane row (index after dynamic pack — use pack)
+        root.rowconfigure(0, weight=1)
 
         # --- hidden path var (используется extract/browse) ---
         self.pdf_path_var = tk.StringVar(master=self)
         self.pdf_path_var.trace_add("write", lambda *_: self._on_pdf_path_changed())
 
-        # --- Page header ---
+        # --- Bottom action bar (pack bottom first) ---
+        self.bottom_bar = BottomActionBar(
+            root,
+            on_snapshot=self._save_parse_snapshot,
+            on_cancel=self._cancel_extraction_draft,
+            on_primary=self._on_request_primary_action,
+        )
+        self.bottom_bar.pack_bar(side="bottom", fill="x", pady=(8, 0))
+
+        # Back-compat aliases for confirm buttons (status bar / old code paths)
+        self.confirm_btn = self.bottom_bar.primary_btn
+        self.confirm_btn_top = None
+        self.validation_status_bar = tk.Frame(root, bg=COLORS["muted"], width=0, height=0)
+        self.validation_status_var = tk.StringVar(master=self, value="Документ не обработан")
+
+        # Вертикальный разделитель: сверху загрузка (меньше), снизу марки/орг (больше)
+        vpaned = ttk.PanedWindow(root, orient="vertical")
+        vpaned.pack(fill="both", expand=True)
+        self._pdf_vpaned = vpaned
+
+        top_zone = ttk.Frame(vpaned)
+        work_zone = ttk.Frame(vpaned)
+        vpaned.add(top_zone, weight=1)
+        vpaned.add(work_zone, weight=4)
+
+        # --- Page header (верх) ---
         req_no = (getattr(self, "_last_document_extraction_id", None) or 0) + 1
         self.page_header = PageHeader(
-            root,
+            top_zone,
             title=f"Новая заявка №{req_no}",
             subtitle="Загрузите документ, чтобы начать распознавание заявки.",
             status_text="Не обработана",
             status_tone="grey",
         )
-        self.page_header.pack(fill="x", pady=(0, 10))
+        self.page_header.pack(fill="x", pady=(0, 6))
 
-        # --- Steps (этапы заявки, не бизнес-разделы) ---
-        self.step_indicator = StepIndicator(root)
-        self.step_indicator.pack(fill="x", pady=(0, 12))
+        # --- Steps ---
+        self.step_indicator = StepIndicator(top_zone)
+        self.step_indicator.pack(fill="x", pady=(0, 6))
 
         # --- Upload ---
         self.upload_panel = UploadPanel(
-            root,
+            top_zone,
             on_browse=self._browse_pdf,
             on_ocr_params=self._toggle_pdf_opts,
             on_drop_path=self._on_upload_drop_path,
         )
-        self.upload_panel.pack(fill="x", pady=(0, 8))
+        self.upload_panel.pack(fill="x", pady=(0, 4))
 
         # OCR / флаги сохранения — свёрнуты; открываются «Параметры OCR»
-        self.pdf_opts_frame = ttk.Frame(root, style="Card.TFrame", padding=8)
+        self.pdf_opts_frame = ttk.Frame(top_zone, style="Card.TFrame", padding=8)
         opts = self.pdf_opts_frame
         self.ocr_var = tk.BooleanVar(master=self, value=True)
         ttk.Checkbutton(opts, text="OCR для сканов", variable=self.ocr_var, style="Card.TCheckbutton").pack(
@@ -211,10 +235,10 @@ class PdfTabMixin:
         ).pack(side="left", padx=(8, 0))
         ttk.Button(opts, text="Текст…", command=self._run_extract_free_text).pack(side="right")
 
-        # Предупреждения валидации (компактная полоса)
+        # Предупреждения валидации (компактная полоса) — в верхней зоне
         self._warn_expanded = False
         self._warn_lines: list[str] = []
-        self.validation_warn_frame = tk.Frame(root, bg=COLORS["warn_bg"], padx=8, pady=4)
+        self.validation_warn_frame = tk.Frame(top_zone, bg=COLORS["warn_bg"], padx=8, pady=4)
         warn_header = tk.Frame(self.validation_warn_frame, bg=COLORS["warn_bg"])
         warn_header.pack(fill="x")
         self.validation_warn_summary_var = tk.StringVar(master=self, value="")
@@ -256,25 +280,9 @@ class PdfTabMixin:
         )
         self.validation_warn_var = self.validation_warn_summary_var
 
-        # --- Bottom action bar (pack bottom first so mid can expand) ---
-        self.bottom_bar = BottomActionBar(
-            root,
-            on_snapshot=self._save_parse_snapshot,
-            on_cancel=self._cancel_extraction_draft,
-            on_primary=self._on_request_primary_action,
-        )
-        self.bottom_bar.pack_bar(side="bottom", fill="x", pady=(8, 0))
-
-        # Back-compat aliases for confirm buttons (status bar / old code paths)
-        self.confirm_btn = self.bottom_bar.primary_btn
-        self.confirm_btn_top = None
-        # validation strip (legacy color bar — keep for tests/status updates)
-        self.validation_status_bar = tk.Frame(root, bg=COLORS["muted"], width=0, height=0)
-        self.validation_status_var = tk.StringVar(master=self, value="Документ не обработан")
-
-        # --- Mid: Марки (≈62%) | Организации (≈38%) ---
-        mid = ttk.PanedWindow(root, orient="horizontal")
-        mid.pack(fill="both", expand=True, pady=(4, 0))
+        # --- Рабочая зона: Марки | Организации (основное место на экране) ---
+        mid = ttk.PanedWindow(work_zone, orient="horizontal")
+        mid.pack(fill="both", expand=True)
         self._pdf_mid_pane = mid
 
         # ---- Marks card ----
@@ -348,7 +356,7 @@ class PdfTabMixin:
             "confidence",
         )
         self.marks_tree = ttk.Treeview(
-            tree_wrap, columns=cols, show="headings", height=10, selectmode="browse"
+            tree_wrap, columns=cols, show="headings", height=16, selectmode="browse"
         )
         for col, title, width, stretch in (
             ("status", "Статус", 110, False),
@@ -464,14 +472,19 @@ class PdfTabMixin:
         self.draft_customer_addr_var = tk.StringVar(master=self)
         self.draft_manufacturer_var = tk.StringVar(master=self)
         self.draft_recipient_var = tk.StringVar(master=self)
+        self.draft_mfg_same_as_customer_var = tk.BooleanVar(master=self, value=False)
         self.draft_customer_inn_var.trace_add("write", lambda *_: self._on_inn_changed())
+        # id выбранных из справочника (сбрасываются при ручном вводе)
+        self._draft_customer_org_id: int | None = None
+        self._draft_manufacturer_org_id: int | None = None
+        self._org_suggest_cache: dict[str, dict] = {}
 
-        # tk.Entry (не только ttk): надёжный selection/copy/paste на Windows + ПКМ
+        # ttk.Combobox для заказчик/производитель — подсказки из справочника по вводу
         org_fields = (
-            ("Заказчик", self.draft_customer_var, "entry"),
+            ("Заказчик", self.draft_customer_var, "org_combo_customer"),
             ("ИНН", self.draft_customer_inn_var, "entry"),
             ("Адрес", self.draft_customer_addr_var, "text"),  # длинный — многострочный
-            ("Производитель", self.draft_manufacturer_var, "entry"),
+            ("Производитель", self.draft_manufacturer_var, "org_combo_manufacturer"),
             ("Получатель (ИЛ)", self.draft_recipient_var, "entry"),
         )
         self._org_entries: dict[str, tk.Misc] = {}
@@ -510,6 +523,18 @@ class PdfTabMixin:
                 self._bind_text_to_var(addr, var)
                 self._enable_field_clipboard(addr)
                 self._org_entries[label] = addr
+            elif kind.startswith("org_combo"):
+                role = "customer" if "customer" in kind else "manufacturer"
+                combo = ttk.Combobox(
+                    org_form,
+                    textvariable=var,
+                    values=(),
+                    font=("Segoe UI", 10),
+                )
+                combo.grid(row=row * 2 + 1, column=0, sticky="ew", pady=(0, 2), ipady=3)
+                self._enable_field_clipboard(combo)
+                self._wire_org_suggest_combo(combo, role=role)
+                self._org_entries[label] = combo
             else:
                 entry = tk.Entry(
                     org_form,
@@ -527,6 +552,19 @@ class PdfTabMixin:
                 entry.grid(row=row * 2 + 1, column=0, sticky="ew", pady=(0, 2), ipady=5)
                 self._enable_field_clipboard(entry)
                 self._org_entries[label] = entry
+
+        # Флаг на эту заявку: производитель = заказчик (не всегда)
+        same_fr = tk.Frame(org_form, bg=COLORS["card"])
+        same_fr.grid(row=len(org_fields) * 2, column=0, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(
+            same_fr,
+            text="Производитель = заказчик (для этой заявки)",
+            variable=self.draft_mfg_same_as_customer_var,
+            command=self._on_mfg_same_as_customer_toggle,
+        ).pack(side="left")
+        self.draft_customer_var.trace_add(
+            "write", lambda *_: self._sync_mfg_if_same_as_customer()
+        )
 
         # Контекст выбранной марки (внутри scroll)
         ctx_border = tk.Frame(org_inner, bg=COLORS["border"], bd=0)
@@ -572,8 +610,22 @@ class PdfTabMixin:
         self._request_page_state = RequestPageState.EMPTY
         self._set_mark_action_buttons_enabled(False)
         self.render_request_state(RequestPageState.EMPTY)
+
+        # По умолчанию рабочая зона (марки/орг) ~70% высоты; верх можно тянуть мышкой
+        def _place_v_sash() -> None:
+            try:
+                pane = self._pdf_vpaned
+                h = int(pane.winfo_height() or 0)
+                if h < 200:
+                    self.after(120, _place_v_sash)
+                    return
+                pane.sashpos(0, max(120, int(h * 0.28)))
+            except tk.TclError:
+                pass
+
+        self.after(80, _place_v_sash)
         _log.info(
-            "pdf_tab redesigned: header/steps/upload/marks/orgs(scroll+clipboard)/bar",
+            "pdf_tab: vpaned top/work + marks/orgs, default work ~70%%",
             extra={"tag": "UI"},
         )
 
@@ -793,6 +845,122 @@ class PdfTabMixin:
             pass
         if raw and not ok:
             _log.debug("INN visual invalid len=%s", len(raw), extra={"tag": "UI"})
+
+    def _wire_org_suggest_combo(self, combo: ttk.Combobox, *, role: str) -> None:
+        """Подсказки из справочника organizations при вводе (Combobox)."""
+
+        def _refresh_values(*_a: object) -> None:
+            if getattr(self, "_org_suggest_syncing", False):
+                return
+            q = (combo.get() or "").strip()
+            try:
+                rows = list_organizations(
+                    search=q or None,
+                    limit=25,
+                    db_path=self.db_path,
+                )
+            except Exception:  # noqa: BLE001
+                rows = []
+            names: list[str] = []
+            for r in rows:
+                name = (r.get("name") or "").strip()
+                if not name:
+                    continue
+                names.append(name)
+                self._org_suggest_cache[name] = r
+            try:
+                combo.configure(values=names)
+            except tk.TclError:
+                pass
+            # ручной ввод ≠ выбор из списка → сброс id роли
+            if role == "customer":
+                cached = self._org_suggest_cache.get(q)
+                if not cached or cached.get("name") != q:
+                    self._draft_customer_org_id = None
+            else:
+                cached = self._org_suggest_cache.get(q)
+                if not cached or cached.get("name") != q:
+                    self._draft_manufacturer_org_id = None
+
+        def _on_select(_event: object | None = None) -> None:
+            name = (combo.get() or "").strip()
+            if not name:
+                return
+            row = self._org_suggest_cache.get(name)
+            if row is None:
+                try:
+                    found = list_organizations(
+                        search=name, limit=5, db_path=self.db_path
+                    )
+                except Exception:  # noqa: BLE001
+                    found = []
+                row = next(
+                    (r for r in found if (r.get("name") or "").strip() == name),
+                    None,
+                )
+            if not row:
+                return
+            self._org_suggest_syncing = True
+            try:
+                if role == "customer":
+                    self._draft_customer_org_id = int(row["id"])
+                    self.draft_customer_var.set(row["name"] or name)
+                    inn = (row.get("inn") or "").strip()
+                    if inn:
+                        self.draft_customer_inn_var.set(inn)
+                    addr = (
+                        (row.get("address") or "")
+                        or (row.get("legal_address") or "")
+                        or (row.get("actual_address") or "")
+                    ).strip()
+                    if addr:
+                        self.draft_customer_addr_var.set(addr)
+                    self._sync_mfg_if_same_as_customer()
+                else:
+                    self._draft_manufacturer_org_id = int(row["id"])
+                    self.draft_manufacturer_var.set(row["name"] or name)
+            finally:
+                self._org_suggest_syncing = False
+            _log.info(
+                "org suggest pick role=%s id=%s name=%r",
+                role,
+                row.get("id"),
+                (row.get("name") or "")[:80],
+                extra={"tag": "Заявка"},
+            )
+
+        combo.bind("<KeyRelease>", lambda _e: _refresh_values())
+        combo.bind("<FocusIn>", lambda _e: _refresh_values())
+        combo.bind("<<ComboboxSelected>>", _on_select)
+        # начальный список (недавние)
+        try:
+            _refresh_values()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_mfg_same_as_customer_toggle(self) -> None:
+        if self.draft_mfg_same_as_customer_var.get():
+            self._sync_mfg_if_same_as_customer(force=True)
+        _log.info(
+            "mfg_same_as_customer=%s",
+            self.draft_mfg_same_as_customer_var.get(),
+            extra={"tag": "Заявка"},
+        )
+
+    def _sync_mfg_if_same_as_customer(self, *, force: bool = False) -> None:
+        if not getattr(self, "draft_mfg_same_as_customer_var", None):
+            return
+        if not self.draft_mfg_same_as_customer_var.get() and not force:
+            return
+        if not self.draft_mfg_same_as_customer_var.get():
+            return
+        cust = (self.draft_customer_var.get() or "").strip()
+        if (self.draft_manufacturer_var.get() or "").strip() == cust and not force:
+            # id тоже держим в синхроне
+            self._draft_manufacturer_org_id = self._draft_customer_org_id
+            return
+        self.draft_manufacturer_var.set(cust)
+        self._draft_manufacturer_org_id = self._draft_customer_org_id
 
     def _show_marks_empty(self, show: bool) -> None:
         """Переключить EmptyState / Treeview для карточки марок.
@@ -1244,15 +1412,17 @@ class PdfTabMixin:
             text="Свернуть" if self._warn_expanded else "Подробнее"
         )
 
-        # Между upload/opts и mid: pack с before=mid
-        mid = getattr(self, "_pdf_mid_pane", None)
-        if mid is not None and mid.winfo_manager():
-            self.validation_warn_frame.pack(
-                fill="x", pady=(0, 4), before=mid
-            )
-        elif getattr(self, "pdf_opts_frame", None) is not None and self.pdf_opts_frame.winfo_manager():
+        # Верхняя зона (загрузка): после opts или upload, не «before» mid (другой paned)
+        if (
+            getattr(self, "pdf_opts_frame", None) is not None
+            and self.pdf_opts_frame.winfo_manager()
+        ):
             self.validation_warn_frame.pack(
                 fill="x", pady=(0, 4), after=self.pdf_opts_frame
+            )
+        elif getattr(self, "upload_panel", None) is not None:
+            self.validation_warn_frame.pack(
+                fill="x", pady=(0, 4), after=self.upload_panel
             )
         else:
             self.validation_warn_frame.pack(fill="x", pady=(0, 4))
@@ -2616,8 +2786,28 @@ class PdfTabMixin:
         customer_inn = self.draft_customer_inn_var.get().strip() or None
         customer_addr = self.draft_customer_addr_var.get().strip() or None
 
-        customer_id: int | None = None
-        manufacturer_id: int | None = None
+        customer_id: int | None = getattr(self, "_draft_customer_org_id", None)
+        manufacturer_id: int | None = getattr(self, "_draft_manufacturer_org_id", None)
+
+        # id из combobox валиден только если имя совпадает с записью в БД
+        if customer_id is not None:
+            row = get_organization_by_id(customer_id, self.db_path)
+            if (
+                not row
+                or not customer_name
+                or normalize_org_name(row.get("name") or "")
+                != normalize_org_name(customer_name)
+            ):
+                customer_id = None
+        if manufacturer_id is not None:
+            row = get_organization_by_id(manufacturer_id, self.db_path)
+            if (
+                not row
+                or not manufacturer_name
+                or normalize_org_name(row.get("name") or "")
+                != normalize_org_name(manufacturer_name)
+            ):
+                manufacturer_id = None
 
         def _resolve_named(
             name: str,
@@ -2627,9 +2817,29 @@ class PdfTabMixin:
             role: str,
             inn: str | None = None,
             address: str | None = None,
+            preferred_id: int | None = None,
         ) -> int | None:
             if not name or is_own_lab_name(name):
                 return None
+            if preferred_id is not None:
+                row = get_organization_by_id(preferred_id, self.db_path)
+                if row:
+                    if inn or address:
+                        update_organization(
+                            preferred_id,
+                            name=row["name"],
+                            address=address or row.get("address"),
+                            postal_code=row.get("postal_code"),
+                            phone=row.get("phone"),
+                            email=row.get("email"),
+                            inn=inn or row.get("inn"),
+                            kpp=row.get("kpp"),
+                            is_accredited=bool(row.get("is_accredited")),
+                            fsa_registry_number=row.get("fsa_registry_number"),
+                            org_type=row.get("org_type") or org_type,
+                            db_path=self.db_path,
+                        )
+                    return preferred_id
             decision = self._prompt_org_dedup(name, role_label=role_label)
             if decision == "skip":
                 return None
@@ -2694,6 +2904,7 @@ class PdfTabMixin:
                 role="customer",
                 inn=customer_inn,
                 address=customer_addr,
+                preferred_id=customer_id,
             )
         if manufacturer_name:
             manufacturer_id = _resolve_named(
@@ -2701,6 +2912,7 @@ class PdfTabMixin:
                 role_label="Производитель",
                 org_type="manufacturer",
                 role="manufacturer",
+                preferred_id=manufacturer_id,
             )
 
         # Остальные org из extract (не ИЛ, не уже сохранённые роли) — без лишних вопросов
@@ -2777,14 +2989,27 @@ class PdfTabMixin:
             )
             self._last_document_extraction_id = extraction_id
             self._last_manufacturer_name = result.manufacturer_name or ""
+            # id с confirm — для КП/заказа (даже если имя потом поправят в КП)
+            cust_id = org_ids.get("customer_org_id")
+            mfg_id = org_ids.get("manufacturer_org_id")
+            if cust_id is None:
+                cust_id = getattr(self, "_draft_customer_org_id", None)
+            if mfg_id is None:
+                mfg_id = getattr(self, "_draft_manufacturer_org_id", None)
+            self._last_customer_org_id = cust_id
+            self._last_manufacturer_org_id = mfg_id
+            if cust_id is not None:
+                self._draft_customer_org_id = cust_id
+            if mfg_id is not None:
+                self._draft_manufacturer_org_id = mfg_id
             _log.info(
                 "persist extraction id=%s marks_saved=%s marks_err=%s "
                 "customer_org=%s mfg_org=%s source=%s",
                 extraction_id,
                 db_stats.get("saved"),
                 db_stats.get("errors"),
-                org_ids.get("customer_org_id"),
-                org_ids.get("manufacturer_org_id"),
+                cust_id,
+                mfg_id,
                 Path(result.source_path).name if result.source_path else "",
                 extra={"tag": "Заявка"},
             )
@@ -2853,14 +3078,21 @@ class PdfTabMixin:
             mark_validations=self._extraction_draft.marks,
         )
 
-        customer_name = result.customer_name
+        customer_name = (result.customer_name or "").strip()
+        manufacturer_name = (result.manufacturer_name or "").strip()
         self._extraction_confirmed = True
         self._extraction_draft.result = result
         self._load_cable_marks()
-        if customer_name:
+        # HITL SoT → КП: всегда (даже пустая строка, чтобы не оставался старый заказчик)
+        if hasattr(self, "kp_customer_var"):
             self.kp_customer_var.set(customer_name)
+        self._last_manufacturer_name = manufacturer_name
+        # обновить список заказчиков в КП
+        try:
+            self._load_organizations()
+        except Exception:  # noqa: BLE001
+            pass
         self._apply_test_type_from_document(result.text)
-        self._load_organizations()
 
         self._update_validation_status_bar(
             state="confirmed",
@@ -2901,6 +3133,10 @@ class PdfTabMixin:
         self.draft_customer_addr_var.set("")
         self.draft_manufacturer_var.set("")
         self.draft_recipient_var.set("")
+        if hasattr(self, "draft_mfg_same_as_customer_var"):
+            self.draft_mfg_same_as_customer_var.set(False)
+        self._draft_customer_org_id = None
+        self._draft_manufacturer_org_id = None
         self._show_context_placeholder(True)
         self._set_text(self.mark_context_text, "")
         # Файл оставляем: можно сразу извлечь повторно
@@ -3015,59 +3251,110 @@ class PdfTabMixin:
 
     def _run_extract_free_text(self) -> None:
         """Вход: текст из речи заказчика / письмо / запрос по ТУ (без файла)."""
-        dialog = tk.Toplevel(self)
-        dialog.title("Текст заявки (речь / письмо / ТУ)")
-        dialog.transient(self)
-        dialog.grab_set()
-        fit_window_to_screen(dialog, prefer_w=720, prefer_h=480)
+        # Кнопки снизу pack'аем первыми — иначе ScrolledText(expand) съедает
+        # всю высоту окна и «Разобрать» уезжает за край (не видно).
+        from ..modal import create_modal, present_modal
+
+        dialog = create_modal(
+            self,
+            title="Текст заявки (речь / письмо / ТУ)",
+            minsize=(640, 420),
+        )
+
+        btns = ttk.Frame(dialog, padding=(12, 8, 12, 12))
+        btns.pack(side="bottom", fill="x")
+
+        body = ttk.Frame(dialog, padding=(12, 12, 12, 4))
+        body.pack(side="top", fill="both", expand=True)
         ttk.Label(
-            dialog,
+            body,
             text="Вставьте текст заказчика, письмо или запрос испытаний по ТУ:",
             style="Muted.TLabel",
-        ).pack(anchor="w", padx=12, pady=(12, 4))
-        text_box = scrolledtext.ScrolledText(dialog, height=18, font=("Segoe UI", 10), wrap="word")
-        text_box.pack(fill="both", expand=True, padx=12, pady=4)
+        ).pack(anchor="w", pady=(0, 6))
+        text_box = scrolledtext.ScrolledText(
+            body, height=16, font=("Segoe UI", 10), wrap="word"
+        )
+        text_box.pack(fill="both", expand=True)
 
         def run_parse() -> None:
             raw = text_box.get("1.0", "end").strip()
             if len(raw) < 10:
-                messagebox.showwarning("Текст", "Вставьте осмысленный текст заявки.", parent=dialog)
+                messagebox.showwarning(
+                    "Текст", "Вставьте осмысленный текст заявки.", parent=dialog
+                )
                 return
             dialog.destroy()
             self.status.set("Разбор свободного текста…")
-            confirm_only = self.confirm_only_var.get()
+            confirm_only = bool(self.confirm_only_var.get())
+            _log.info(
+                "free-text extract start chars=%s confirm_only=%s",
+                len(raw),
+                confirm_only,
+                extra={"tag": "Заявка"},
+            )
 
-            def work() -> None:
-                try:
-                    from ...extraction.pdf_extractor import extract_from_text
-                    result = extract_from_text(raw, source_label="customer_speech")
-                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    virtual = Path(f"text_customer_{stamp}.txt")
-                    self._present_extraction_result(
-                        result,
-                        source_path=virtual,
-                        json_stem=f"text_customer_{stamp}",
-                        confirm_only=confirm_only,
-                    )
-                except Exception as exc:
-                    err_msg = str(exc)
-                    _log.exception("free-text extract failed")
+            from ..bg_job import run_bg_job
+            from ..extract_job import prepare_extraction_draft
 
-                    def fail(msg: str = err_msg) -> None:
-                        messagebox.showerror("Текст", msg)
-                        self.status.set("Ошибка разбора текста")
-                        self._update_validation_status_bar(state="error")
+            def work() -> tuple[object, Path, object, bool, str]:
+                # только IO/парсинг — без tkinter (иначе main loop error)
+                from ...extraction.pdf_extractor import extract_from_text
 
-                    from ..bg_job import schedule_ui
+                result = extract_from_text(raw, source_label="customer_speech")
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                virtual = Path(f"text_customer_{stamp}.txt")
+                stem = f"text_customer_{stamp}"
+                draft = prepare_extraction_draft(
+                    result,
+                    source_path=virtual,
+                    json_stem=stem,
+                )
+                return result, virtual, draft, confirm_only, stem
 
-                    schedule_ui(self, fail, tag="Заявка")
+            def on_ok(payload: tuple[object, Path, object, bool, str]) -> None:
+                result, virtual, draft, co, stem = payload
+                self._present_extraction_result(
+                    result,  # type: ignore[arg-type]
+                    source_path=virtual,
+                    json_stem=stem,
+                    confirm_only=co,
+                    draft=draft,  # type: ignore[arg-type]
+                )
+                _log.info(
+                    "free-text extract UI applied marks=%s orgs=%s",
+                    len(getattr(result, "cable_marks", []) or []),
+                    len(getattr(result, "organizations", []) or []),
+                    extra={"tag": "Заявка"},
+                )
 
-            threading.Thread(target=work, daemon=True).start()
+            def on_err(exc: BaseException) -> None:
+                _log.exception("free-text extract failed: %s", exc, extra={"tag": "Заявка"})
+                messagebox.showerror(
+                    "Текст",
+                    f"Не удалось разобрать текст:\n{exc}",
+                    parent=self,
+                )
+                self.status.set("Ошибка разбора текста")
+                self._update_validation_status_bar(state="error")
 
-        btns = ttk.Frame(dialog, padding=12)
-        btns.pack(fill="x")
-        ttk.Button(btns, text="Разобрать", style="Accent.TButton", command=run_parse).pack(side="left")
+            run_bg_job(
+                self,
+                work,
+                on_success=on_ok,
+                on_error=on_err,
+                name="free-text-extract",
+                tag="Заявка",
+            )
+
+        ttk.Button(
+            btns, text="Разобрать", style="Accent.TButton", command=run_parse
+        ).pack(side="left")
         ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
+        present_modal(dialog, prefer_w=720, prefer_h=480, focus=text_box)
+        try:
+            text_box.focus_set()
+        except tk.TclError:
+            pass
 
     def _open_extract_progress_dialog(
         self,

@@ -115,13 +115,21 @@ class MarksTabMixin:
             side="left", padx=(6, 10), ipady=2
         )
         self._accent_button(toolbar, "В расчёт", self._use_db_mark_in_calc).pack(side="left")
+        ttk.Button(toolbar, text="Редактировать…", command=self._edit_selected_cable_mark).pack(
+            side="left", padx=(8, 0)
+        )
         more = ttk.Menubutton(toolbar, text="Ещё ▾")
         more_menu = tk.Menu(more, tearoff=0)
         more_menu.add_command(label="Обновить", command=self._load_cable_marks)
+        more_menu.add_command(label="Редактировать…", command=self._edit_selected_cable_mark)
         more_menu.add_command(label="Удалить…", command=self._delete_selected_cable_mark)
         more["menu"] = more_menu
         more.pack(side="left", padx=(8, 0))
-        ttk.Label(toolbar, text="Двойной клик / ПКМ", style="Muted.TLabel").pack(side="right")
+        ttk.Label(
+            toolbar,
+            text="Двойной клик — правка · ПКМ — меню",
+            style="Muted.TLabel",
+        ).pack(side="right")
 
         cols = ("full_mark", "brand", "fire_class", "cores", "element", "size", "document")
         self.cable_marks_tree = ttk.Treeview(self.tab_marks, columns=cols, show="headings", height=24)
@@ -137,7 +145,7 @@ class MarksTabMixin:
             self.cable_marks_tree.heading(col, text=title)
             self.cable_marks_tree.column(col, width=width, anchor="w", stretch=stretch, minwidth=width)
         self.cable_marks_tree.pack(fill="both", expand=True, pady=(8, 0))
-        self.cable_marks_tree.bind("<Double-Button-1>", lambda e: self._use_db_mark_in_calc())
+        self.cable_marks_tree.bind("<Double-Button-1>", lambda _e: self._edit_selected_cable_mark())
         self.cable_marks_tree.bind("<Button-3>", self._on_marks_context_menu)
 
     def _on_marks_context_menu(self, event: tk.Event) -> None:
@@ -145,6 +153,7 @@ class MarksTabMixin:
         if row:
             self.cable_marks_tree.selection_set(row)
         menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Редактировать…", command=self._edit_selected_cable_mark)
         menu.add_command(label="В расчёт", command=self._use_db_mark_in_calc)
         menu.add_separator()
         menu.add_command(label="Удалить…", command=self._delete_selected_cable_mark)
@@ -162,6 +171,157 @@ class MarksTabMixin:
         if self.notebook:
             self.notebook.select(self.tab_calc)
         self.status.set("Марка из БД подставлена в расчёт")
+
+    def _edit_selected_cable_mark(self) -> None:
+        """Редактор строки справочника cable_marks (двойной клик / ПКМ)."""
+        sel = self.cable_marks_tree.selection()
+        if not sel:
+            messagebox.showinfo("Марки", "Выберите марку в таблице.")
+            return
+        mark_id = int(sel[0])
+        from ...persistence.sqlite_repo import get_cable_mark_by_id, update_cable_mark
+
+        row = get_cable_mark_by_id(mark_id, self.db_path)
+        if not row:
+            messagebox.showerror("Марки", "Запись не найдена (обновите список).")
+            self._load_cable_marks()
+            return
+
+        from ..modal import create_modal, present_modal
+
+        dialog = create_modal(self, title="Редактировать марку", minsize=(520, 480))
+        btns = ttk.Frame(dialog, padding=(12, 8, 12, 12))
+        btns.pack(side="bottom", fill="x")
+
+        fields: dict[str, tk.Variable] = {
+            "mark": tk.StringVar(master=dialog, value=row.get("full_mark") or ""),
+            "brand": tk.StringVar(master=dialog, value=row.get("brand") or ""),
+            "fire_class": tk.StringVar(master=dialog, value=row.get("fire_class") or ""),
+            "cores_count": tk.StringVar(
+                master=dialog, value=str(row.get("cores_count") or "")
+            ),
+            "structural_element_type": tk.StringVar(
+                master=dialog,
+                value=row.get("structural_element_type") or "жила",
+            ),
+            "structural_elements_count": tk.StringVar(
+                master=dialog,
+                value=str(row.get("structural_elements_count") or ""),
+            ),
+            "characteristic_size": tk.StringVar(
+                master=dialog,
+                value=str(row.get("characteristic_size") or "").replace(".", ","),
+            ),
+            "size_unit": tk.StringVar(
+                master=dialog, value=row.get("size_unit") or "mm2"
+            ),
+            "document": tk.StringVar(master=dialog, value=row.get("document") or ""),
+        }
+
+        form = ttk.Frame(dialog, padding=12)
+        form.pack(side="top", fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+        ttk.Label(
+            form,
+            text="Правка справочника. Id записи сохраняется.",
+            style="Muted.TLabel",
+            wraplength=480,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        rows_spec = (
+            ("Условное обозначение:", "mark"),
+            ("Марка (бренд):", "brand"),
+            ("Пожарный класс:", "fire_class"),
+            ("ТПЖ (жил):", "cores_count"),
+            ("Элемент:", "structural_element_type"),
+            ("Кол-во элементов:", "structural_elements_count"),
+            ("Размер:", "characteristic_size"),
+            ("Единица:", "size_unit"),
+            ("ТУ / ГОСТ:", "document"),
+        )
+        for r_i, (label, key) in enumerate(rows_spec, start=1):
+            ttk.Label(form, text=label).grid(
+                row=r_i, column=0, sticky="w", pady=4, padx=(0, 8)
+            )
+            if key == "structural_element_type":
+                ttk.Combobox(
+                    form,
+                    textvariable=fields[key],
+                    values=("жила", "пара", "тройка"),
+                    state="readonly",
+                    width=24,
+                ).grid(row=r_i, column=1, sticky="ew", pady=4)
+            elif key == "size_unit":
+                ttk.Combobox(
+                    form,
+                    textvariable=fields[key],
+                    values=("mm2", "mm"),
+                    state="readonly",
+                    width=24,
+                ).grid(row=r_i, column=1, sticky="w", pady=4)
+            else:
+                ttk.Entry(form, textvariable=fields[key]).grid(
+                    row=r_i, column=1, sticky="ew", pady=4
+                )
+
+        def do_save() -> None:
+            size_raw = fields["characteristic_size"].get().strip().replace(",", ".")
+            cores_raw = fields["cores_count"].get().strip()
+            elem_raw = fields["structural_elements_count"].get().strip()
+            try:
+                cores = int(cores_raw) if cores_raw else 1
+                size = float(size_raw) if size_raw else 1.0
+                elem = int(elem_raw) if elem_raw else cores
+            except ValueError:
+                messagebox.showwarning(
+                    "Марки",
+                    "ТПЖ, кол-во элементов и размер должны быть числами.",
+                    parent=dialog,
+                )
+                return
+            result = update_cable_mark(
+                mark_id,
+                full_mark=fields["mark"].get(),
+                brand=fields["brand"].get(),
+                fire_class=fields["fire_class"].get() or None,
+                cores_count=cores,
+                structural_element_type=fields["structural_element_type"].get(),
+                structural_elements_count=elem,
+                characteristic_size=size,
+                size_unit=fields["size_unit"].get() or "mm2",
+                document=fields["document"].get() or None,
+                db_path=self.db_path,
+            )
+            if not result.get("ok"):
+                reason = result.get("reason")
+                msg = {
+                    "empty_mark": "Укажите условное обозначение.",
+                    "duplicate_mark": "Такое обозначение уже есть у другой записи.",
+                    "bad_size": "Некорректный размер / ТПЖ.",
+                    "not_found": "Запись не найдена.",
+                }.get(str(reason), f"Не сохранено: {reason}")
+                messagebox.showerror("Марки", msg, parent=dialog)
+                return
+            dialog.destroy()
+            self._load_cable_marks()
+            try:
+                self.cable_marks_tree.selection_set(str(mark_id))
+                self.cable_marks_tree.see(str(mark_id))
+            except tk.TclError:
+                pass
+            self.status.set(f"Марка обновлена: {result.get('full_mark')}")
+            _log.info(
+                "updated cable_mark id=%s full_mark=%r",
+                mark_id,
+                result.get("full_mark"),
+                extra={"tag": "БД"},
+            )
+
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=do_save).pack(
+            side="left"
+        )
+        ttk.Button(btns, text="Отмена", command=dialog.destroy).pack(side="left", padx=8)
+        present_modal(dialog, parent=self)
 
     def _load_cable_marks(self) -> None:
         for item in self.cable_marks_tree.get_children():

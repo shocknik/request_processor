@@ -89,9 +89,20 @@ def _validate_mark(
         confidence *= _OCR_CONFIDENCE_FACTOR
 
     if not is_plausible_mark(match.mark):
-        status = FieldStatus.error
-        confidence = min(confidence, 0.40)
-        warnings.append("P1-2: марка не проходит проверку формата")
+        # Свободный текст: «КАГЭ», «МГЛФ», «Энергия-…нг(А)-FRLS» без NхM —
+        # не блокируем HITL (accepted), но предупреждаем.
+        from ..extraction.speech_text_extractor import is_plausible_speech_mark
+
+        if is_plausible_speech_mark(match.mark):
+            status = FieldStatus.warning
+            confidence = min(confidence, 0.55)
+            warnings.append(
+                "P1-2: обозначение без полного формата (сечения) — проверьте вручную"
+            )
+        else:
+            status = FieldStatus.error
+            confidence = min(confidence, 0.40)
+            warnings.append("P1-2: марка не проходит проверку формата")
 
     if not match.document:
         if status == FieldStatus.ok:

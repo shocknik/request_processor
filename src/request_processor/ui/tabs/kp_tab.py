@@ -363,6 +363,8 @@ class KpTabMixin:
 
         manufacturer = self._last_manufacturer_name.strip() or None
         doc_extraction_id = self._last_document_extraction_id
+        customer_org_id = getattr(self, "_last_customer_org_id", None)
+        manufacturer_org_id = getattr(self, "_last_manufacturer_org_id", None)
         # Все tk-переменные — только main thread (иначе RuntimeError:
         # «main thread is not in main loop» → КП/заказ/пакет ломаются).
         style = (
@@ -372,10 +374,13 @@ class KpTabMixin:
         ) or None
         db_path = self.db_path
         _log.info(
-            "KP start style=%r manufacturer=%r extraction_id=%s",
+            "KP start style=%r manufacturer=%r extraction_id=%s "
+            "customer_org=%s mfg_org=%s",
             style,
             (manufacturer or "")[:60],
             doc_extraction_id,
+            customer_org_id,
+            manufacturer_org_id,
             extra={"tag": "КП"},
         )
 
@@ -395,6 +400,8 @@ class KpTabMixin:
             order_id = create_order_from_kp(
                 customer_name=customer,
                 manufacturer_name=manufacturer,
+                customer_org_id=customer_org_id,
+                manufacturer_org_id=manufacturer_org_id,
                 subject=subject,
                 note=note,
                 calculation_ids=ids,

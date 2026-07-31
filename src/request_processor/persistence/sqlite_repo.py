@@ -3007,14 +3007,23 @@ def create_order_from_kp(
         customer_org_id = find_organization_id_by_name(customer_name, db_path)
     if manufacturer_org_id is None and manufacturer_name:
         manufacturer_org_id = find_organization_id_by_name(manufacturer_name, db_path)
-    if manufacturer_org_id is None and document_extraction_id:
+    # HITL: если имена пусты/не совпали — id с подтверждённой заявки
+    if document_extraction_id and (
+        customer_org_id is None or manufacturer_org_id is None
+    ):
         with get_connection(db_path) as conn:
             row = conn.execute(
-                "SELECT manufacturer_org_id FROM document_extractions WHERE id = ?",
+                """
+                SELECT customer_org_id, manufacturer_org_id
+                FROM document_extractions WHERE id = ?
+                """,
                 (document_extraction_id,),
             ).fetchone()
-            if row and row["manufacturer_org_id"]:
-                manufacturer_org_id = int(row["manufacturer_org_id"])
+            if row:
+                if customer_org_id is None and row["customer_org_id"]:
+                    customer_org_id = int(row["customer_org_id"])
+                if manufacturer_org_id is None and row["manufacturer_org_id"]:
+                    manufacturer_org_id = int(row["manufacturer_org_id"])
 
     rows = get_calculations_for_kp(calculation_ids, db_path=db_path)
     if not rows:
@@ -3170,6 +3179,110 @@ def list_cable_marks(
     with get_connection(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+
+def get_cable_mark_by_id(
+    mark_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    """Строка справочника cable_marks по id."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM cable_marks WHERE id = ?", (mark_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_cable_mark(
+    mark_id: int,
+    *,
+    full_mark: str,
+    brand: str,
+    fire_class: str | None = None,
+    cores_count: int = 1,
+    structural_element_type: str | None = "жила",
+    structural_elements_count: int | None = None,
+    characteristic_size: float = 1.0,
+    size_unit: str = "mm2",
+    document: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any]:
+    """Обновляет марку по id (редактор справочника).
+
+    Returns:
+        ``{"ok": True, ...}`` или ``{"ok": False, "reason": ...}``.
+        reason: not_found | empty_mark | duplicate_mark | bad_size
+    """
+    designation = (full_mark or "").strip()
+    if len(designation) < 2:
+        return {"ok": False, "reason": "empty_mark"}
+    brand_s = (brand or "").strip() or designation
+    unit = size_unit if size_unit in ("mm2", "mm") else "mm2"
+    try:
+        cores = max(1, int(cores_count))
+        size = float(characteristic_size)
+        if size <= 0:
+            return {"ok": False, "reason": "bad_size"}
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "bad_size"}
+    elem_count = structural_elements_count
+    if elem_count is None:
+        elem_count = cores
+    else:
+        try:
+            elem_count = max(1, int(elem_count))
+        except (TypeError, ValueError):
+            elem_count = cores
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, full_mark FROM cable_marks WHERE id = ?", (mark_id,)
+        ).fetchone()
+        if not row:
+            return {"ok": False, "reason": "not_found"}
+        clash = conn.execute(
+            "SELECT id FROM cable_marks WHERE full_mark = ? AND id != ?",
+            (designation, mark_id),
+        ).fetchone()
+        if clash:
+            return {
+                "ok": False,
+                "reason": "duplicate_mark",
+                "other_id": int(clash["id"]),
+            }
+        conn.execute(
+            """
+            UPDATE cable_marks SET
+                full_mark = ?,
+                brand = ?,
+                fire_class = ?,
+                cores_count = ?,
+                structural_element_type = ?,
+                structural_elements_count = ?,
+                characteristic_size = ?,
+                size_unit = ?,
+                document = ?
+            WHERE id = ?
+            """,
+            (
+                designation,
+                brand_s,
+                (fire_class or "").strip() or None,
+                cores,
+                (structural_element_type or "").strip() or "жила",
+                elem_count,
+                size,
+                unit,
+                (document or "").strip() or None,
+                mark_id,
+            ),
+        )
+        return {
+            "ok": True,
+            "id": mark_id,
+            "full_mark": designation,
+            "previous_full_mark": row["full_mark"],
+        }
 
 
 def delete_cable_mark(

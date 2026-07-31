@@ -156,6 +156,8 @@ class ShellMixin:
         self.sidebar = None  # Sidebar | None — левая навигация (редизайн)
         self._last_document_extraction_id: int | None = None
         self._last_manufacturer_name: str = ""
+        self._last_customer_org_id: int | None = None
+        self._last_manufacturer_org_id: int | None = None
         self._extraction_draft: ExtractionDraft | None = None
         self._extraction_confirmed: bool = False
         self._compare_snapshots_cache: list[dict] = []
@@ -338,11 +340,10 @@ class ShellMixin:
         apply_fluent_theme(self)
 
     def _open_logs_folder(self) -> None:
-        """Открыть data/logs в проводнике (логи вместо вкладки «Журнал»)."""
-        from ...config import LOGS_DIR
+        """Открыть папку логов в проводнике (data/logs или LOCALAPPDATA fallback)."""
+        from ...logging_setup import resolve_logs_dir
 
-        path = Path(LOGS_DIR)
-        path.mkdir(parents=True, exist_ok=True)
+        path = resolve_logs_dir()
         _log.info("open logs folder: %s", path, extra={"tag": "Лог"})
         try:
             os.startfile(str(path))  # type: ignore[attr-defined]
@@ -352,13 +353,13 @@ class ShellMixin:
 
     def _show_log_viewer(self, lines: int = 400) -> None:
         """S2.3: просмотр хвоста app_*.log в окне (без вкладки «Журнал»)."""
-        from ...config import LOGS_DIR
-        from ...logging_setup import log_path_for
+        from ...logging_setup import log_path_for, resolve_logs_dir
 
         log_path = log_path_for("app")
         if not log_path.is_file():
             # fallback: newest app_*.log
-            candidates = sorted(Path(LOGS_DIR).glob("app_*.log"), key=lambda p: p.stat().st_mtime)
+            log_dir = resolve_logs_dir()
+            candidates = sorted(log_dir.glob("app_*.log"), key=lambda p: p.stat().st_mtime)
             log_path = candidates[-1] if candidates else log_path
 
         dlg = tk.Toplevel(self)

@@ -407,6 +407,11 @@ class OrgsTabMixin:
 
     def _fill_draft_org_fields(self, draft: ExtractionDraft) -> None:
         report = draft.report
+        # новый черновик — сброс id combobox и флага «производитель = заказчик»
+        self._draft_customer_org_id = None
+        self._draft_manufacturer_org_id = None
+        if hasattr(self, "draft_mfg_same_as_customer_var"):
+            self.draft_mfg_same_as_customer_var.set(False)
         customer = (report.customer_name or "").strip()
         if not customer:
             from ...extraction.organization_extractor import (
@@ -425,7 +430,7 @@ class OrgsTabMixin:
                     extra={"tag": "Заявка"},
                 )
         self.draft_customer_var.set(customer)
-        self.draft_manufacturer_var.set(report.manufacturer_name)
+        self.draft_manufacturer_var.set(report.manufacturer_name or "")
         self.draft_recipient_var.set(report.recipient_name or "—")
 
         customer_org = next((o for o in report.organizations if o.role == "customer"), None)

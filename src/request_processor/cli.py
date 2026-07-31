@@ -761,6 +761,54 @@ def delete_test_mapping_cmd(mapping_id: int, db: str) -> None:
     click.echo(click.style(f"✓ Маппинг id={mapping_id} удалён", fg="green"))
 
 
+@cli.command("build-mark-lexicon")
+@click.option(
+    "--pdf",
+    "pdf_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="PDF справочника 300 маркоразмеров (локально, не в git)",
+)
+@click.option(
+    "--out",
+    "out_yaml",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Куда записать yaml (по умолчанию — встроенный resources + data/knowledge)",
+)
+def build_mark_lexicon_cmd(pdf_path: Path, out_yaml: Optional[Path]) -> None:
+    """Собрать словарь марок из PDF-справочника (для free-text / писем).
+
+    Пишет в resources/ (в git) — это основная копия, которая едет в zip.
+    Локальный data/knowledge/ — только зеркало для просмотра, не SoT.
+    """
+    from .extraction.mark_lexicon import (
+        _LOCAL_YAML,
+        _PACKAGED_YAML,
+        build_lexicon_from_handbook_pdf,
+        load_mark_lexicon,
+    )
+
+    packaged = out_yaml or _PACKAGED_YAML
+    payload = build_lexicon_from_handbook_pdf(pdf_path, out_yaml=packaged)
+    # зеркало в knowledge (не в git) — чтобы открыть рядом с ТУ
+    try:
+        _LOCAL_YAML.parent.mkdir(parents=True, exist_ok=True)
+        _LOCAL_YAML.write_text(packaged.read_text(encoding="utf-8"), encoding="utf-8")
+        local_note = str(_LOCAL_YAML)
+    except OSError as exc:
+        local_note = f"(не записан: {exc})"
+    load_mark_lexicon.cache_clear()
+    stats = payload.get("stats") or {}
+    click.echo(
+        f"Словарь: {stats.get('unique_brands', '?')} имён марок "
+        f"(строк в PDF: {stats.get('rows_parsed', '?')})"
+    )
+    click.echo(f"  в git / пакет: {packaged}")
+    click.echo(f"  локальное зеркало: {local_note}")
+    click.echo("  PDF справочника в репозиторий не кладём.")
+
+
 @cli.command("list-cable-marks")
 @click.option("--search", default=None, help="Поиск по марке")
 @click.option("--limit", default=50, show_default=True)
