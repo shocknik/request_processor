@@ -1255,6 +1255,14 @@ class CalcTabMixin:
             list(hours.keys())[:12],
             extra={"tag": "Расчёт"},
         )
+        from ...logging_setup import log_operator
+
+        log_operator(
+            "calc start mark=%r n_tests=%s",
+            mark[:80],
+            len(test_list),
+            tag="Расчёт",
+        )
 
         from ..bg_job import run_bg_job
 

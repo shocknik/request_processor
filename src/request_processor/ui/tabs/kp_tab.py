@@ -373,6 +373,8 @@ class KpTabMixin:
             else None
         ) or None
         db_path = self.db_path
+        from ...logging_setup import log_operator
+
         _log.info(
             "KP start style=%r manufacturer=%r extraction_id=%s "
             "customer_org=%s mfg_org=%s",
@@ -382,6 +384,14 @@ class KpTabMixin:
             customer_org_id,
             manufacturer_org_id,
             extra={"tag": "КП"},
+        )
+        log_operator(
+            "KP start customer=%r manufacturer=%r calcs=%s out=%s",
+            customer[:80],
+            (manufacturer or "")[:60],
+            ids,
+            out_file.name,
+            tag="КП",
         )
 
         from ..bg_job import run_bg_job

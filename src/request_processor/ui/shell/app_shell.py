@@ -20,7 +20,7 @@ from ...calculation.test_rules import (
     category_sort_key,
     rule_type_label,
 )
-from ...logging_setup import get_logger, setup_logging
+from ...logging_setup import get_active_log_files, get_logger, log_operator, setup_logging
 from ...parsing.cable_mark_parser import parse_cable_mark_record
 from ...calculation.cost_calculator import calculate_cost, format_breakdown
 from ...validation.extraction_validator import apply_operator_edits, validate_extraction
@@ -236,17 +236,35 @@ class ShellMixin:
         t = _phase("load_data", t, pct=97, label="Справочники загружены")
         self._install_clipboard_support()
         total_ms = (time.perf_counter() - t0) * 1000
+        log_files = get_active_log_files()
         _log.info(
-            "GUI ready total=%.0f ms db=%s screen=%sx%s",
+            "GUI ready total=%.0f ms db=%s screen=%sx%s log_files=%s",
             total_ms,
             self.db_path,
             self.winfo_screenwidth(),
             self.winfo_screenheight(),
+            [str(p) for p in log_files],
             extra={"tag": "Старт"},
         )
-        if getattr(self, "status", None) is not None and self._db_profile is not None:
+        log_operator(
+            "session_ready ms=%.0f db=%s logs=%s",
+            total_ms,
+            self.db_path,
+            "; ".join(str(p) for p in log_files) or "-",
+            tag="Старт",
+        )
+        if getattr(self, "status", None) is not None:
             try:
-                self.status.set(self._db_profile.status_line())
+                bits: list[str] = []
+                if self._db_profile is not None:
+                    bits.append(self._db_profile.status_line())
+                if log_files:
+                    bits.append(
+                        f"лог: {log_files[0].name}"
+                        + (" +зеркало" if len(log_files) > 1 else "")
+                    )
+                if bits:
+                    self.status.set(" · ".join(bits))
             except Exception:
                 pass
         _report(99, "Почти готово…", detail=f"инициализация {total_ms:.0f} ms")
@@ -340,16 +358,35 @@ class ShellMixin:
         apply_fluent_theme(self)
 
     def _open_logs_folder(self) -> None:
-        """Открыть папку логов в проводнике (data/logs или LOCALAPPDATA fallback)."""
-        from ...logging_setup import resolve_logs_dir
+        """Открыть папку логов (основную; если зеркало — перечислить оба пути)."""
+        from ...logging_setup import get_active_log_dirs, get_active_log_files, resolve_logs_dir
 
-        path = resolve_logs_dir()
-        _log.info("open logs folder: %s", path, extra={"tag": "Лог"})
+        dirs = get_active_log_dirs() or [resolve_logs_dir()]
+        files = get_active_log_files()
+        path = dirs[0]
+        _log.info(
+            "open logs folder primary=%s all_dirs=%s files=%s",
+            path,
+            [str(d) for d in dirs],
+            [str(f) for f in files],
+            extra={"tag": "Лог"},
+        )
         try:
             os.startfile(str(path))  # type: ignore[attr-defined]
         except Exception as exc:
             _log.warning("cannot open logs folder: %s", exc, extra={"tag": "Лог"})
-            messagebox.showinfo("Логи", f"Папка логов:\n{path}", parent=self)
+        # всегда показать полный список — на work оператор копирует путь
+        lines = ["Файлы логов (скопируйте при обратной связи):", ""]
+        for f in files:
+            lines.append(str(f))
+        if not files:
+            lines.append(str(path / f"app_{__import__('datetime').date.today().isoformat()}.log"))
+        if len(dirs) > 1:
+            lines.extend(["", "Папки:", *[str(d) for d in dirs]])
+        try:
+            messagebox.showinfo("Логи Lab_request", "\n".join(lines), parent=self)
+        except Exception:
+            pass
 
     def _show_log_viewer(self, lines: int = 400) -> None:
         """S2.3: просмотр хвоста app_*.log в окне (без вкладки «Журнал»)."""

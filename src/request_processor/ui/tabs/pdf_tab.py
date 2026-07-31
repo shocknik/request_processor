@@ -3061,6 +3061,8 @@ class PdfTabMixin:
             )
             return
 
+        from ...logging_setup import log_operator
+
         _log.info(
             "confirm extraction marks_accepted=%s total_marks=%s customer=%r manufacturer=%r",
             accepted_count,
@@ -3068,6 +3070,13 @@ class PdfTabMixin:
             (self.draft_customer_var.get() or "")[:80],
             (self.draft_manufacturer_var.get() or "")[:80],
             extra={"tag": "Заявка"},
+        )
+        log_operator(
+            "confirm marks=%s customer=%r manufacturer=%r",
+            accepted_count,
+            (self.draft_customer_var.get() or "")[:80],
+            (self.draft_manufacturer_var.get() or "")[:80],
+            tag="Заявка",
         )
         result = self._build_confirmed_result()
         self.save_marks_var.set(True)
@@ -3286,11 +3295,14 @@ class PdfTabMixin:
             dialog.destroy()
             self.status.set("Разбор свободного текста…")
             confirm_only = bool(self.confirm_only_var.get())
-            _log.info(
-                "free-text extract start chars=%s confirm_only=%s",
+            from ...logging_setup import log_operator
+
+            log_operator(
+                "free-text start chars=%s confirm_only=%s preview=%r",
                 len(raw),
                 confirm_only,
-                extra={"tag": "Заявка"},
+                raw[:120].replace("\n", " "),
+                tag="Заявка",
             )
 
             from ..bg_job import run_bg_job
