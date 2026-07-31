@@ -45,6 +45,11 @@ def install_menubar(app: Any) -> tk.Menu:
         command=lambda: (go_tab("tab_pdf"), call("_run_extract_pdf")),
     )
     m_file.add_separator()
+    m_file.add_command(
+        label="Журнал пожеланий…",
+        command=lambda: call("_open_feedback_journal"),
+    )
+    m_file.add_separator()
     m_file.add_command(label="Выход", command=app.destroy, accelerator="Alt+F4")
 
     # --- View (workflow) ---
@@ -105,7 +110,8 @@ def install_menubar(app: Any) -> tk.Menu:
             "Lab_request — обработка заявок на испытания кабелей.\n\n"
             "Цикл: заявка → расчёт → КП → заказ / пакет документов.\n"
             "Меню «Данные» — справочники; «Сервис» — настройки.\n"
-            "Логи: data/logs/app_YYYY-MM-DD.log (и scripts_*, tests_*).",
+            "Файл → Журнал пожеланий — обратная связь (уезжает в экспорт prod).\n"
+            "Логи: data/logs и %LOCALAPPDATA%\\Lab_request\\logs.",
             parent=app,
         ),
     )

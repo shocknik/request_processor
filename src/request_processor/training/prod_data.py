@@ -216,6 +216,15 @@ def export_prod_data(
     mappings = _export_test_mappings(db_path)
     stats = _prod_db_stats(db_path)
 
+    # Журнал пожеланий / обратной связи (меню Файл)
+    from ..persistence.sqlite_repo import export_feedback_journal
+
+    feedback_since = last_export if delta_only else None
+    try:
+        feedback_rows = export_feedback_journal(db_path, since_iso=feedback_since)
+    except Exception:
+        feedback_rows = []
+
     manifest: dict[str, Any] = {
         "format_version": FORMAT_VERSION,
         "app_version": __version__,
@@ -232,6 +241,7 @@ def export_prod_data(
             "snapshots": len(snapshot_files),
             "assistant_sessions": len(sessions),
             "test_mappings_used": len(mappings),
+            "feedback_entries": len(feedback_rows),
         },
         "db_stats": stats,
     }
@@ -252,6 +262,9 @@ def export_prod_data(
                 "test_mappings_used.json",
                 json.dumps(mappings, ensure_ascii=False, indent=2),
             )
+        if feedback_rows:
+            flines = [json.dumps(r, ensure_ascii=False) for r in feedback_rows]
+            zf.writestr("feedback_journal.jsonl", "\n".join(flines) + "\n")
 
     _set_app_setting(LAST_PROD_EXPORT_KEY, manifest["exported_at"], db_path)
     return {
@@ -326,6 +339,7 @@ def import_prod_data(
         "snapshots_skipped": 0,
         "sessions_appended": 0,
         "test_mappings_file": False,
+        "feedback_imported": 0,
     }
     manifest: dict[str, Any] = {}
     host_prefix = "unknown"
@@ -380,6 +394,29 @@ def import_prod_data(
             ref_path = _unique_dest(ref_dir, "test_mappings_used.json", host_prefix)
             ref_path.write_bytes(zf.read("test_mappings_used.json"))
             stats["test_mappings_file"] = True
+
+        if "feedback_journal.jsonl" in zf.namelist():
+            raw_fb = zf.read("feedback_journal.jsonl").decode("utf-8")
+            entries: list[dict[str, Any]] = []
+            for line in raw_fb.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            # копия файла + в БД dev
+            fb_dest = _unique_dest(corr_dest, "feedback_journal.jsonl", host_prefix)
+            fb_dest.write_text(raw_fb, encoding="utf-8")
+            if sync_db and entries:
+                from ..persistence.sqlite_repo import import_feedback_entries
+
+                stats["feedback_imported"] = import_feedback_entries(
+                    entries,
+                    db_path=db_path,
+                    station_prefix=host_prefix,
+                )
 
     sync_stats: dict[str, int] = {}
     if sync_db and stats["corrections_copied"] > 0:

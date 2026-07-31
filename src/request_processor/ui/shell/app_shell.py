@@ -357,6 +357,12 @@ class ShellMixin:
     def _setup_theme(self) -> None:
         apply_fluent_theme(self)
 
+    def _open_feedback_journal(self) -> None:
+        """Меню Файл → Журнал пожеланий (обратная связь, уходит в prod-data zip)."""
+        from ..feedback_journal import open_feedback_journal
+
+        open_feedback_journal(self, db_path=self.db_path)
+
     def _open_logs_folder(self) -> None:
         """Открыть папку логов (основную; если зеркало — перечислить оба пути)."""
         from ...logging_setup import get_active_log_dirs, get_active_log_files, resolve_logs_dir

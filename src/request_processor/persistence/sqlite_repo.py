@@ -409,6 +409,7 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     _migrate_norm_requirements(db_path)
     _migrate_acceptance_catalog(db_path)
     _migrate_calculation_lines_quantity(db_path)
+    _migrate_feedback_journal(db_path)
     apply_price_catalog_fixes(db_path)
     sync_climatic_tests(db_path)
     sync_test_rule_types(db_path)
@@ -418,6 +419,210 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     sync_mappings_from_test_item_names(db_path)
     seed_example_norm_requirements(db_path)
     seed_example_acceptance_catalog(db_path)
+
+
+def _migrate_feedback_journal(db_path: str | Path = DB_PATH_DEFAULT) -> None:
+    """Журнал пожеланий / ошибок / обратной связи оператора (меню Файл)."""
+    with get_connection(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS feedback_journal (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at      TEXT NOT NULL,
+                category        TEXT NOT NULL,
+                section         TEXT,
+                priority        TEXT NOT NULL DEFAULT 'обычный',
+                title           TEXT NOT NULL,
+                body            TEXT NOT NULL,
+                steps           TEXT,
+                expected        TEXT,
+                actual          TEXT,
+                app_version     TEXT,
+                host_name       TEXT,
+                status          TEXT NOT NULL DEFAULT 'new',
+                source          TEXT NOT NULL DEFAULT 'gui'
+            );
+            CREATE INDEX IF NOT EXISTS idx_feedback_journal_created
+                ON feedback_journal(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_feedback_journal_category
+                ON feedback_journal(category);
+            """
+        )
+
+
+def add_feedback_entry(
+    *,
+    category: str,
+    title: str,
+    body: str,
+    section: str | None = None,
+    priority: str = "обычный",
+    steps: str | None = None,
+    expected: str | None = None,
+    actual: str | None = None,
+    app_version: str | None = None,
+    host_name: str | None = None,
+    status: str = "new",
+    source: str = "gui",
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Добавить запись в журнал обратной связи. Возвращает id."""
+    import socket
+
+    title_s = (title or "").strip()
+    body_s = (body or "").strip()
+    if not title_s:
+        raise ValueError("Укажите краткий заголовок")
+    if len(body_s) < 3:
+        raise ValueError("Опишите пожелание или проблему (свободный текст)")
+    cat = (category or "пожелание").strip() or "пожелание"
+    prio = (priority or "обычный").strip() or "обычный"
+    now = datetime.now().isoformat(timespec="seconds")
+    host = (host_name or "").strip() or (socket.gethostname() or "")
+    ver = app_version
+    if not ver:
+        try:
+            import request_processor as rp
+
+            ver = getattr(rp, "__version__", None)
+        except Exception:
+            ver = None
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO feedback_journal (
+                created_at, category, section, priority, title, body,
+                steps, expected, actual, app_version, host_name, status, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now,
+                cat,
+                (section or "").strip() or None,
+                prio,
+                title_s,
+                body_s,
+                (steps or "").strip() or None,
+                (expected or "").strip() or None,
+                (actual or "").strip() or None,
+                ver,
+                host or None,
+                status or "new",
+                source or "gui",
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def list_feedback_entries(
+    *,
+    limit: int = 200,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> list[dict[str, Any]]:
+    """Список записей журнала (новые сверху)."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM feedback_journal
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_feedback_entry(
+    entry_id: int,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> dict[str, Any] | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM feedback_journal WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def export_feedback_journal(
+    db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    since_iso: str | None = None,
+) -> list[dict[str, Any]]:
+    """Все (или с даты) записи для prod-data zip."""
+    with get_connection(db_path) as conn:
+        if since_iso:
+            rows = conn.execute(
+                """
+                SELECT * FROM feedback_journal
+                WHERE created_at >= ?
+                ORDER BY id ASC
+                """,
+                (since_iso,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM feedback_journal ORDER BY id ASC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def import_feedback_entries(
+    entries: list[dict[str, Any]],
+    *,
+    db_path: str | Path = DB_PATH_DEFAULT,
+    station_prefix: str = "",
+) -> int:
+    """Импорт записей с work (не дублируем по title+created_at+body hash)."""
+    if not entries:
+        return 0
+    n = 0
+    with get_connection(db_path) as conn:
+        for e in entries:
+            title = (e.get("title") or "").strip()
+            body = (e.get("body") or "").strip()
+            created = (e.get("created_at") or "").strip()
+            if not title or not body:
+                continue
+            exists = conn.execute(
+                """
+                SELECT id FROM feedback_journal
+                WHERE title = ? AND body = ? AND created_at = ?
+                LIMIT 1
+                """,
+                (title, body, created),
+            ).fetchone()
+            if exists:
+                continue
+            # пометка источника станции в host_name
+            host = (e.get("host_name") or "").strip()
+            if station_prefix and station_prefix not in host:
+                host = f"{station_prefix}:{host}" if host else station_prefix
+            conn.execute(
+                """
+                INSERT INTO feedback_journal (
+                    created_at, category, section, priority, title, body,
+                    steps, expected, actual, app_version, host_name, status, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created or datetime.now().isoformat(timespec="seconds"),
+                    e.get("category") or "пожелание",
+                    e.get("section"),
+                    e.get("priority") or "обычный",
+                    title,
+                    body,
+                    e.get("steps"),
+                    e.get("expected"),
+                    e.get("actual"),
+                    e.get("app_version"),
+                    host or None,
+                    e.get("status") or "new",
+                    e.get("source") or "import",
+                ),
+            )
+            n += 1
+    return n
 
 
 def _migrate_training_tables(db_path: str | Path = DB_PATH_DEFAULT) -> None:
