@@ -3050,6 +3050,17 @@ def save_document_extraction(
         return int(cursor.lastrowid or 0)
 
 
+def _normalize_org_search(text: str) -> str:
+    """Нормализация строки поиска org: casefold, ё→е, кавычки/пробелы."""
+    s = (text or "").replace("ё", "е").replace("Ё", "Е")
+    s = s.casefold().strip()
+    # убрать типовые кавычки, чтобы «тольят» ловил ООО «"ТОЛЬЯТТИ…»"
+    for ch in "«»\"'“”„":
+        s = s.replace(ch, "")
+    s = " ".join(s.split())
+    return s
+
+
 def list_organizations(
     search: str | None = None,
     org_type: str | None = None,
@@ -3060,6 +3071,8 @@ def list_organizations(
 
     Поиск по name/inn/address с **Unicode casefold** (кириллица: «тольят» = «Тольят»).
     SQLite LIKE для не-ASCII регистрозависим — фильтр в Python.
+    При поиске читаем **все** org (не LIMIT до фильтра), иначе «хвост» списка
+    не участвует в поиске.
     """
     query = "SELECT * FROM organizations"
     params: list[Any] = []
@@ -3069,24 +3082,38 @@ def list_organizations(
         params.append(org_type)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    # Берём с запасом, если потом режем casefold-фильтром
-    fetch_limit = max(limit * 8, 400) if search else limit
-    query += " ORDER BY updated_at DESC LIMIT ?"
-    params.append(fetch_limit)
+    query += " ORDER BY updated_at DESC"
 
     with get_connection(db_path) as conn:
         rows = [dict(row) for row in conn.execute(query, params).fetchall()]
 
-    needle = (search or "").casefold().strip()
+    needle = _normalize_org_search(search or "")
     if needle:
-        def _hit(row: dict[str, Any]) -> bool:
-            for key in ("name", "inn", "address", "postal_code", "phone", "fsa_registry_number"):
+        def _blob(row: dict[str, Any]) -> str:
+            parts: list[str] = []
+            for key in (
+                "name",
+                "inn",
+                "address",
+                "legal_address",
+                "actual_address",
+                "postal_code",
+                "phone",
+                "fsa_registry_number",
+                "note",
+            ):
                 val = row.get(key)
-                if val and needle in str(val).casefold():
-                    return True
-            return False
+                if val:
+                    parts.append(str(val))
+            return _normalize_org_search(" ".join(parts))
 
-        rows = [r for r in rows if _hit(r)]
+        # все токены запроса должны встретиться (порядок не важен)
+        tokens = [t for t in needle.split() if t]
+        rows = [
+            r
+            for r in rows
+            if all(tok in _blob(r) for tok in tokens)
+        ]
     return rows[:limit]
 
 

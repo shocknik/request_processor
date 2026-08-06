@@ -41,9 +41,12 @@ def mem_db(tmp_path: Path) -> Path:
 def test_org_search_casefold_cyrillic(mem_db: Path) -> None:
     assert len(list_organizations(search="Тольят", db_path=mem_db)) == 1
     assert len(list_organizations(search="тольят", db_path=mem_db)) == 1
+    assert len(list_organizations(search="ТОЛЬЯТ", db_path=mem_db)) == 1
     assert len(list_organizations(search="СПЕЦ", db_path=mem_db)) == 1
     assert len(list_organizations(search="спец", db_path=mem_db)) == 1
     assert len(list_organizations(search="кабель", db_path=mem_db)) >= 1
+    # multi-token
+    assert len(list_organizations(search="тольят завод", db_path=mem_db)) == 1
 
 
 def test_document_not_stoimostyu() -> None:

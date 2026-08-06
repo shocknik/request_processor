@@ -891,6 +891,13 @@ class PdfTabMixin:
                 cached = self._org_suggest_cache.get(q)
                 if not cached or cached.get("name") != q:
                     self._draft_manufacturer_org_id = None
+            # показать список, если фокус в комбо и есть совпадения (иначе «поиск не работает»)
+            if names and q and len(q) >= 2:
+                try:
+                    if combo.focus_get() == combo:
+                        combo.event_generate("<Down>")
+                except tk.TclError:
+                    pass
 
         def _on_select(_event: object | None = None) -> None:
             name = (combo.get() or "").strip()

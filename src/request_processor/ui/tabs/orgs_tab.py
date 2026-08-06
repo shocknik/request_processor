@@ -111,12 +111,21 @@ class OrgsTabMixin:
     def _build_orgs_tab(self) -> None:
         toolbar = ttk.Frame(self.tab_orgs)
         toolbar.pack(fill="x", pady=(0, 8))
-        self.orgs_search_var = tk.StringVar()
-        self.orgs_search_var.trace_add("write", lambda *_: self._load_orgs_table())
+        self.orgs_search_var = tk.StringVar(master=self)
+        # trace + KeyRelease: на Windows/ttk иногда trace не успевает / не срабатывает
+        self.orgs_search_var.trace_add("write", lambda *_: self._schedule_orgs_reload())
         ttk.Label(toolbar, text="Поиск").pack(side="left")
-        ttk.Entry(toolbar, textvariable=self.orgs_search_var, width=36).pack(
-            side="left", padx=(6, 10), ipady=2
+        self.orgs_search_entry = ttk.Entry(
+            toolbar, textvariable=self.orgs_search_var, width=36
         )
+        self.orgs_search_entry.pack(side="left", padx=(6, 6), ipady=2)
+        self.orgs_search_entry.bind("<KeyRelease>", self._on_orgs_search_key, add="+")
+        self.orgs_search_entry.bind("<Return>", self._on_orgs_search_key, add="+")
+        self.orgs_search_entry.bind("<Escape>", self._on_orgs_search_clear, add="+")
+        self.orgs_search_count_var = tk.StringVar(master=self, value="")
+        ttk.Label(
+            toolbar, textvariable=self.orgs_search_count_var, style="Muted.TLabel"
+        ).pack(side="left", padx=(0, 10))
         self._accent_button(toolbar, "+ Добавить…", self._add_organization).pack(side="left")
         self._accent_button(toolbar, "Редактировать…", self._edit_selected_organization).pack(
             side="left", padx=(8, 0)
@@ -124,12 +133,15 @@ class OrgsTabMixin:
         more = ttk.Menubutton(toolbar, text="Ещё ▾")
         more_menu = tk.Menu(more, tearoff=0)
         more_menu.add_command(label="Обновить", command=self._load_orgs_table)
+        more_menu.add_command(label="Очистить поиск", command=self._on_orgs_search_clear)
         more_menu.add_command(label="Удалить…", command=self._delete_selected_organization)
         more["menu"] = more_menu
         more.pack(side="left", padx=(8, 0))
-        ttk.Label(toolbar, text="CRUD · дедуп по имени · Двойной клик / ПКМ", style="Muted.TLabel").pack(
-            side="right"
-        )
+        ttk.Label(
+            toolbar,
+            text="Фильтр по имени/ИНН/адресу · Esc — сброс · Двойной клик",
+            style="Muted.TLabel",
+        ).pack(side="right")
 
         cols = ("name", "inn", "org_type", "accredited", "address", "phone", "fsa")
         self.orgs_tree = ttk.Treeview(
@@ -169,35 +181,111 @@ class OrgsTabMixin:
         finally:
             menu.grab_release()
 
+    def _schedule_orgs_reload(self) -> None:
+        """Свести частые trace/KeyRelease в один after(0)."""
+        if not hasattr(self, "orgs_tree"):
+            return
+        try:
+            if getattr(self, "_orgs_reload_after", None) is not None:
+                self.after_cancel(self._orgs_reload_after)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._orgs_reload_after = self.after(0, self._load_orgs_table)
+        except Exception:  # noqa: BLE001
+            self._load_orgs_table()
+
+    def _on_orgs_search_key(self, _event: tk.Event | None = None) -> None:
+        """Надёжный путь: читать Entry.get(), синхронизировать var, перерисовать."""
+        if not hasattr(self, "orgs_search_entry"):
+            self._schedule_orgs_reload()
+            return
+        try:
+            text = self.orgs_search_entry.get()
+        except tk.TclError:
+            text = ""
+        if hasattr(self, "orgs_search_var"):
+            cur = self.orgs_search_var.get()
+            if cur != text:
+                # обновить var без лишнего цикла, если уже совпадает
+                self.orgs_search_var.set(text)
+                return  # trace вызовет reload
+        self._schedule_orgs_reload()
+
+    def _on_orgs_search_clear(self, _event: tk.Event | None = None) -> str | None:
+        if hasattr(self, "orgs_search_var"):
+            self.orgs_search_var.set("")
+        if hasattr(self, "orgs_search_entry"):
+            try:
+                self.orgs_search_entry.delete(0, "end")
+            except tk.TclError:
+                pass
+        self._load_orgs_table()
+        return "break"
+
     def _load_orgs_table(self) -> None:
         if not hasattr(self, "orgs_tree"):
             return
+        self._orgs_reload_after = None
         for item in self.orgs_tree.get_children():
             self.orgs_tree.delete(item)
-        search = (
-            self.orgs_search_var.get().strip() or None
-            if hasattr(self, "orgs_search_var")
-            else None
-        )
-        for row in list_organizations(search=search, limit=300, db_path=self.db_path):
+        # Entry — источник истины (надёжнее StringVar на части ttk/Windows)
+        search: str | None = None
+        if hasattr(self, "orgs_search_entry"):
+            try:
+                search = self.orgs_search_entry.get().strip() or None
+            except tk.TclError:
+                search = None
+        if search is None and hasattr(self, "orgs_search_var"):
+            search = self.orgs_search_var.get().strip() or None
+        rows = list_organizations(search=search, limit=500, db_path=self.db_path)
+        for row in rows:
             org_type = ORG_TYPE_LABELS.get(row.get("org_type") or "unknown", row.get("org_type"))
             addr = row.get("address") or ""
             if row.get("postal_code"):
                 addr = f"{row['postal_code']}, {addr}".strip(", ")
-            self.orgs_tree.insert(
-                "",
-                "end",
-                iid=str(row["id"]),
-                values=(
-                    row["name"],
-                    row.get("inn") or "",
-                    org_type,
-                    "да" if row.get("is_accredited") else "нет",
-                    addr[:80],
-                    row.get("phone") or "",
-                    row.get("fsa_registry_number") or "",
-                ),
-            )
+            try:
+                self.orgs_tree.insert(
+                    "",
+                    "end",
+                    iid=str(row["id"]),
+                    values=(
+                        row["name"],
+                        row.get("inn") or "",
+                        org_type,
+                        "да" if row.get("is_accredited") else "нет",
+                        addr[:80],
+                        row.get("phone") or "",
+                        row.get("fsa_registry_number") or "",
+                    ),
+                )
+            except tk.TclError:
+                # iid уже есть — вставить без iid
+                self.orgs_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row["name"],
+                        row.get("inn") or "",
+                        org_type,
+                        "да" if row.get("is_accredited") else "нет",
+                        addr[:80],
+                        row.get("phone") or "",
+                        row.get("fsa_registry_number") or "",
+                    ),
+                )
+        n = len(rows)
+        if hasattr(self, "orgs_search_count_var"):
+            if search:
+                self.orgs_search_count_var.set(f"найдено: {n}")
+            else:
+                self.orgs_search_count_var.set(f"всего: {n}")
+        _log.debug(
+            "orgs table reload search=%r n=%s",
+            search,
+            n,
+            extra={"tag": "Организации"},
+        )
 
     def _load_organizations(self) -> None:
         rows = list_organizations(limit=200, db_path=self.db_path)

@@ -45,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 
 | Тема | Что |
 |------|-----|
-| Org search | Unicode casefold: `тольят` находит «Тольяттинский…» |
+| Org search | Unicode casefold + KeyRelease; счётчик «найдено: N»; Esc — сброс; все org в фильтре |
 | Clipboard | Ctrl+C на адресе = copy (RU/EN), не paste |
 | Document field | «стоимостью» не считается ТУ/СТО |
 | Марки / OCR | lookalike UТР→UTP, РVС→PVC; ЕВНЕ→FRHF; КСВПП/КССПП; LAN Cat 6 PVC нг… до размера |
