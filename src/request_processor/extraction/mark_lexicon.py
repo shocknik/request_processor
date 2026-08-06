@@ -200,6 +200,12 @@ def load_mark_lexicon(*, force_reload: bool = False) -> dict[str, Any]:
         "U/UTQ": "U/UTP",
         "UТР": "U/UTP",
         "UТP": "U/UTP",
+        "SF/UТР": "SF/UTP",
+        "S/FТР": "S/FTP",
+        "РVС": "PVC",
+        "КСБКНГ(А)-ЕВНЕ": "КСБКнг(А)-FRHF",
+        "КСБКнг(А)-ЕВНЕ": "КСБКнг(А)-FRHF",
+        "КСБКНГ(А)-FRНЕ": "КСБКнг(А)-FRHF",
     }
     for alias, target in {**default_aliases, **(data.get("aliases") or {})}.items():
         a = _normalize_key(str(alias))

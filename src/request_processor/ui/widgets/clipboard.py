@@ -105,9 +105,18 @@ from ...persistence.sqlite_repo import (
 _log = get_logger("ui.gui")
 
 class ClipboardMixin:
+    # Windows VK: C=67 X=88 V=86 A=65 (физические клавиши, не зависят от раскладки)
+    _VK_COPY = 67
+    _VK_CUT = 88
+    _VK_PASTE = 86
+    _VK_SELECT_ALL = 65
+
     def _install_clipboard_support(self) -> None:
-        """Стандартные Ctrl+C/X/V/A, Shift+Ins, контекстное меню для всех текстовых полей."""
+        """Ctrl+C/X/V/A через keycode (RU/EN) + явные bind; без двойного paste."""
         for cls in self._CLIPBOARD_CLASSES:
+            # Сначала keycode — единый путь для EN/RU (Control-c при RU не матчится)
+            self.bind_class(cls, "<Control-KeyPress>", self._evt_ctrl_keycode)
+            # Fallback на keysym (Linux / EN): только если keycode-путь не сработал
             self.bind_class(cls, "<Control-c>", self._evt_copy)
             self.bind_class(cls, "<Control-C>", self._evt_copy)
             self.bind_class(cls, "<Control-x>", self._evt_cut)
@@ -116,8 +125,6 @@ class ClipboardMixin:
             self.bind_class(cls, "<Control-V>", self._evt_paste)
             self.bind_class(cls, "<Control-a>", self._evt_select_all)
             self.bind_class(cls, "<Control-A>", self._evt_select_all)
-            # Русская раскладка: keycode (Windows) для C/X/V/A
-            self.bind_class(cls, "<Control-KeyPress>", self._evt_ctrl_keycode)
             self.bind_class(cls, "<Shift-Insert>", self._evt_paste)
             self.bind_class(cls, "<Control-Insert>", self._evt_copy)
             self.bind_class(cls, "<Shift-Delete>", self._evt_cut)
@@ -127,21 +134,35 @@ class ClipboardMixin:
         self.bind_class("Label", "<Button-3>", self._evt_label_copy_menu)
 
     def _evt_ctrl_keycode(self, event: tk.Event) -> str | None:
-        """Ctrl+C/X/V/A при русской раскладке (символ не 'c', но keycode тот же)."""
-        # Windows virtual key codes
+        """Ctrl+C/X/V/A по Windows keycode — работает при русской раскладке.
+
+        Важно: return ``\"break\"`` для C/X/V/A, чтобы не сработали
+        устаревшие/чужие bind и чтобы Ctrl+C не превращался во вставку.
+        """
         code = int(getattr(event, "keycode", 0) or 0)
-        if code == 67:  # C
+        if code == self._VK_COPY:
             return self._evt_copy(event)
-        if code == 88:  # X
+        if code == self._VK_CUT:
             return self._evt_cut(event)
-        if code == 86:  # V
+        if code == self._VK_PASTE:
             return self._evt_paste(event)
-        if code == 65:  # A
+        if code == self._VK_SELECT_ALL:
             return self._evt_select_all(event)
         return None
 
     def _evt_copy(self, event: tk.Event) -> str:
-        self._copy_widget_selection(event.widget)
+        widget = event.widget
+        # Защита от повторного срабатывания (keycode + Control-c в одном нажатии)
+        if getattr(widget, "_rp_clip_busy", None) == "copy":
+            return "break"
+        try:
+            widget._rp_clip_busy = "copy"  # type: ignore[attr-defined]
+            self._copy_widget_selection(widget)
+        finally:
+            try:
+                widget.after(50, lambda w=widget: setattr(w, "_rp_clip_busy", None))
+            except Exception:  # noqa: BLE001
+                widget._rp_clip_busy = None  # type: ignore[attr-defined]
         return "break"
 
     def _evt_cut(self, event: tk.Event) -> str:
@@ -149,7 +170,11 @@ class ClipboardMixin:
         return "break"
 
     def _evt_paste(self, event: tk.Event) -> str:
-        self._paste_into_widget(event.widget)
+        widget = event.widget
+        # Не вставлять, если только что обрабатывали copy (двойной bind / RU layout)
+        if getattr(widget, "_rp_clip_busy", None) == "copy":
+            return "break"
+        self._paste_into_widget(widget)
         return "break"
 
     def _evt_select_all(self, event: tk.Event) -> str:

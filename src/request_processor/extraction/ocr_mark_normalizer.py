@@ -55,8 +55,54 @@ _LATIN_TO_CYR = str.maketrans(
 )
 
 _LAN_MARK_PATTERN = re.compile(
-    r"СПЕЦЛАН|(?:^|\s)(?:F/?|SF/?)UTP|Cat\s*5",
+    r"СПЕЦЛАН|(?:^|\s)(?:F/?|SF/?)UTP|(?:^|\s)(?:S/?FTP)|Cat\s*\d|U/?UTP",
     re.IGNORECASE,
+)
+
+# Кириллические омоглифы → латиница в LAN-фрагментах (UТР→UTP, РVС→PVC)
+_CYR_TO_LAT_LAN = str.maketrans(
+    {
+        "А": "A",
+        "В": "B",
+        "С": "C",
+        "Е": "E",
+        "Н": "H",
+        "К": "K",
+        "М": "M",
+        "О": "O",
+        "Р": "P",
+        "Т": "T",
+        "Х": "X",
+        "У": "Y",
+        "а": "a",
+        "е": "e",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "у": "y",
+        "х": "x",
+        "т": "t",
+        "к": "k",
+        "м": "m",
+        "н": "h",
+        "в": "b",
+    }
+)
+
+# OCR пожарных суффиксов: ЕВНЕ→FRHF (Спецкабель PDF №1527 и аналоги)
+_FIRE_OCR_FIXES: tuple[tuple[str, str], ...] = (
+    (r"ЕВНЕ", "FRHF"),
+    (r"ЕВН[ЕE]", "FRHF"),
+    (r"FRНЕ", "FRHF"),
+    (r"FRНF", "FRHF"),
+    (r"FRН[ЕE]", "FRHF"),
+    (r"ЕВLS", "FRLS"),
+    (r"ЕВL[SС]", "FRLS"),
+    (r"FRL[SС]", "FRLS"),
+    (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*ЕВНЕ", "нг(А)-FRHF"),
+    (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*ЕВLS", "нг(А)-FRLS"),
+    (r"НГ\s*\(\s*[АAаa]\s*\)", "нг(А)"),
+    (r"Нг\s*\(\s*[АAаa]\s*\)", "нг(А)"),
 )
 _SIZE_START = re.compile(
     r"\d+\s*[зЗпП]?\s*[хx×]",
@@ -84,7 +130,45 @@ def _fix_fire_class_letters(text: str) -> str:
     text = re.sub(r"нг\s*\(\s*A\s*\)", "нг(А)", text, flags=re.IGNORECASE)
     text = re.sub(r"Внг\s*\(\s*A\s*\)", "Внг(А)", text, flags=re.IGNORECASE)
     text = re.sub(r"Пнг\s*\(\s*A\s*\)", "Пнг(А)", text, flags=re.IGNORECASE)
+    for pattern, repl in _FIRE_OCR_FIXES:
+        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
     return text
+
+
+def normalize_lan_homoglyphs(text: str) -> str:
+    """Кириллица→латиница в LAN-токенах: SF/UТР → SF/UTP, РVС → PVC, Cat 6А → Cat 6A."""
+    if not text:
+        return text
+    # Частые склейки OCR
+    repls = (
+        (r"U\s*/\s*U[ТT][РP]", "U/UTP"),
+        (r"F\s*/\s*U[ТT][РP]", "F/UTP"),
+        (r"SF\s*/\s*U[ТT][РP]", "SF/UTP"),
+        (r"S\s*/\s*F[ТT][РP]", "S/FTP"),
+        (r"SF\s*/\s*T[РP]", "SF/TP"),
+        (r"\bР\s*V\s*[СC]\b", "PVC"),
+        (r"\bP\s*V\s*С\b", "PVC"),
+        (r"\bРVС\b", "PVC"),
+        (r"\bРВС\b", "PVC"),
+        # OCR/homoglyph: «Сат 6» ← Cat после latin→cyr
+        (r"\b[СC]ат\s*(\d\w?)\b", r"Cat \1"),
+        (r"\bCat\s*(\d)[АA]\b", r"Cat \1A"),
+        (r"\bcat\s*(\d)[еe]\b", r"cat \1e"),
+    )
+    out = text
+    for pattern, repl in repls:
+        out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
+    # Омоглифы внутри shield/sheath токенов
+    def _lat_token(m: re.Match[str]) -> str:
+        return m.group(0).translate(_CYR_TO_LAT_LAN)
+
+    out = re.sub(
+        r"\b(?:[USF]/?/?[UТTРP]{2,4}|[SС]/?[FТTРP]{2,3}|PVC|PE|ZH|LSZH)\b",
+        _lat_token,
+        out,
+        flags=re.IGNORECASE,
+    )
+    return out
 
 
 # Типовые бренды: OCR-искажения → эталон (насмотренность по cable_marks / письмам)
@@ -243,9 +327,10 @@ def normalize_mark_after_ocr(
         return mark
 
     raw = _strip_table_price_glue(mark.strip())
+    raw = normalize_lan_homoglyphs(raw)
     raw = _infer_vvg_for_size_only(raw)
     if _is_lan_mark(raw):
-        return _fix_fire_class_letters(raw)
+        return _fix_fire_class_letters(normalize_lan_homoglyphs(raw))
 
     brand, tail = _split_brand_and_tail(raw)
     fixed_brand = _snap_known_brand_prefix(brand)

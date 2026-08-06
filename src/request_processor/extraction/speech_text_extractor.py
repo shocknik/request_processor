@@ -228,6 +228,12 @@ def find_speech_marks(text: str) -> list[CableMarkMatch]:
     base = base.replace("—", "-").replace("–", "-")
     if not base.strip():
         return []
+    try:
+        from .ocr_mark_normalizer import normalize_lan_homoglyphs
+
+        base = normalize_lan_homoglyphs(base)
+    except Exception:  # noqa: BLE001
+        pass
 
     clauses = extract_tu_clauses(base)
     clauses_joined = ", ".join(clauses) if clauses else None

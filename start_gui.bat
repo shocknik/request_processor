@@ -1,10 +1,16 @@
 @echo off
 cd /d "%~dp0"
 
+REM Ранний визуальный сигнал: до pythonw на NAS может пройти 10+ с
+title Lab_request — запуск…
+echo Lab_request: запуск… (на сетевом диске это может занять 10-20 с)
+
 set "PYW=%~dp0.venv\Scripts\pythonw.exe"
 set "PY=%~dp0.venv\Scripts\python.exe"
 set "LOGDIR=%~dp0data\logs"
 set "LAUNCHLOG=%~dp0data\gui_launch.log"
+REM Не грузить ico splash с UNC (ускоряет появление окна)
+set "REQUEST_PROCESSOR_SPLASH_ICON=0"
 
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 

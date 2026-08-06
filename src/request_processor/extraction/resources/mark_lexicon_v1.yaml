@@ -1196,7 +1196,44 @@ brands:
   groups:
   - 'для парных кабелей: число пар × диаметр'
   count: 1
+# work feedback 06.08.2026 — витая пара / LAN вне справочника 300
+- name: КСВПП
+  examples:
+  - КСВПП-5е 2х2х0.52
+  - КСВПП-5е 4х2х0.52
+  groups:
+  - Кабели связи симметричные
+  count: 2
+- name: КСВПП-5е
+  examples:
+  - КСВПП-5е 2х2х0.52 ТУ ФКС-002-2016
+  groups:
+  - Кабели связи симметричные
+  count: 1
+- name: КССПП
+  examples:
+  - КССПП 5е 2х2х0,52
+  - КССПП 5е 4х2х0,52
+  groups:
+  - Кабели связи симметричные
+  count: 2
+- name: SF/UTP Cat 6 PVC
+  examples:
+  - SF/UTP Cat 6 PVC нг(А)-LS 4х2х0,57-145
+  groups:
+  - LAN
+  count: 1
+- name: S/FTP Cat 6A PVC
+  examples:
+  - S/FTP Cat 6А PVC нг(А)-LS 4х2х0,57-145
+  groups:
+  - LAN
+  count: 1
 aliases:
   BBG: ВВГ
   BBGнг: ВВГнг(А)
   KCBur: КСБнг(А)
+  КСБКНГ(А)-ЕВНЕ: КСБКнг(А)-FRHF
+  КСБКнг(А)-ЕВНЕ: КСБКнг(А)-FRHF
+  SF/UТР: SF/UTP
+  РVС: PVC

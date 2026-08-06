@@ -238,7 +238,8 @@ start_gui.bat
 
 ---
 
-**Версия приложения:** см. `pyproject.toml` · обновление: [docs/UPDATE.md](docs/UPDATE.md) · zip `0.9.1_20260728`  
+**Версия приложения:** см. `pyproject.toml` · обновление: [docs/UPDATE.md](docs/UPDATE.md) · zip `0.9.1_20260806`  
 **Репозиторий:** https://github.com/shocknik/request_processor  
 **Модель LLM:** llama3.2 · **Ollama models:** `%USERPROFILE%\.ollama\models`  
-**Роль БД:** `request-processor db-info` / `db-role` (на work: `--set work`)
+**Роль БД:** `request-processor db-info` / `db-role` (на work: `--set work`)  
+**Чеклист после update:** [docs/CHECKLIST_TZ70_OPERATOR.md](docs/CHECKLIST_TZ70_OPERATOR.md)

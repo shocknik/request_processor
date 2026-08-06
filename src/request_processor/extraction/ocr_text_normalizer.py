@@ -11,7 +11,11 @@ import re
 
 from ..parsing.cable_mark_parser import fix_ocr_document_text
 from .client_profiles import apply_org_ocr_aliases
-from .ocr_mark_normalizer import _LATIN_TO_CYR
+from .ocr_mark_normalizer import (
+    _LATIN_TO_CYR,
+    normalize_lan_homoglyphs,
+    _FIRE_OCR_FIXES,
+)
 
 # Не трогаем email, URL, LAN-обозначения, лат. бренды марок, англ. подписи
 _PROTECTED_SPAN = re.compile(
@@ -20,7 +24,8 @@ _PROTECTED_SPAN = re.compile(
     r"\bFLEXICORE(?:®)?(?:\s+[^\n|]{0,60})?|"
     r"\bH07RN-F(?:\s+RU)?\b|"
     r"\bVicabFLEX\b|"
-    r"\b(?:Cat\s*5\w|UTP|SF/?UTP|F/?UTP|Prepared\s+by|Phone:|/Phone:|ext\.)\b",
+    # LAN: Cat 5/6/6A/7… + shield (не переводить в кириллицу)
+    r"\b(?:Cat\s*\d\w?|[USF]?/?UTP|S/?FTP|SF/?TP|PVC|PE|LSZH|Prepared\s+by|Phone:|/Phone:|ext\.)\b",
     re.IGNORECASE,
 )
 
@@ -111,6 +116,10 @@ _MISC_FIXES: tuple[tuple[str, str], ...] = (
     (r"PEJ", "PE)"),
     (r"С\s+анкт", "Санкт"),
     (r"Р\s+ОССИЯ", "РОССИЯ"),
+    # OCR fire / LAN (work 06.08: КСБК…-ЕВНЕ, SF/UТР)
+    (r"ЕВНЕ", "FRHF"),
+    (r"FRНЕ", "FRHF"),
+    (r"ЕВLS", "FRLS"),
 )
 
 
@@ -153,7 +162,8 @@ def normalize_ocr_text(text: str) -> str:
         return text
 
     text = fix_ocr_document_text(text)
-    for fixes in (_ADDRESS_FIXES, _LAN_FIXES, _PERIODIC_FIXES, _MISC_FIXES):
+    text = normalize_lan_homoglyphs(text)
+    for fixes in (_ADDRESS_FIXES, _LAN_FIXES, _PERIODIC_FIXES, _MISC_FIXES, _FIRE_OCR_FIXES):
         text = _apply_regex_fixes(text, fixes)
 
     lines = []
@@ -168,6 +178,7 @@ def normalize_ocr_text(text: str) -> str:
             line = _homoglyph_line(line)
         lines.append(line)
     text = "\n".join(lines)
+    text = normalize_lan_homoglyphs(text)
     # Локальные OCR→канон для имён на бланке (Спецкабель и т.д.) — не шаблоны
     text = apply_org_ocr_aliases(text)
     return re.sub(r"  +", " ", text)

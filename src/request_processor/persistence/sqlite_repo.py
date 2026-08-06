@@ -3056,23 +3056,38 @@ def list_organizations(
     limit: int = 100,
     db_path: str | Path = DB_PATH_DEFAULT,
 ) -> list[dict[str, Any]]:
+    """Список организаций.
+
+    Поиск по name/inn/address с **Unicode casefold** (кириллица: «тольят» = «Тольят»).
+    SQLite LIKE для не-ASCII регистрозависим — фильтр в Python.
+    """
     query = "SELECT * FROM organizations"
     params: list[Any] = []
     conditions: list[str] = []
-    if search:
-        conditions.append("(name LIKE ? OR inn LIKE ? OR address LIKE ?)")
-        params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
     if org_type:
         conditions.append("org_type = ?")
         params.append(org_type)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
+    # Берём с запасом, если потом режем casefold-фильтром
+    fetch_limit = max(limit * 8, 400) if search else limit
     query += " ORDER BY updated_at DESC LIMIT ?"
-    params.append(limit)
+    params.append(fetch_limit)
 
     with get_connection(db_path) as conn:
-        rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    needle = (search or "").casefold().strip()
+    if needle:
+        def _hit(row: dict[str, Any]) -> bool:
+            for key in ("name", "inn", "address", "postal_code", "phone", "fsa_registry_number"):
+                val = row.get(key)
+                if val and needle in str(val).casefold():
+                    return True
+            return False
+
+        rows = [r for r in rows if _hit(r)]
+    return rows[:limit]
 
 
 def get_organization_by_id(

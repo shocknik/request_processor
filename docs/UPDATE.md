@@ -30,41 +30,41 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 # НЕ включайте -IncludeAppDb для обновления боя (иначе соблазн перезаписать БД)
 ```
 
-### Готовится: zip после ТЗ 70 (org / free-text / марки / логи)
+### Актуальный zip на work: **2026-08-06**
 
-На **dev** (ещё не zip, пока QA оператора):
+`dist\request_processor_0.9.1_20260806.zip` (**без** `app.db`)
 
-| Тема | Что |
-|------|-----|
-| Свободный текст | «Текст…» без ошибки *main thread is not in main loop* |
-| Заказчик / производитель | подсказки из справочника при вводе; флаг «производитель = заказчик»; ручной ввод **после «Подтвердить»** уходит в КП и заказ |
-| Марки | вкладка «Марки»: двойной клик / «Редактировать» |
-| Логи | **двойная запись:** `data\logs\app_*.log` **и** зеркало `%LOCALAPPDATA%\Lab_request\logs\` (flush после каждой строки; pythonw без консоли). Старт: баннер SESSION + окружение (host, user, пути). Меню «Папка логов» показывает **полные пути** для копирования |
+Собрать на dev:
 
-Проверка на work после update:
-1. Меню → папка логов → в диалоге **оба** пути (установка + LocalAppData).  
-2. После «Текст…» / расчёта / КП файл `app_сегодня.log` **растёт**.  
-3. Если сеть W: капризничает — снимите лог из  
-   `C:\Users\<логин>\AppData\Local\Lab_request\logs\`.
+```powershell
+cd D:\My_projects\request_processor
+powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
+```
 
-### Актуальный zip на work: **2026-07-28**
-
-`dist\request_processor_0.9.1_20260728.zip` (~2.4 MB, **без** `app.db`)
-
-**В составе 28.07 (поверх 27.07 cycle polish):**
+**В составе 06.08 (поверх 31.07 ТЗ 70 + 28.07 debt):**
 
 | Тема | Что |
 |------|-----|
-| UI debt | `ui/bg_job.py`, `ui/modal.py`; calc/KP/orders/programs на helper; debounce расчёта |
-| Org-адреса | «кабельный завод» ≠ Калуга; Тольятти/ЦЭТИ не получают Жилетово |
-| Роли БД | `db-info` / `db-role` (dev · work_copy · work); заголовок GUI |
-| Версии | `docs/VERSIONING.md` — package / schema / protocol_meta / роль данных |
-| Тесты | ~283 passed (e2e cycle, org cross-factory, bg_job, modal) |
+| Org search | Unicode casefold: `тольят` находит «Тольяттинский…» |
+| Clipboard | Ctrl+C на адресе = copy (RU/EN), не paste |
+| Document field | «стоимостью» не считается ТУ/СТО |
+| Марки / OCR | lookalike UТР→UTP, РVС→PVC; ЕВНЕ→FRHF; КСВПП/КССПП; LAN Cat 6 PVC нг… до размера |
+| Extract | table + full text для DOCX direction; lexicon расширения |
+| Старт | splash раньше; метрики `t_pre_splash` / `t_import`; bat-сообщение; без ico с UNC |
+| Чеклист | `docs/CHECKLIST_TZ70_OPERATOR.md` (org filter, Ctrl+C, марки 06.08) |
+| Тесты | ~322 passed |
 
-**Вечер 2026-07-27** (уже в том же 0.9.1-линии): DOCX full text, HITL confirm/selection, pack sync + логи `[Пакет]`, e2e workflow.
+**Ранее в той же линии 0.9.1:**
+
+| Дата | Zip / тема |
+|------|------------|
+| 31.07 | ТЗ 70: free-text bg_job, org HITL, редактор марок, dual logs, feedback journal |
+| 28.07 | `bg_job`/`modal`, org-адреса без cross-factory, `db-role`, ~283 tests |
+| 27.07 | DOCX full text, HITL cycle, pack logs, e2e |
 
 На work: zip → `W:\inbox\` (или `%TEMP%`) → `scripts\update.ps1 -ZipPath …` (**не** подменять `data\app.db`).  
-После update по желанию: `request-processor db-role --set work --source "рабочий ПК"`.
+После update: `request-processor db-role --set work --source "рабочий ПК"` (если ещё `[DEV]`).  
+Прогон: [CHECKLIST_TZ70_OPERATOR.md](./CHECKLIST_TZ70_OPERATOR.md).
 
 Скопируйте zip на рабочий ПК (флешка / сеть).
 
@@ -81,7 +81,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 ```powershell
 cd W:\request_processor_0.9.1
 powershell -ExecutionPolicy Bypass -File scripts\update.ps1 `
-  -ZipPath "$env:TEMP\request_processor_0.9.1_20260715.zip"
+  -ZipPath "$env:TEMP\request_processor_0.9.1_20260806.zip"
 ```
 
 Или если уже распаковали рядом (надёжнее при проблемах с сетью):

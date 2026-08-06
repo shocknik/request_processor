@@ -668,23 +668,33 @@ class PdfTabMixin:
         """
         Явные Ctrl+C/X/V/A, Shift+Ins и ПКМ-меню на поле.
 
-        Дублирует class-bind ClipboardMixin: надёжнее на вложенных Frame/Canvas
-        и при русской раскладке (keycode).
+        Keycode-first (RU layout): Ctrl+C всегда copy, не paste.
         """
-        # Нативные события + наш handler (return "break" чтобы не дублировать вставку)
+        # readonly: запрет paste даже через keycode-handler
+        if not editable:
+            try:
+                widget._rp_readonly = True  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+        # Порядок: keycode → char-bind (return "break" гасит дубли)
+        widget.bind("<Control-KeyPress>", self._evt_ctrl_keycode, add="+")
         widget.bind("<Control-c>", self._evt_copy, add="+")
         widget.bind("<Control-C>", self._evt_copy, add="+")
-        widget.bind("<Control-v>", self._evt_paste if editable else self._evt_copy, add="+")
-        widget.bind("<Control-V>", self._evt_paste if editable else self._evt_copy, add="+")
-        widget.bind("<Control-x>", self._evt_cut if editable else self._evt_copy, add="+")
-        widget.bind("<Control-X>", self._evt_cut if editable else self._evt_copy, add="+")
+        paste_h = self._evt_paste if editable else self._evt_copy
+        cut_h = self._evt_cut if editable else self._evt_copy
+        widget.bind("<Control-v>", paste_h, add="+")
+        widget.bind("<Control-V>", paste_h, add="+")
+        widget.bind("<Control-x>", cut_h, add="+")
+        widget.bind("<Control-X>", cut_h, add="+")
         widget.bind("<Control-a>", self._evt_select_all, add="+")
         widget.bind("<Control-A>", self._evt_select_all, add="+")
-        widget.bind("<Control-KeyPress>", self._evt_ctrl_keycode, add="+")
-        widget.bind("<Shift-Insert>", self._evt_paste if editable else (lambda e: "break"), add="+")
+        widget.bind(
+            "<Shift-Insert>",
+            paste_h if editable else (lambda e: "break"),
+            add="+",
+        )
         widget.bind("<Control-Insert>", self._evt_copy, add="+")
         widget.bind("<Button-3>", self._evt_context_menu, add="+")
-        # Помечаем для отладки
         try:
             widget._rp_clipboard = True  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001

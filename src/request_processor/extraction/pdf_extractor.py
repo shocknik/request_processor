@@ -22,7 +22,7 @@ from typing import Literal
 from ..config import OCR_CACHE_DIR
 from ..models import CableMarkMatch, PdfExtractionResult
 from ..parsing.cable_mark_parser import extract_document_from_text, fix_ocr_document_text
-from .ocr_mark_normalizer import normalize_mark_after_ocr
+from .ocr_mark_normalizer import normalize_lan_homoglyphs, normalize_mark_after_ocr
 from .ocr_text_normalizer import normalize_ocr_text
 from .organization_extractor import (
     extract_organizations,
@@ -54,6 +54,8 @@ _NAME_PART = (
     r"(?:ККЗ\s+МК\s+)?"
     r"[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z0-9\-\(\)/]+"
     r"(?:[\-–/][А-ЯЁа-яёA-Za-z0-9\(\)/]+)*"
+    # «КССПП 5е …» / «КСВПП-5е …» — категория до сечения
+    r"(?:(?:-\d*[еe])|(?:\s+5[еe])|(?:\s+cat\s*\d\w?))?"
 )
 
 # Размер: 2х2, 2x2x0,52, 4x2x0.52 (LAN-кабель)
@@ -72,15 +74,36 @@ _LAN_MARK_PATTERN = re.compile(
 )
 
 # Generic LAN без бренда СПЕЦЛАН (prod 27.07 SUPR ТЗ): U/UTP cat 5e 2x2x0.52 PE
-# U/UTP, F/UTP, S/FTP, SF/TP (без бренда СПЕЦЛАН)
-_GENERIC_LAN_SHIELD = r"(?:(?:[USF]/)?/?UTP|S/?FTP|SF/?TP)"
-_GENERIC_LAN_SHEATH = r"(?:PE|PVC|LSZH|ZH|PP|FRHF|FRLS)"
+# + work 06.08: SF/UTP Cat 6 PVC нг(А)-LS 4х2х0,57-145
+# U/UTP, F/UTP, S/FTP, SF/TP (без бренда СПЕЦЛАН); допускаем OCR-омоглифы UТР/РVС
+_GENERIC_LAN_SHIELD = (
+    r"(?:(?:[USF]|[С])?/?U[TТ][PР]|S/?F[TТ][PР]|SF/?T[PР]|SF/?U[TТ][PР])"
+)
+_GENERIC_LAN_SHEATH = r"(?:PE|PVC|РVС|РВС|LSZH|ZH|PP|FRHF|FRLS)"
+_GENERIC_LAN_FIRE = r"нг\s*\(\s*[АAaа]\s*\)(?:\s*-\s*(?:LS|HF|FRLS|FRHF|LSLTx))?"
 _GENERIC_LAN_MARK_PATTERN = re.compile(
     r"("
     rf"{_GENERIC_LAN_SHIELD}"
     r"\s+cat\s*\d\w?"
-    r"\s+\d+\s*[xх]\s*\d+(?:\s*[xх]\s*[\d.,]+)?"
+    # sheath / fire могут стоять ДО размера (ЦЭТИ direction)
     rf"(?:\s+{_GENERIC_LAN_SHEATH})?"
+    rf"(?:\s+{_GENERIC_LAN_FIRE})?"
+    r"\s+\d+\s*[xх]\s*\d+(?:\s*[xх]\s*[\d.,]+)?"
+    r"(?:-\d+)?"
+    rf"(?:\s+{_GENERIC_LAN_SHEATH})?"
+    r")",
+    re.IGNORECASE,
+)
+
+# Витая пара RU: КСВПП-5е 2х2х0.52 / КССПП 5е 4х2х0,52 / КСБКнг(А)-FRHF 4х2х0,80
+_TWISTED_PAIR_RU_PATTERN = re.compile(
+    r"("
+    r"(?:КСВПП|КССПП|КСБК|КВП(?:П|э|Э)?|КСПП)"
+    r"(?:нг\s*\(\s*[АAaа]\s*\)(?:\s*-\s*(?:LS|HF|FRLS|FRHF|LSLTx|ЕВНЕ|FRНЕ))?)?"
+    r"(?:-\d*[еe])?"
+    r"\s+"
+    r"(?:5[еe]\s+)?"
+    r"\d+\s*[хx]\s*\d+(?:\s*[хx]\s*[\d.,]+)?"
     r")",
     re.IGNORECASE,
 )
@@ -439,10 +462,12 @@ def _fix_latin_brand_ocr(text: str) -> str:
 
 def _fix_ocr_confusables(text: str) -> str:
     """Исправляет типичные OCR-ошибки перед поиском марок и ТУ."""
+    text = normalize_lan_homoglyphs(text)
     text = _fix_latin_brand_ocr(text)
     text = _fix_lan_letter_ocr(text)
     text = _fix_periodic_letter_ocr(text)
-    return normalize_ocr_text(text)
+    text = normalize_ocr_text(text)
+    return normalize_lan_homoglyphs(text)
 
 
 def is_plausible_mark(mark: str) -> bool:
@@ -778,6 +803,7 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
     for pattern in (
         _LAN_MARK_PATTERN,
         _GENERIC_LAN_MARK_PATTERN,
+        _TWISTED_PAIR_RU_PATTERN,
         _AFTER_MARKI_PATTERN,
         _PRODUCT_MARK_PATTERN,
         _MARK_PATTERN,
@@ -1365,20 +1391,24 @@ def _resolve_cable_marks(
     tables: list[list[list[str]]],
 ) -> list[CableMarkMatch]:
     """
-    Марки кабелей: table-first для направлений, иначе regex по тексту.
+    Марки кабелей: table-first + regex по полному тексту (абзацы + таблицы).
 
-    Таблица направления приоритетнее плоского текста PDF/Word.
-    Текст перед regex сжимается (Word-шаблоны с merge иначе → секунды CPU).
+    Направления в ИЛ: сначала ячейки таблицы; если пусто или неполно —
+    structural find по search_text (work 06.08: LAN в DOCX-таблицах).
     """
+    collected: list[CableMarkMatch] = []
     if tables:
         from .direction_table_extractor import extract_marks_from_tables
 
-        table_marks = extract_marks_from_tables(tables)
-        if table_marks:
-            return table_marks
+        collected.extend(extract_marks_from_tables(tables))
 
     search_text = build_search_text(text, tables)
-    return find_cable_marks(_compact_text_for_marks(search_text))
+    text_marks = find_cable_marks(_compact_text_for_marks(search_text))
+    if not collected:
+        return text_marks
+    if not text_marks:
+        return collected
+    return _dedupe_cable_matches(collected + text_marks)
 
 
 def _cyrillic_letter_ratio(text: str) -> float:

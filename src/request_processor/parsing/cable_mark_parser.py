@@ -28,12 +28,22 @@ _TU_PATTERN = re.compile(
     r"(?:ТУ|TU|Ty)\s*\d+\.[КкKk]\d{2,3}-\d{3}-\d{4}",
     re.IGNORECASE,
 )
+# СТО — только как тип документа + номер (не «стоимостью»: СТО ⊂ стоимостью)
 _GOST_STO_PATTERN = re.compile(
-    r"(?:ГОСТ|СТО|Р\s*МЭК)\s*[\d\.\-/]+(?:\s*[\d\-/]+)*",
+    r"(?:ГОСТ|Р\s*МЭК)\s*[\d\.\-/]+(?:\s*[\d\-/]+)*"
+    r"|(?:(?<![А-Яа-яЁёA-Za-z])СТО(?![А-Яа-яЁёA-Za-z]))\s*[\d\.\-/]+(?:\s*[\d\-/]+)*",
     re.IGNORECASE,
 )
 _DOC_PATTERN = re.compile(
-    r"(?:ТУ|TU|Ty|ГОСТ|СТО|Р\s*МЭК)\s*[\d\.\-/A-Za-zА-Яа-яЁё]+(?:-[\dA-Za-zА-Яа-яЁё]+)*",
+    r"(?:ТУ|TU|Ty|ГОСТ|Р\s*МЭК)\s*[\d\.\-/A-Za-zА-Яа-яЁё]+(?:-[\dA-Za-zА-Яа-яЁё]+)*"
+    r"|(?:(?<![А-Яа-яЁёA-Za-z])СТО(?![А-Яа-яЁёA-Za-z]))\s*[\d\.\-/A-Za-zА-Яа-яЁё]+"
+    r"(?:-[\dA-Za-zА-Яа-яЁё]+)*",
+    re.IGNORECASE,
+)
+
+# Слова, которые OCR/регекс не должен считать «документом»
+_DOC_NOISE = re.compile(
+    r"стоимост|срок|услуг|оплат|количеств|гарантир|письм|заказ|просьб",
     re.IGNORECASE,
 )
 
@@ -142,6 +152,21 @@ def fix_ocr_document_text(text: str) -> str:
     return text
 
 
+def _is_plausible_document(doc: str) -> bool:
+    """Отсекает «стоимостью» (СТО…) и прочий мусор без номера нормативного документа."""
+    d = (doc or "").strip()
+    if len(d) < 5:
+        return False
+    if _DOC_NOISE.search(d):
+        return False
+    # Нужна хотя бы одна цифра (ТУ 16…, ГОСТ 31565, …)
+    if not re.search(r"\d", d):
+        return False
+    if re.fullmatch(r"ТУ\s*\d+\.?", d, re.I):
+        return False
+    return True
+
+
 def extract_document_from_text(text: str | None) -> str | None:
     """Извлекает ТУ/ГОСТ из фрагмента текста (марка + хвост строки)."""
     if not text:
@@ -150,13 +175,15 @@ def extract_document_from_text(text: str | None) -> str | None:
 
     tu = _TU_PATTERN.search(blob)
     if tu:
-        return re.sub(r"\s+", " ", tu.group(0)).strip()
+        doc = re.sub(r"\s+", " ", tu.group(0)).strip()
+        if _is_plausible_document(doc):
+            return doc
 
     for pattern in (_GOST_STO_PATTERN, _DOC_PATTERN):
         m = pattern.search(blob)
         if m:
             doc = re.sub(r"\s+", " ", m.group(0)).strip()
-            if len(doc) > 6 and not re.fullmatch(r"ТУ\s*\d+\.?", doc, re.I):
+            if _is_plausible_document(doc):
                 return doc
     return None
 

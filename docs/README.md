@@ -24,7 +24,8 @@
 | `TEST_PROGRAMS.md` | Программы испытаний (S4) |
 | `REQUIREMENTS_BASE.md` | Нормы / aliases (S5) |
 | `PROTOCOL_GENERATOR_BRIDGE.md` | JSON → protocol_generator |
-| `UPDATE.md` | Обновление in-place · zip `0.9.1_20260728` |
+| `UPDATE.md` | Обновление in-place · zip `0.9.1_20260806` |
+| `CHECKLIST_TZ70_OPERATOR.md` | Чеклист после ТЗ 70 + feedback work 06.08 |
 | `client_profiles.example.yaml` | Пример локальных профилей клиентов |
 | `lab_profile.example.yaml` | Реквизиты лаборатории |
 | `План_Итерации_2.md` | Исторический план (если есть в полной копии) |
@@ -34,13 +35,13 @@
 ## Obsidian (только на машине разработчика)
 
 Полный журнал: `Python/Проект request-processor/`  
-Ключевые заметки: **69** (версии и потоки), 41 (данные prod), 43 (развёртывание), 44 (паспорт), 65–68 (июль 2026).
+Ключевые: **72** (feedback work 06.08), **70–71** (HITL + lexicon 300), **69** (версии), 41/43/44, 65–68 (июль).
 
 ---
 
 ## Краткая история версий
 
-### v0.9.1 (2026-07)
+### v0.9.1 (2026-07…08)
 
 - Развёртывание на рабочий ПК: `install.ps1`, `prepare-prod-db`, zip + `app.db`
 - LLM Ollama opt-in (`llama3.2`), GUI settings scroll
@@ -49,6 +50,8 @@
 - Паспорт экспериментальной эксплуатации
 - **2026-07-27 (вечер, cycle polish):** DOCX full text + org name clean; HITL confirm/selection/dialogs; calc mark field + picker→left; KP thread-safe style; document pack sync + diagnostics logs; e2e workflow tests
 - **2026-07-28 (debt + org + ops):** `ui/bg_job`, `ui/modal`; org-адреса без подмены чужим заводом; `db-info`/`db-role`; `VERSIONING.md`; zip `request_processor_0.9.1_20260728`; ~283 tests
+- **2026-07-31 (ТЗ 70):** free-text через bg_job; org HITL на Заявке; редактор марок; mark lexicon; dual logs; feedback journal; zip `0.9.1_20260731`
+- **2026-08-06 (work feedback):** org search casefold; clipboard Ctrl+C; document≠«стоимостью»; OCR lookalike/FRHF/LAN Cat 6 + КСВПП/КССПП; table+text marks; early splash metrics; zip `0.9.1_20260806`; **~322 tests**
 
 ### v0.8.x
 

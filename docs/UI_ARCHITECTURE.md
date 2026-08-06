@@ -6,27 +6,44 @@
 ```
 ui/
   gui.py              # entry: main (lazy re-exports, без тяжёлого import)
-  bootstrap.py        # splash → import app → init → mainloop
+  bootstrap.py        # splash ASAP → import app → init → mainloop (+ t_pre_splash/t_import)
   app.py              # RequestProcessorApp (mixins + tk.Tk)
   state.py            # CalcTestEntry, ExtractionDraft, RequestPageState
   theme.py            # AppStyles + design tokens (#F5F7FA / #1677FF)
   extract_job.py      # 2026-07-27: worker extract (Queue), no tkinter
   bg_job.py           # 2026-07-28: run_bg_job / schedule_ui (короткие Thread-jobs)
   modal.py            # 2026-07-28: create_modal / present_modal / run_modal (D4)
+  feedback_journal.py # 2026-07-31: журнал пожеланий (Файл → …)
   shell/
     app_shell.py      # __init__(progress=…), _build_ui (sidebar + notebook)
     menubar.py        # Файл / Вид / Данные / Сервис / Справка
   tabs/
-    pdf_tab.py        # «Заявки»: _run_extract_pdf → extract_job + poll Queue
+    pdf_tab.py        # «Заявки»: extract_job + free-text bg_job; org HITL; clipboard fields
     calc_tab.py       # picker: Canvas + Checkbutton, _picker_active_category
+    orgs_tab.py       # поиск org Unicode casefold (06.08)
     kp_tab.py, orders_tab.py, ...
   widgets/
-    splash.py         # тёмный splash + progress bar + этапы [Старт]
-    clipboard.py      # Ctrl+C/V/X, context menus for entries
+    splash.py         # splash + progress; без ico с UNC (NAS cold start)
+    clipboard.py      # Ctrl+C/V/X keycode-first (RU/EN), anti double-paste (06.08)
     sidebar.py        # Sidebar, NAV_ITEMS, SECTION_TO_TAB
     components.py     # PageHeader, StepIndicator, UploadPanel,
                       # EmptyState, BottomActionBar, StatusBadge, CardFrame
 ```
+
+## Clipboard / org search (2026-08-06)
+
+- **ClipboardMixin:** обработка Ctrl+C/X/V/A по **Windows keycode** (раскладка RU/EN);
+  повторный paste после copy блокируется (`_rp_clip_busy`); поле адреса Заявки —
+  `_enable_field_clipboard` (keycode first).
+- **Организации:** `list_organizations(search=…)` фильтрует через `str.casefold()`
+  (кириллица: «тольят» = «Тольят»). SQLite `LIKE` для не-ASCII регистрозависим.
+
+## Startup (2026-08-06)
+
+- `bootstrap.run_gui`: окно splash **до** version/logging/тяжёлого `app`;
+  лог: `t_pre_splash`, `t_import`, `ready total`.
+- `start_gui.bat`: сообщение «запуск…» (на NAS pythonw может молчать 10–20 с);
+  `REQUEST_PROCESSOR_SPLASH_ICON=0` — не тянуть ico с UNC.
 
 ## Extract / progress (2026-07-27)
 

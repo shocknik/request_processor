@@ -3,6 +3,9 @@
 
 Важно: этот модуль должен импортировать минимум (tkinter + splash),
 чтобы окно загрузки появилось *до* тяжёлого `ui.app` / pdf / openpyxl.
+
+На work (NAS) cold start 10–20 с часто *до* Python-кода (pythonw с W:\\).
+Здесь считаем этапы после входа в run_gui и сразу рисуем splash.
 """
 
 from __future__ import annotations
@@ -35,57 +38,87 @@ def run_gui(
         app.mainloop()
         return
 
+    # 1) Splash как можно раньше — без version/logging/icon с NAS
     from .widgets.splash import SplashScreen
 
-    version = ""
+    t_before_splash = time.perf_counter()
+    splash = SplashScreen(version="")  # version подставим после лёгкого import
+    splash.set_progress(3, "Запуск Lab_request…", detail="Окно загрузки")
     try:
-        from request_processor import __version__
-
-        version = __version__
+        splash.update_idletasks()
+        splash.update()
     except Exception:
         pass
-
-    splash = SplashScreen(version=version)
-    splash.set_progress(5, "Запуск Lab_request…", detail="Инициализация загрузчика")
+    t_splash = time.perf_counter()
     progress = splash.make_progress_callback()
 
     def _step(pct: float, stage: str, detail: str = "") -> None:
         progress(pct, stage, detail)
+        try:
+            splash.pump()
+        except Exception:
+            pass
 
     try:
-        _step(8, "Служебные модули…", "логирование, DPI")
+        _step(6, "Служебные модули…", "версия, логирование, DPI")
+        version = ""
+        try:
+            from request_processor import __version__
+
+            version = __version__
+            if version:
+                try:
+                    splash._stage_var.set(f"v{version} · Запуск…")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         from ..logging_setup import get_logger, setup_logging
         from .theme import enable_windows_dpi_awareness
 
         enable_windows_dpi_awareness()
+        # Логи на NAS могут быть медленными — не блокируем UI дольше необходимого
         setup_logging(level="INFO")
         log = get_logger("ui.gui")
-        log.info("bootstrap: splash shown", extra={"tag": "Старт"})
+        pre_ms = (t_splash - t0) * 1000
+        log.info(
+            "bootstrap: splash shown t_pre_splash=%.0f ms (create=%.0f ms)",
+            pre_ms,
+            (t_splash - t_before_splash) * 1000,
+            extra={"tag": "Старт"},
+        )
 
         _step(12, "Загрузка ядра…", "модели, БД-слой, расчёт, GUI-модули")
         t_imp = time.perf_counter()
         from .app import RequestProcessorApp  # тяжёлый импорт
 
         imp_ms = (time.perf_counter() - t_imp) * 1000
-        log.info("bootstrap: import app %.0f ms", imp_ms, extra={"tag": "Старт"})
+        log.info(
+            "bootstrap: import app %.0f ms t_import=%.0f",
+            imp_ms,
+            imp_ms,
+            extra={"tag": "Старт"},
+        )
         _step(50, "Модули загружены", detail=f"{imp_ms:.0f} ms")
 
         _step(52, "Создание главного окна…", "пока скрыто за splash")
-        kwargs = {"progress": progress, "start_hidden": True}
+        kwargs: dict[str, Any] = {"progress": progress, "start_hidden": True}
         if db_path is not None:
             kwargs["db_path"] = db_path
         app = RequestProcessorApp(**kwargs)
 
         total_ms = (time.perf_counter() - t0) * 1000
         log.info(
-            "bootstrap: ready total=%.0f ms → mainloop",
+            "bootstrap: ready total=%.0f ms t_pre_splash=%.0f t_import=%.0f → mainloop",
             total_ms,
+            pre_ms,
+            imp_ms,
             extra={"tag": "Старт"},
         )
         _step(100, "Готово", detail=f"старт за {total_ms:.0f} ms")
         splash.pump()
 
-        # Закрыть splash и показать главное окно
         splash.close_splash()
         try:
             app.deiconify()

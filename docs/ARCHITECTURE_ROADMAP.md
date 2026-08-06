@@ -2,18 +2,19 @@
 
 Краткая карта для оператора и разработчика. Детали — в отдельных docs/ и Obsidian.
 
-**Статус на 2026-07-27:** S1–S5 ✅ · S6 w1+w2 ✅ · **GUI extract Queue** ✅ · calc category filter ✅ · prod W:\request_processor
+**Статус на 2026-08-06:** S1–S5 ✅ · S6 w1+w2 ✅ · extract Queue ✅ · ТЗ 70 HITL ✅ · **work feedback 06.08** ✅ · zip `0.9.1_20260806`
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Lab_request (request-processor)                            │
 │                                                             │
-│  1 Заявка → extract (worker+Queue) → human confirm + 💡     │
+│  1 Заявка → extract (worker+Queue / free-text bg_job)       │
+│           → human confirm + org HITL + lexicon/OCR marks    │
 │  2 Расчёт ← прайс + picker (Checkbutton, категория)         │
 │  3 КП ← lab_profile + logo + styles classic|modern|compact  │
 │  4 Заказы → пакет / JSON protocol_meta                      │
 │  S6 CLI: acceptance_items (каталог ТУ, без файлов ТУ в git) │
-│  Логи: data/logs (app_*, gui_extract_trace.log)             │
+│  Логи: data/logs + %LOCALAPPDATA%\Lab_request\logs          │
 │                                                             │
 │  data/app.db  (сохраняется при update.ps1)                  │
 └───────────────────────────┬─────────────────────────────────┘
@@ -32,7 +33,9 @@
 | **S6 w1** | `acceptance_items` + clauses + external refs + CLI | ✅ 2026-07-24 | REQUIREMENTS_BASE, Obsidian 63 |
 | **S6 w2** | Импорт таблиц приёмки: 131/141 docx + 005 raw_text | ✅ 2026-07-24 | Obsidian 64 |
 | **2026-07-27** | Extract Queue + DOCX perf + calc filter + prod-hot marks | ✅ | UI_ARCHITECTURE, Obsidian 66 |
-| Ops | Обновление без сноса, seed прайса, ярлык | ✅ | UPDATE.md |
+| **2026-07-31** | ТЗ 70: free-text, org HITL, marks editor, lexicon, dual logs | ✅ | CHECKLIST_TZ70, Obsidian 70–71 |
+| **2026-08-06** | Work feedback: org filter, clipboard, OCR/LAN marks, splash | ✅ | UPDATE, Obsidian 72 |
+| Ops | Обновление без сноса, seed прайса, ярлык, роли БД | ✅ | UPDATE.md |
 
 ## UI-пакет
 

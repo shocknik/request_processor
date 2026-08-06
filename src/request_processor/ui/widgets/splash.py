@@ -53,13 +53,17 @@ class SplashScreen(tk.Tk):
         self.configure(bg=_BG)
         self.attributes("-topmost", True)
 
-        # Иконка (если есть)
+        # Иконка опциональна: на NAS stat/read может добавить секунды cold start
         try:
-            from ...config import PROJECT_ROOT
+            import os
 
-            ico = PROJECT_ROOT / "assets" / "app_icon.ico"
-            if ico.is_file():
-                self.iconbitmap(default=str(ico))
+            if os.environ.get("REQUEST_PROCESSOR_SPLASH_ICON", "1") not in ("0", "false"):
+                from ...config import PROJECT_ROOT
+
+                ico = PROJECT_ROOT / "assets" / "app_icon.ico"
+                # Не ждём сеть: только если путь «быстрый» (локальный диск)
+                if ico.is_file() and not str(ico).startswith("\\\\"):
+                    self.iconbitmap(default=str(ico))
         except Exception:
             pass
 

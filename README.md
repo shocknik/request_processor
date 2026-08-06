@@ -75,7 +75,7 @@
 
 ### Тестирование
 
-- **pytest** — **~280+** тестов (экстракция, org-адреса, OCR, GUI smoke/e2e cycle, bg_job/modal, программы, нормы, protocol_meta, prod data, …)
+- **pytest** — **~320+** тестов (экстракция, org-адреса, OCR lookalike/FRHF, free-text/lexicon, GUI smoke/e2e cycle, bg_job/modal, clipboard, программы, нормы, protocol_meta, prod data, …)
 
 ---
 
@@ -176,7 +176,7 @@ src/request_processor/
     └── widgets/          # sidebar, splash, mousewheel, clipboard, components
 
 data/                     # БД, шаблоны, кэш, training, generated (см. ниже)
-tests/                    # ~205 pytest
+tests/                    # ~320+ pytest
 scripts/                  # install, update, release zip, training helpers
 docs/                     # паспорт, UPDATE, S4/S5, UI, protocol bridge
 ```
@@ -504,9 +504,11 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | **6 Production** | 🟡 | Эксплуатация v0.9.1, polish под боевой ПК |
 | **Cycle polish (27.07)** | ✅ | DOCX HITL, calc/KP/pack reliability, e2e tests, ops logs |
 | **Debt + org (28.07)** | ✅ | `bg_job`/`modal`, org-адреса без cross-factory, роли БД, VERSIONING |
+| **ТЗ 70 (31.07)** | ✅ | free-text bg_job, org HITL, редактор марок, lexicon, dual logs, feedback journal |
+| **Work feedback (06.08)** | ✅ | org search casefold, Ctrl+C, OCR/LAN/FRHF/КСВПП, splash metrics |
 
 Карта S1–S5: [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md).  
-Журнал: Obsidian `Python/Проект request-processor/` (**66–69**, 2026-07-27…28).
+Журнал: Obsidian `Python/Проект request-processor/` (**66–72**, июль–август 2026).
 
 ---
 
@@ -515,17 +517,17 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | Документ | Назначение |
 |----------|------------|
 | [INSTALL.md](INSTALL.md) | Установка на рабочий ПК |
-| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса · zip `0.9.1_20260728` |
+| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса · zip `0.9.1_20260806` |
+| [docs/CHECKLIST_TZ70_OPERATOR.md](docs/CHECKLIST_TZ70_OPERATOR.md) | Чеклист оператора (ТЗ 70 + feedback 06.08) |
 | [docs/VERSIONING.md](docs/VERSIONING.md) | Версии по осям (package / схема / protocol_meta / роль БД) |
 | [docs/db_profile.example.yaml](docs/db_profile.example.yaml) | Роли dev / work_copy / work |
 | [docs/UPDATE_WORK_PC_2026-07-21.md](docs/UPDATE_WORK_PC_2026-07-21.md) | Заметки конкретного релиза |
 | [docs/44 - Паспорт…](docs/) | Паспорт и экспериментальная эксплуатация |
-| [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md) | UI: splash, sidebar, bg_job, modal |
+| [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md) | UI: splash, sidebar, bg_job, modal, clipboard |
 | [docs/TEST_PROGRAMS.md](docs/TEST_PROGRAMS.md) | Программы испытаний (S4) |
 | [docs/REQUIREMENTS_BASE.md](docs/REQUIREMENTS_BASE.md) | Нормы / aliases (S5) |
-| [AGENTS.md](AGENTS.md) | Правила для AI-агента |
 | [docs/PROTOCOL_GENERATOR_BRIDGE.md](docs/PROTOCOL_GENERATOR_BRIDGE.md) | JSON → protocol_generator |
-| [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md) | Карта S1–S5 |
+| [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md) | Карта S1–S6 + 06.08 |
 | [docs/README.md](docs/README.md) | Индекс docs/ |
 | [docs/DEV_AGENT_SETUP.md](docs/DEV_AGENT_SETUP.md) | VS Code + Grok: продуктивная работа агента |
 | [AGENTS.md](AGENTS.md) | Правила для AI-агента (автозагрузка Grok) |
