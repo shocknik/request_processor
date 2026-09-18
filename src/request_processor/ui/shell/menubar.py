@@ -49,6 +49,10 @@ def install_menubar(app: Any) -> tk.Menu:
         label="Журнал пожеланий…",
         command=lambda: call("_open_feedback_journal"),
     )
+    m_file.add_command(
+        label="Пометить базу как рабочую…",
+        command=lambda: call("_mark_db_role_work"),
+    )
     m_file.add_separator()
     m_file.add_command(label="Выход", command=app.destroy, accelerator="Alt+F4")
 

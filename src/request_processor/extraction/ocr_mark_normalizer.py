@@ -90,9 +90,12 @@ _CYR_TO_LAT_LAN = str.maketrans(
 )
 
 # OCR пожарных суффиксов: ЕВНЕ→FRHF (Спецкабель PDF №1527 и аналоги)
+# work 19.08: ЕКНЕ / FRНF на оптике; 14.08: нг(А)-НЕ ← HF
 _FIRE_OCR_FIXES: tuple[tuple[str, str], ...] = (
     (r"ЕВНЕ", "FRHF"),
     (r"ЕВН[ЕE]", "FRHF"),
+    (r"ЕКНЕ", "FRHF"),
+    (r"ЕКН[ЕE]", "FRHF"),
     (r"FRНЕ", "FRHF"),
     (r"FRНF", "FRHF"),
     (r"FRН[ЕE]", "FRHF"),
@@ -100,9 +103,16 @@ _FIRE_OCR_FIXES: tuple[tuple[str, str], ...] = (
     (r"ЕВL[SС]", "FRLS"),
     (r"FRL[SС]", "FRLS"),
     (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*ЕВНЕ", "нг(А)-FRHF"),
+    (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*ЕКНЕ", "нг(А)-FRHF"),
     (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*ЕВLS", "нг(А)-FRLS"),
+    (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*НЕ\b", "нг(А)-HF"),
+    (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*НF\b", "нг(А)-HF"),
+    (r"нгГ\s*\(\s*[АAаa]\s*\)", "нг(А)"),
     (r"НГ\s*\(\s*[АAаa]\s*\)", "нг(А)"),
     (r"Нг\s*\(\s*[АAаa]\s*\)", "нг(А)"),
+    (r"М8II", "М8П"),
+    (r"M8II", "М8П"),
+    (r"М8I[I1l]", "М8П"),
 )
 _SIZE_START = re.compile(
     r"\d+\s*[зЗпП]?\s*[хx×]",
@@ -154,6 +164,12 @@ def normalize_lan_homoglyphs(text: str) -> str:
         (r"\b[СC]ат\s*(\d\w?)\b", r"Cat \1"),
         (r"\bCat\s*(\d)[АA]\b", r"Cat \1A"),
         (r"\bcat\s*(\d)[еe]\b", r"cat \1e"),
+        # work 14.08: Cat Se / Cat be / Сat 5e ← cat 5e
+        (r"\b[СC]at\s*(?:Se|be|5е)\b", "Cat 5e"),
+        (r"\bCat\s*[S5]e\b", "Cat 5e"),
+        (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*НЕ\b", "нг(А)-HF"),
+        (r"нг\s*\(\s*[АAаa]\s*\)\s*-\s*НF\b", "нг(А)-HF"),
+        (r"нгГ\s*\(\s*[АAаa]\s*\)", "нг(А)"),
     )
     out = text
     for pattern, repl in repls:

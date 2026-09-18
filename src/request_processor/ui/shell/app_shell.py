@@ -268,6 +268,10 @@ class ShellMixin:
             except Exception:
                 pass
         _report(99, "Почти готово…", detail=f"инициализация {total_ms:.0f} ms")
+        try:
+            self.after(1200, self._maybe_prompt_work_db_role)
+        except tk.TclError:
+            pass
 
     def _make_readonly_text(self, parent: tk.Misc, **kwargs) -> scrolledtext.ScrolledText:
         """Текстовое поле только для чтения, но с выделением и копированием."""
@@ -362,6 +366,83 @@ class ShellMixin:
         from ..feedback_journal import open_feedback_journal
 
         open_feedback_journal(self, db_path=self.db_path)
+
+    def _mark_db_role_work(self, *, from_prompt: bool = False) -> None:
+        """Пометить активную БД как рабочую (заголовок [WORK])."""
+        from ...persistence.db_profile import load_db_profile, set_db_role
+
+        if not from_prompt:
+            if not messagebox.askyesno(
+                "Роль базы",
+                "Пометить эту базу как рабочую (боевую)?\n\n"
+                "Так нужно на компьютере оператора. "
+                "На машине разработки обычно оставляют «тестовая» или «копия рабочей».",
+                parent=self,
+            ):
+                return
+        try:
+            self._db_profile = set_db_role(
+                "work",
+                db_path=self.db_path,
+                source="рабочий ПК",
+                notes="GUI: Файл → Пометить базу как рабочую",
+            )
+            self._db_profile = load_db_profile(self.db_path)
+            self.title(f"Lab_request · {self._db_profile.window_title_suffix()}")
+            if getattr(self, "status", None) is not None:
+                self.status.set(self._db_profile.status_line())
+            _log.info(
+                "db role set work path=%s",
+                self.db_path,
+                extra={"tag": "Старт"},
+            )
+            messagebox.showinfo(
+                "Роль базы",
+                "База помечена как рабочая.\nВ заголовке окна должно быть [WORK].",
+                parent=self,
+            )
+        except Exception as exc:
+            _log.exception("set db role work: %s", exc)
+            messagebox.showerror("Роль базы", f"Не удалось сохранить метку:\n{exc}", parent=self)
+
+    def _maybe_prompt_work_db_role(self) -> None:
+        """На боевом ПК с меткой DEV — один раз спросить про [WORK]."""
+        import socket
+
+        from ...config import PROJECT_ROOT
+        from ...persistence.db_profile import (
+            load_db_profile,
+            looks_like_work_install,
+            save_db_profile,
+        )
+
+        prof = getattr(self, "_db_profile", None) or load_db_profile(self.db_path)
+        if prof.role == "work":
+            return
+        if prof.extra.get("skip_work_role_prompt"):
+            return
+        host = socket.gethostname() or ""
+        if not looks_like_work_install(PROJECT_ROOT, host):
+            return
+        ans = messagebox.askyesnocancel(
+            "Роль базы",
+            "Похоже, это рабочий компьютер, а база всё ещё помечена как тестовая "
+            "([DEV] в заголовке).\n\n"
+            "Пометить как рабочую ([WORK])?\n\n"
+            "Да — пометить.\n"
+            "Нет — больше не спрашивать на этом ПК.\n"
+            "Отмена — спросить при следующем запуске.",
+            parent=self,
+        )
+        if ans is True:
+            self._mark_db_role_work(from_prompt=True)
+            return
+        if ans is False:
+            prof.extra["skip_work_role_prompt"] = True
+            try:
+                save_db_profile(prof, self.db_path)
+            except Exception as exc:
+                _log.debug("skip work-role prompt save: %s", exc, extra={"tag": "Старт"})
 
     def _open_logs_folder(self) -> None:
         """Открыть папку логов (основную; если зеркало — перечислить оба пути)."""

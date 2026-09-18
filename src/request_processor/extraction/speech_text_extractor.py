@@ -323,4 +323,11 @@ def merge_marks_prefer_richer(
             document=doc,
             requirements_raw=req,
         )
-    return [by_key[k] for k in order]
+    merged = [by_key[k] for k in order]
+    # work free-text: отбросить U/UTP-префиксы, если есть полные строки
+    try:
+        from .pdf_extractor import _drop_subset_marks
+
+        return _drop_subset_marks(merged)
+    except Exception:  # noqa: BLE001
+        return merged

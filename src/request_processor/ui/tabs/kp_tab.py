@@ -332,16 +332,18 @@ class KpTabMixin:
         note = self.kp_note_text.get("1.0", "end").strip() or None
 
         if not customer:
-            _log.warning("KP: empty customer, ask operator", extra={"tag": "КП"})
-            if not messagebox.askyesno(
+            # work 11.08 / ТЗ 73 A4: не выпускать КП_заказчик «молча» после Yes —
+            # жёсткий блок, пока на Заявке не выбран заказчик (справочник или вручную).
+            _log.warning("KP abort: empty customer (blocked)", extra={"tag": "КП"})
+            messagebox.showwarning(
                 "КП",
-                "Заказчик не указан — файл будет «КП_заказчик_…», "
-                "в документе поле заказчика пустое.\n\n"
-                "Продолжить без заказчика?\n"
-                "(Нет — вернитесь и выберите/введите заказчика.)",
-            ):
-                _log.info("KP abort: operator refused empty customer", extra={"tag": "КП"})
-                return
+                "Заказчик не указан.\n\n"
+                "Вернитесь на вкладку «1. Заявка», выберите заказчика "
+                "из справочника или введите название, подтвердите заявку "
+                "и снова сформируйте КП.\n\n"
+                "Иначе в файле и пакете останется пустое поле «заказчик».",
+            )
+            return
 
         from ...generation.document_pack import safe_filename_part
 

@@ -1258,6 +1258,7 @@ _PATH_SKIP_PARTS = re.compile(
     r"|расчеты\s+для\s+заказчиков"
     r"|документы?"
     r"|data|generated|extracted"
+    r"|appdata|local|roaming|desktop|documents?"
     r")$",
     re.IGNORECASE,
 )
@@ -1269,6 +1270,41 @@ _PATH_ORG_HINT = re.compile(
     r"(?:ооо|ано|оао|зао|пао|ип\b|llc|ltd|jsc|inc\b)",
     re.IGNORECASE,
 )
+# Windows login / domain user — не заказчик (work 11.08: n.molchanov из Users\…)
+_PATH_USERNAME_LIKE = re.compile(
+    r"^(?:"
+    r"[a-z][a-z0-9]{0,20}\.[a-z][a-z0-9._-]{0,30}"  # n.molchanov, i.ivanov
+    r"|[a-z]{1,3}\.[a-z]{2,20}"  # n.mol…
+    r")$",
+    re.IGNORECASE,
+)
+# Подписи-заглушки, которые оператор/парсер иногда сохранял как «организацию»
+_PLACEHOLDER_ORG_KEYS = frozenset(
+    {
+        "заказчик",
+        "производитель",
+        "customer",
+        "manufacturer",
+        "unknown",
+        "n.molchanov",
+    }
+)
+
+
+def is_placeholder_org_name(name: str | None) -> bool:
+    """Имя не является организацией: логин Windows, «заказчик», пусто.
+
+    Work 27.08: карточку ``n.molchanov`` выбирали из Combobox как производителя.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return True
+    if _PATH_USERNAME_LIKE.match(raw) and not _PATH_ORG_HINT.search(raw):
+        return True
+    key = normalize_org_name(raw)
+    if key in _PLACEHOLDER_ORG_KEYS:
+        return True
+    return False
 
 
 def suggest_customer_from_source_path(source_path: str | Path | None) -> str:
@@ -1300,6 +1336,8 @@ def suggest_customer_from_source_path(source_path: str | Path | None) -> str:
             continue
         if name.endswith("$"):
             continue
+        if _PATH_USERNAME_LIKE.match(name) and not _PATH_ORG_HINT.search(name):
+            continue
         if _PATH_MARK_LIKE.search(name) and not _PATH_ORG_HINT.search(name):
             continue
         candidates.append(name)
@@ -1313,12 +1351,15 @@ def suggest_customer_from_source_path(source_path: str | Path | None) -> str:
             r"сертифик|завод|кабел", name, re.I
         ):
             return name
-    # Короткий латинский код папки (SUPR)
+    # Короткий латинский код папки (SUPR) — не username с точкой
     for name in candidates:
-        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,15}", name):
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,15}", name) and "." not in name:
             return name
-    return candidates[0]
-
+    # не брать «похоже на login» даже как fallback
+    for name in candidates:
+        if not _PATH_USERNAME_LIKE.match(name):
+            return name
+    return ""
 
 def pick_manufacturer_name(organizations: list[OrganizationExtract]) -> str:
     for org in organizations:

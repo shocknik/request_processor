@@ -199,3 +199,7 @@ Write-Host "Сохранено: data\app.db, corrections, generated, logs, lab_p
 Write-Host "Обновлено: src, scripts, docs, templates/families, зависимости"
 Write-Host ""
 Write-Host "Если GUI не стартует: start_gui_debug.bat → data\gui_launch.log"
+Write-Host ""
+Write-Host "Рабочий ПК: если в заголовке окна [DEV], один раз выполните:" -ForegroundColor Yellow
+Write-Host "  request-processor db-role --set work --source `"рабочий ПК`""
+Write-Host "  или в программе: Файл → Пометить базу как рабочую…"

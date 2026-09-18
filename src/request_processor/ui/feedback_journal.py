@@ -13,9 +13,13 @@ from typing import Any, Callable
 
 from ..logging_setup import get_logger, log_operator
 from ..persistence.sqlite_repo import (
+    FEEDBACK_STATUS_LABELS,
     add_feedback_entry,
+    feedback_status_label,
     get_feedback_entry,
     list_feedback_entries,
+    normalize_feedback_status,
+    update_feedback_status,
 )
 from .modal import create_modal, present_modal
 from .theme import COLORS
@@ -45,6 +49,8 @@ SECTIONS = (
     "Другое",
 )
 PRIORITIES = ("низкий", "обычный", "высокий")
+STATUS_LABELS = tuple(FEEDBACK_STATUS_LABELS.values())
+FILTER_ALL = "все"
 
 
 def open_feedback_journal(
@@ -63,10 +69,21 @@ def open_feedback_journal(
     bar.pack(side="top", fill="x")
     ttk.Label(
         bar,
-        text="Записи с рабочего места попадают в архив «Экспорт данных prod».",
+        text="Записи с рабочего места попадают в архив «Экспорт данных prod». "
+        "Статус виден и оператору, и при разборе на разработке.",
         style="Muted.TLabel",
-        wraplength=680,
+        wraplength=520,
     ).pack(side="left", fill="x", expand=True)
+    filter_var = tk.StringVar(master=dlg, value=FILTER_ALL)
+    ttk.Label(bar, text="Статус:").pack(side="left", padx=(8, 4))
+    filter_box = ttk.Combobox(
+        bar,
+        textvariable=filter_var,
+        values=(FILTER_ALL, *STATUS_LABELS),
+        state="readonly",
+        width=12,
+    )
+    filter_box.pack(side="left")
 
     btns = ttk.Frame(dlg, padding=(12, 6, 12, 12))
     btns.pack(side="bottom", fill="x")
@@ -76,7 +93,7 @@ def open_feedback_journal(
     body.rowconfigure(0, weight=1)
     body.columnconfigure(0, weight=1)
 
-    cols = ("id", "date", "category", "section", "priority", "title")
+    cols = ("id", "date", "status", "category", "section", "priority", "title")
     tree = ttk.Treeview(
         body,
         columns=cols,
@@ -87,10 +104,11 @@ def open_feedback_journal(
     for col, title, w, stretch in (
         ("id", "№", 40, False),
         ("date", "Дата", 130, False),
+        ("status", "Статус", 90, False),
         ("category", "Тип", 90, False),
-        ("section", "Раздел", 120, True),
+        ("section", "Раздел", 110, True),
         ("priority", "Важность", 80, False),
-        ("title", "Заголовок", 280, True),
+        ("title", "Заголовок", 240, True),
     ):
         tree.heading(col, text=title)
         tree.column(col, width=w, stretch=stretch, anchor="w")
@@ -103,7 +121,9 @@ def open_feedback_journal(
         for iid in tree.get_children():
             tree.delete(iid)
         try:
-            rows = list_feedback_entries(limit=300, db_path=db_path)
+            flt = filter_var.get()
+            st = None if flt == FILTER_ALL else flt
+            rows = list_feedback_entries(limit=300, status=st, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
             _log.exception("list feedback: %s", exc)
             messagebox.showerror("Журнал", f"Не удалось загрузить: {exc}", parent=dlg)
@@ -117,6 +137,7 @@ def open_feedback_journal(
                 values=(
                     r["id"],
                     created,
+                    feedback_status_label(r.get("status")),
                     r.get("category") or "",
                     r.get("section") or "",
                     r.get("priority") or "",
@@ -142,17 +163,29 @@ def open_feedback_journal(
             messagebox.showerror("Журнал", "Запись не найдена.", parent=dlg)
             refresh()
             return
-        open_feedback_view(dlg, row)
+        open_feedback_view(dlg, row, db_path=db_path, on_changed=refresh)
 
     def on_dbl(_e: tk.Event) -> None:
         on_view()
 
+    def mark_done() -> None:
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Журнал", "Выберите запись в списке.", parent=dlg)
+            return
+        eid = int(sel[0])
+        if update_feedback_status(eid, "done", db_path=db_path):
+            _log.info("feedback status id=%s → done", eid, extra={"tag": "Журнал"})
+            refresh()
+
     tree.bind("<Double-Button-1>", on_dbl)
+    filter_box.bind("<<ComboboxSelected>>", lambda _e: refresh())
 
     ttk.Button(btns, text="Новая запись…", style="Accent.TButton", command=on_add).pack(
         side="left"
     )
     ttk.Button(btns, text="Открыть…", command=on_view).pack(side="left", padx=(8, 0))
+    ttk.Button(btns, text="Сделано", command=mark_done).pack(side="left", padx=(8, 0))
     ttk.Button(btns, text="Обновить", command=refresh).pack(side="left", padx=(8, 0))
     ttk.Button(btns, text="Закрыть", command=dlg.destroy).pack(side="right")
 
@@ -161,13 +194,33 @@ def open_feedback_journal(
     log_operator("feedback journal opened", tag="Журнал")
 
 
-def open_feedback_view(parent: tk.Misc, row: dict[str, Any]) -> None:
-    """Просмотр одной записи (только чтение)."""
+def open_feedback_view(
+    parent: tk.Misc,
+    row: dict[str, Any],
+    *,
+    db_path: Any = None,
+    on_changed: Callable[[], None] | None = None,
+) -> None:
+    """Просмотр записи и смена статуса."""
     dlg = create_modal(parent, title=f"Запись №{row.get('id')}", minsize=(520, 400))
     btns = ttk.Frame(dlg, padding=12)
     btns.pack(side="bottom", fill="x")
     form = ttk.Frame(dlg, padding=12)
     form.pack(side="top", fill="both", expand=True)
+
+    st_fr = ttk.Frame(form)
+    st_fr.pack(fill="x", pady=(0, 8))
+    ttk.Label(st_fr, text="Статус:").pack(side="left")
+    status_var = tk.StringVar(
+        master=dlg, value=feedback_status_label(row.get("status"))
+    )
+    ttk.Combobox(
+        st_fr,
+        textvariable=status_var,
+        values=STATUS_LABELS,
+        state="readonly",
+        width=14,
+    ).pack(side="left", padx=(8, 0))
 
     lines = [
         f"Дата: {(row.get('created_at') or '')[:19].replace('T', ' ')}",
@@ -189,12 +242,33 @@ def open_feedback_view(parent: tk.Misc, row: dict[str, Any]) -> None:
     if row.get("actual"):
         lines.extend(["", "Фактически:", row["actual"]])
 
-    txt = scrolledtext.ScrolledText(form, height=18, wrap="word", font=("Segoe UI", 10))
+    txt = scrolledtext.ScrolledText(form, height=16, wrap="word", font=("Segoe UI", 10))
     txt.pack(fill="both", expand=True)
     txt.insert("1.0", "\n".join(lines))
     txt.configure(state="disabled")
+
+    def save_status() -> None:
+        eid = int(row.get("id") or 0)
+        if not eid or db_path is None:
+            dlg.destroy()
+            return
+        key = normalize_feedback_status(status_var.get())
+        if update_feedback_status(eid, key, db_path=db_path):
+            _log.info(
+                "feedback status id=%s → %s",
+                eid,
+                key,
+                extra={"tag": "Журнал"},
+            )
+        if on_changed:
+            on_changed()
+        dlg.destroy()
+
+    ttk.Button(btns, text="Сохранить статус", style="Accent.TButton", command=save_status).pack(
+        side="left"
+    )
     ttk.Button(btns, text="Закрыть", command=dlg.destroy).pack(side="right")
-    present_modal(dlg, prefer_w=560, prefer_h=480)
+    present_modal(dlg, prefer_w=560, prefer_h=500)
 
 
 def open_feedback_entry_form(

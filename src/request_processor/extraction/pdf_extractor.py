@@ -108,6 +108,33 @@ _TWISTED_PAIR_RU_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Серия + марка: «КУНРС ЭВнг(A)-FRLS 3х2,5 (N, PE)» (work SERK 10.08 —
+# без этого ловится только «ЭВнг…» без префикса КУНРС)
+_SERIES_CORE_MARK_PATTERN = re.compile(
+    r"("
+    r"(?:КУНРС|КУПР)"
+    r"\s+"
+    r"[А-ЯЁA-Z][А-ЯЁа-яёA-Za-z0-9\-\(\)/]*"
+    r"(?:[\-–/][А-ЯЁа-яёA-Za-z0-9\(\)/]+)*"
+    r"\s+"
+    rf"{_SIZE_PART}"
+    r")",
+    re.IGNORECASE,
+)
+
+# Оптика Спецкабель: СП-ОКБнг(А)-FRHF-М8П-8А-7,0 (нет NхM — отдельный паттерн)
+# work 19.08: после склейки переноса; допускаем OCR ЕКНЕ/FRНF и форму без «СП-»
+_OPTICAL_SP_OK_PATTERN = re.compile(
+    r"("
+    r"(?:СП-)?"
+    r"ОК[А-ЯЁа-яёA-Za-z]{0,8}"
+    r"(?:нг\s*\(\s*[АAaа]\s*\))?"
+    r"(?:-\s*(?:LS|HF|FRLS|FRHF|LSLTx|FRLSLTx|FRLSLтх|FRLSLтx|ЕКНЕ|ЕВНЕ|FRНF))*"
+    r"(?:-[А-ЯЁA-Za-z0-9.,]+)+"
+    r")",
+    re.IGNORECASE,
+)
+
 # Нумерованный список марок в письме (кириллица + латинский OCR)
 _LETTER_MARKS_BLOCK = re.compile(
     r"(?:марк[аи]|mapkax?)\s+(?:кабел[ья]|kabena?)[:\s]+"
@@ -224,12 +251,36 @@ def _require_pdfplumber() -> None:
         raise RuntimeError("pdfplumber не установлен. Выполни: pip install pdfplumber")
 
 
+def _stitch_optical_sp_ok(text: str) -> str:
+    """Склеивает «СП-| … \\n ОКСнг» после разрыва ячейки таблицы (work 19.08)."""
+    if not text:
+        return text
+    # Пока есть перевод строки: хвост ячейки «метр / ГОСТ / |» отбрасываем.
+    text = re.sub(
+        r"(СП-)\s*[|Iі¦]?\s*[^\n]{0,120}\n+\s*(ОК[СБВКA-Za-z])",
+        r"\1\2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # После схлопывания пробелов: «СП-| метр … ГОСТ … ОКСнг»
+    text = re.sub(
+        r"(СП-)\s*[|Iі¦]\s+(?:метр|ГОСТ|IEC|[0-9.,/\s|п]|п\.\d){5,100}"
+        r"(ОК[СБВКA-Za-z])",
+        r"\1\2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
 def _normalize_text(text: str) -> str:
     """Приводит текст PDF/OCR к удобному для поиска виду."""
     text = text.replace("\xa0", " ")
     text = text.replace("—", "-").replace("–", "-")
+    text = _stitch_optical_sp_ok(text)
     text = re.sub(r"-\s*\n\s*", "-", text)
     text = re.sub(r"\s+", " ", text)
+    text = _stitch_optical_sp_ok(text)
     return text.strip()
 
 
@@ -272,6 +323,14 @@ def _fix_lan_letter_ocr(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    # work 14.08: нг(А)-НЕ / Cat Se — те же две конструкции, что HF / cat 5e
+    text = re.sub(
+        r"нгГ?\s*\(\s*[АAаa]\s*\)\s*-\s*(?:НЕ|НF)\b",
+        "нг(А)-HF",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b[СC]at\s*(?:Se|be|5е)\b", "Cat 5e", text, flags=re.IGNORECASE)
     text = re.sub(
         r"TapaHTuiHoe\s+nucbmMo",
         "Гарантийное письмо",
@@ -501,12 +560,17 @@ def is_plausible_mark(mark: str) -> bool:
     is_generic_lan = bool(
         re.match(rf"^{_GENERIC_LAN_SHIELD}\b", mark, re.IGNORECASE)
     )
+    # Оптика: СП-ОК…-М8П-… без «NхM» (после склейки переноса; без префикса СП-)
+    is_optical_sp_ok = bool(
+        re.match(r"^(?:СП-)?ОК[СБВКA-Za-z]", mark, re.IGNORECASE)
+    ) and bool(re.search(r"-[А-ЯЁA-Za-z0-9.,]{2,}", mark))
     if (
         not has_cyr_size
         and not has_lan_size
         and not has_star_size
         and not is_latin_brand
         and not is_generic_lan
+        and not is_optical_sp_ok
     ):
         return False
     # One brand token per mark (joined OCR lines are not a single mark)
@@ -568,7 +632,12 @@ def _clean_mark(raw: str) -> str:
     if re.match(r"^КГ[А-ЯЁа-яё]", mark):
         return mark.strip()
     # Локальные OCR-фиксы без БД (латиница→кириллица, fire-class, spacing)
-    return normalize_mark_after_ocr(mark.strip(), known_brands=None)
+    mark = normalize_mark_after_ocr(mark.strip(), known_brands=None)
+    if re.match(r"^ОК[СБВКA-Za-z]", mark, re.IGNORECASE) and re.search(
+        r"-[А-ЯЁA-Za-z0-9.,]{2,}", mark
+    ):
+        mark = "СП-" + mark
+    return mark
 
 
 def _context_snippet(text: str, start: int, end: int, radius: int = 120) -> str:
@@ -589,7 +658,7 @@ def _add_match(
     document: str | None = None,
 ) -> None:
     mark = _clean_mark(mark)
-    key = mark.lower()
+    key = _mark_dedupe_key(mark)
     if len(mark) < 5 or key in seen or not is_plausible_mark(mark):
         return
     seen.add(key)
@@ -635,7 +704,15 @@ def _find_letter_list_marks(text: str) -> list[tuple[str, int, int, str | None]]
 
 
 def _mark_dedupe_key(mark: str) -> str:
-    return re.sub(r"\s+", "", mark.lower()).replace("x", "х")
+    """Ключ дедупа: регистр, пробелы, x/х, 0,52/0.52, OCR HF/cat 5e."""
+    s = (mark or "").lower()
+    s = s.replace("×", "х").replace("x", "х")
+    s = s.replace(",", ".")
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"нг\(([аa])\)-не(?=$|[^а-яёa-z])", r"нг(\1)-hf", s)
+    s = re.sub(r"нг\(([аa])\)-нf", r"нг(\1)-hf", s)
+    s = s.replace("catse", "cat5e").replace("catbe", "cat5e")
+    return s
 
 
 def _dedupe_cable_matches(
@@ -667,7 +744,55 @@ def _dedupe_cable_matches(
                     requirements_raw=m.requirements_raw,
                 )
             )
-    return out
+    return _drop_subset_marks(out)
+
+
+def _is_catalog_line_family(mark: str) -> bool:
+    """Семейства, где короткая и длинная строка — разные SKU (не дубли)."""
+    u = (mark or "").upper()
+    return u.startswith(("FLEXICORE", "H07RN", "VICABFLEX"))
+
+
+def _drop_subset_marks(items: list[CableMarkMatch]) -> list[CableMarkMatch]:
+    """
+    Убрать «короткие» дубли, если есть более полная строка.
+
+    work free-text 10.08: U/UTP + U/UTP cat 5e 2x2… + … PE → оставить полные.
+    work SERK 10.08: «ЭВнг…» при наличии «КУНРС ЭВнг…» → отбросить короткий.
+
+    Не трогаем FLEXICORE/H07RN/VicabFLEX: «100» и «100 нг(A)-LS» — разные позиции каталога.
+    """
+    if len(items) < 2:
+        return items
+    keys = [_mark_dedupe_key(m.mark) for m in items]
+    drop: set[int] = set()
+    for i, ki in enumerate(keys):
+        if not ki or i in drop:
+            continue
+        if _is_catalog_line_family(items[i].mark):
+            continue
+        for j, kj in enumerate(keys):
+            if i == j or not kj or ki == kj:
+                continue
+            if len(ki) >= len(kj):
+                continue
+            if _is_catalog_line_family(items[j].mark):
+                continue
+            # ki — префикс kj (короткий «U/UTP» vs полный LAN)
+            if kj.startswith(ki):
+                drop.add(i)
+                break
+            # ki целиком внутри kj: «эвнг…» ⊂ «кунрсэвнг…»
+            if ki in kj and len(ki) >= 8:
+                drop.add(i)
+                break
+            # «…2x2x0.52» vs «…2x2x0.52pe»
+            if re.sub(r"(?:pe|pvc|zh)$", "", kj) == ki:
+                drop.add(i)
+                break
+    if not drop:
+        return items
+    return [m for i, m in enumerate(items) if i not in drop]
 
 
 _FLEXICORE_FIRE_TAIL = re.compile(
@@ -800,6 +925,16 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
     for mark, start, end, doc in _find_letter_list_marks(normalized):
         _add_match(matches, seen, mark, normalized, start, end, document=doc)
 
+    # Серия КУНРС/КУПР — до generic _MARK_PATTERN, иначе съедает «ЭВнг…» без префикса
+    for m in _SERIES_CORE_MARK_PATTERN.finditer(normalized):
+        raw = m.group(1) if m.lastindex else m.group(0)
+        _add_match(matches, seen, raw, normalized, m.start(), m.end())
+
+    # Оптика СП-ОК* (нет NхM)
+    for m in _OPTICAL_SP_OK_PATTERN.finditer(normalized):
+        raw = m.group(1) if m.lastindex else m.group(0)
+        _add_match(matches, seen, raw, normalized, m.start(), m.end())
+
     for pattern in (
         _LAN_MARK_PATTERN,
         _GENERIC_LAN_MARK_PATTERN,
@@ -812,7 +947,7 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
             raw = m.group(1) if m.lastindex else m.group(0)
             _add_match(matches, seen, raw, normalized, m.start(), m.end())
 
-    return _expand_flexicore_combinations(matches)
+    return _expand_flexicore_combinations(_drop_subset_marks(matches))
 
 
 OcrEngineChoice = Literal["auto", "tesseract", "easyocr"]
@@ -1790,25 +1925,31 @@ def extract_from_text(
     from .speech_text_extractor import is_plausible_speech_mark
 
     def _ok_free_text_mark(mark: str) -> bool:
+        # Сначала «нормальная» structural-марка (ВВГнг(А)-LS … — LS латиницей OK).
+        if is_plausible_mark(mark):
+            return True
+        if lookup_brand(mark) or is_plausible_speech_mark(mark):
+            return True
         # structural иногда даёт «UТР-3нг…» (смесь латиницы и кириллицы) — мусор
         has_cyr = bool(re.search(r"[А-Яа-яЁё]", mark))
         has_lat = bool(re.search(r"[A-Za-z]", mark))
         if has_cyr and has_lat:
             if not re.search(
-                r"(?:СПЕЦЛАН|SPECLAN|Cat\s*\d|/(?:U?TP|FTP)|FLEXICORE|VicabFLEX)",
+                r"(?:СПЕЦЛАН|SPECLAN|Cat\s*\d|/(?:U?TP|FTP)|FLEXICORE|VicabFLEX|"
+                r"нг\s*\(\s*[АAaа]\s*\)\s*-?\s*(?:LS|HF|FRLS|FRHF|LSLTx))",
                 mark,
                 re.I,
             ):
                 return False
-        if lookup_brand(mark) or is_plausible_speech_mark(mark):
             return True
-        return is_plausible_mark(mark)
+        return False
 
     cleaned_marks = [m for m in merged if _ok_free_text_mark(m.mark)]
     if cleaned_marks:
-        result = result.model_copy(update={"cable_marks": cleaned_marks})
+        kept = _drop_subset_marks(cleaned_marks)
+        result = result.model_copy(update={"cable_marks": kept})
     elif merged:
-        result = result.model_copy(update={"cable_marks": merged})
+        result = result.model_copy(update={"cable_marks": _drop_subset_marks(merged)})
     logger.info(
         "free-text marks structural=%s speech=%s kept=%s sample=%s",
         structural_n,
@@ -1851,6 +1992,13 @@ def extract_from_document(
             ocr_engine=ocr_engine,
             progress=progress,
         )
+    if suffix == ".doc":
+        # work 11.08: оператор выбрал старый .doc — понятное сообщение, не traceback-жаргон
+        raise ValueError(
+            "Формат .doc (старый Word 97–2003) не поддерживается.\n\n"
+            "Откройте файл в Microsoft Word → «Сохранить как» → "
+            "тип «Документ Word (*.docx)» и выберите уже .docx."
+        )
     if suffix == ".docx":
         # Word: OCR не нужен. Один проход Document (не два), merge-ячейки схлопнуты.
         # Ассистент/fuzzy/Ollama сюда не входят — только детерминированный разбор.
@@ -1887,4 +2035,7 @@ def extract_from_document(
             len(result.customer_name or ""),
         )
         return result
-    raise ValueError(f"Неподдерживаемый формат: {suffix}. Используйте PDF или .docx")
+    raise ValueError(
+        f"Неподдерживаемый формат: {suffix or '(без расширения)'}.\n"
+        "Поддерживаются PDF и Word .docx (не .doc)."
+    )

@@ -118,7 +118,9 @@ _MISC_FIXES: tuple[tuple[str, str], ...] = (
     (r"Р\s+ОССИЯ", "РОССИЯ"),
     # OCR fire / LAN (work 06.08: КСБК…-ЕВНЕ, SF/UТР)
     (r"ЕВНЕ", "FRHF"),
+    (r"ЕКНЕ", "FRHF"),
     (r"FRНЕ", "FRHF"),
+    (r"FRНF", "FRHF"),
     (r"ЕВLS", "FRLS"),
 )
 

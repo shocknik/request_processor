@@ -220,6 +220,23 @@ def save_db_profile(
     return path
 
 
+def looks_like_work_install(root: Path | str, hostname: str = "") -> bool:
+    """Похоже на боевой ПК (NAS / W:\\request_processor), не на машину разработки."""
+    s = str(root or "").replace("/", "\\").lower()
+    if "nas01" in s or "users_folder$" in s:
+        return True
+    if s.startswith("w:\\request_processor"):
+        return True
+    host = (hostname or "").strip().lower()
+    if (
+        host.startswith("idm")
+        and "request_processor" in s
+        and "my_projects" not in s
+    ):
+        return True
+    return False
+
+
 def set_db_role(
     role: DbRole,
     *,

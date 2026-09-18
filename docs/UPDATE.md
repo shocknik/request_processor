@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 # НЕ включайте -IncludeAppDb для обновления боя (иначе соблазн перезаписать БД)
 ```
 
-### Актуальный zip на work: **2026-08-06**
+### Актуальный zip на work: **2026-09-18**
 
-`dist\request_processor_0.9.1_20260806.zip` (**без** `app.db`)
+`dist\request_processor_0.9.1_20260918.zip` (**без** `app.db`)
 
 Собрать на dev:
 
@@ -41,23 +41,27 @@ cd D:\My_projects\request_processor
 powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 ```
 
-**В составе 06.08 (поверх 31.07 ТЗ 70 + 28.07 debt):**
+**В составе 18.09 (feedback work 11.08 + 28.08, поверх 14.08):**
 
 | Тема | Что |
 |------|-----|
-| Org search | Unicode casefold + KeyRelease; счётчик «найдено: N»; Esc — сброс; все org в фильтре |
-| Clipboard | Ctrl+C на адресе = copy (RU/EN), не paste |
-| Document field | «стоимостью» не считается ТУ/СТО |
-| Марки / OCR | lookalike UТР→UTP, РVС→PVC; ЕВНЕ→FRHF; КСВПП/КССПП; LAN Cat 6 PVC нг… до размера |
-| Extract | table + full text для DOCX direction; lexicon расширения |
-| Старт | splash раньше; метрики `t_pre_splash` / `t_import`; bat-сообщение; без ico с UNC |
-| Чеклист | `docs/CHECKLIST_TZ70_OPERATOR.md` (org filter, Ctrl+C, марки 06.08) |
-| Тесты | ~322 passed |
+| Confirm org | Два Спецкабеля (с ИНН и без) сливаются, UNIQUE больше не валит заявку |
+| Login | `n.molchanov` не в подсказках Заказчик/Производитель |
+| СПЕЦЛАН | Письмо №1610 → 2 марки (не 5–7 OCR-близнецов) |
+| Оптика | Склейка `СП-\|` + `ОКСнг…`; ЕКНЕ/FRНF → FRHF |
+| Таблица марок | Колонка №, копирование (кнопка / Ctrl+C / меню) |
+| Заявка UI | Нет зоны «перетащите»; шапка не наезжает на марки; граница марок/орг не в ноль |
+| Журнал | Статусы: новое / в работе / сделано / не будем |
+| БД | Файл → «Пометить базу как рабочую»; после update.ps1 — подсказка `[WORK]` |
+| Ранее 14.08 | Combobox antifreeze, КУНРС, path-hint, КП без «заказчик», `.doc` |
+| Тесты | 349 passed, 1 skipped |
 
 **Ранее в той же линии 0.9.1:**
 
 | Дата | Zip / тема |
 |------|------------|
+| 14.08 | Combobox, КУНРС/СП-ОК, path-hint, empty KP, .doc |
+| 06.08 | org filter, Ctrl+C, марки OCR/lexicon, splash, ~322 tests |
 | 31.07 | ТЗ 70: free-text bg_job, org HITL, редактор марок, dual logs, feedback journal |
 | 28.07 | `bg_job`/`modal`, org-адреса без cross-factory, `db-role`, ~283 tests |
 | 27.07 | DOCX full text, HITL cycle, pack logs, e2e |

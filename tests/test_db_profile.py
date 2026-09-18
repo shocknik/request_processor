@@ -6,6 +6,7 @@ from pathlib import Path
 
 from request_processor.persistence.db_profile import (
     load_db_profile,
+    looks_like_work_install,
     save_db_profile,
     set_db_role,
     format_db_info,
@@ -88,4 +89,15 @@ def test_save_roundtrip_custom_label(tmp_path: Path) -> None:
     loaded = load_db_profile(db)
     assert loaded.role == "work"
     assert loaded.label == "боевая"
-    assert loaded.is_source_of_truth
+
+
+def test_looks_like_work_install() -> None:
+    assert looks_like_work_install(
+        r"\\nas01\User_data\Users_folder$\n.molchanov\request_processor",
+        "IDM23060",
+    )
+    assert looks_like_work_install(r"W:\request_processor", "IDM23060")
+    assert not looks_like_work_install(
+        r"D:\My_projects\request_processor",
+        "DESKTOP-DEV",
+    )

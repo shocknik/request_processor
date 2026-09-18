@@ -42,7 +42,10 @@ from ..models import (
     TestItemUpdate,
     TestItemCreate,
 )
-from ..extraction.organization_extractor import normalize_org_name
+from ..extraction.organization_extractor import (
+    is_placeholder_org_name,
+    normalize_org_name,
+)
 from ..parsing.cable_mark_parser import parse_cable_mark_record
 from ..calculation.climatic_tests import (
     CLIMATE_ITEM_ALIASES,
@@ -421,6 +424,39 @@ def migrate_db(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     seed_example_acceptance_catalog(db_path)
 
 
+FEEDBACK_STATUS_LABELS: dict[str, str] = {
+    "new": "новое",
+    "in_progress": "в работе",
+    "done": "сделано",
+    "wontfix": "не будем",
+}
+_FEEDBACK_STATUS_ALIASES: dict[str, str] = {
+    "new": "new",
+    "новое": "new",
+    "in_progress": "in_progress",
+    "в работе": "in_progress",
+    "вработе": "in_progress",
+    "done": "done",
+    "сделано": "done",
+    "готово": "done",
+    "wontfix": "wontfix",
+    "не будем": "wontfix",
+    "небудем": "wontfix",
+    "отклонено": "wontfix",
+}
+
+
+def normalize_feedback_status(value: str | None) -> str:
+    """Ключ статуса журнала: new / in_progress / done / wontfix."""
+    raw = (value or "new").strip().lower()
+    key = _FEEDBACK_STATUS_ALIASES.get(raw, "new")
+    return key if key in FEEDBACK_STATUS_LABELS else "new"
+
+
+def feedback_status_label(value: str | None) -> str:
+    return FEEDBACK_STATUS_LABELS[normalize_feedback_status(value)]
+
+
 def _migrate_feedback_journal(db_path: str | Path = DB_PATH_DEFAULT) -> None:
     """Журнал пожеланий / ошибок / обратной связи оператора (меню Файл)."""
     with get_connection(db_path) as conn:
@@ -507,7 +543,7 @@ def add_feedback_entry(
                 (actual or "").strip() or None,
                 ver,
                 host or None,
-                status or "new",
+                normalize_feedback_status(status),
                 source or "gui",
             ),
         )
@@ -517,19 +553,48 @@ def add_feedback_entry(
 def list_feedback_entries(
     *,
     limit: int = 200,
+    status: str | None = None,
     db_path: str | Path = DB_PATH_DEFAULT,
 ) -> list[dict[str, Any]]:
     """Список записей журнала (новые сверху)."""
     with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM feedback_journal
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (max(1, int(limit)),),
-        ).fetchall()
+        if status and status != "all":
+            key = normalize_feedback_status(status)
+            rows = conn.execute(
+                """
+                SELECT * FROM feedback_journal
+                WHERE status = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (key, max(1, int(limit))),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM feedback_journal
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
         return [dict(r) for r in rows]
+
+
+def update_feedback_status(
+    entry_id: int,
+    status: str,
+    *,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> bool:
+    """Сменить статус записи (новое / в работе / сделано / не будем)."""
+    key = normalize_feedback_status(status)
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE feedback_journal SET status = ? WHERE id = ?",
+            (key, int(entry_id)),
+        )
+        return cur.rowcount > 0
 
 
 def get_feedback_entry(
@@ -586,13 +651,20 @@ def import_feedback_entries(
                 continue
             exists = conn.execute(
                 """
-                SELECT id FROM feedback_journal
+                SELECT id, status FROM feedback_journal
                 WHERE title = ? AND body = ? AND created_at = ?
                 LIMIT 1
                 """,
                 (title, body, created),
             ).fetchone()
             if exists:
+                incoming = normalize_feedback_status(e.get("status"))
+                if incoming != normalize_feedback_status(exists["status"]):
+                    conn.execute(
+                        "UPDATE feedback_journal SET status = ? WHERE id = ?",
+                        (incoming, int(exists["id"])),
+                    )
+                    n += 1
                 continue
             # пометка источника станции в host_name
             host = (e.get("host_name") or "").strip()
@@ -617,7 +689,7 @@ def import_feedback_entries(
                     e.get("actual"),
                     e.get("app_version"),
                     host or None,
-                    e.get("status") or "new",
+                    normalize_feedback_status(e.get("status")),
                     e.get("source") or "import",
                 ),
             )
@@ -2714,6 +2786,22 @@ def upsert_organization(
     name_normalized = normalize_org_name(extract.name)
     inn_key = extract.inn or ""
 
+    if is_placeholder_org_name(extract.name):
+        existing = find_organization_id_by_name(extract.name, db_path)
+        if existing:
+            return existing
+        _log.warning(
+            "skip placeholder org name=%r",
+            extract.name,
+            extra={"tag": "Организации"},
+        )
+        return 0
+
+    merge_keep: int | None = None
+    merge_drop: int | None = None
+    legal = extract.legal_address or extract.address
+    actual = extract.actual_address or legal
+
     with get_connection(db_path) as conn:
         row = None
         if extract.inn:
@@ -2726,33 +2814,89 @@ def upsert_organization(
                 "SELECT * FROM organizations WHERE name_normalized = ? AND COALESCE(inn, '') = ?",
                 (name_normalized, inn_key),
             ).fetchone()
+        # Тот же name_normalized: карточка с ИНН и дубль без ИНН
+        # (work 14.08: Спецкабель id=3 с ИНН vs id=16 пустой).
+        if row is not None:
+            row_id = int(row["id"])
+            inn_now = extract.inn or row["inn"]
+            if inn_now:
+                empty_twin = conn.execute(
+                    """
+                    SELECT id FROM organizations
+                    WHERE id != ?
+                      AND name_normalized = ?
+                      AND COALESCE(inn, '') = ''
+                    LIMIT 1
+                    """,
+                    (row_id, name_normalized),
+                ).fetchone()
+                if empty_twin is not None:
+                    merge_keep = row_id
+                    merge_drop = int(empty_twin["id"])
+                else:
+                    by_inn = conn.execute(
+                        "SELECT id FROM organizations WHERE inn = ? AND id != ?",
+                        (inn_now, row_id),
+                    ).fetchone()
+                    if by_inn is not None:
+                        merge_keep = int(by_inn["id"])
+                        merge_drop = row_id
 
-        legal = extract.legal_address or extract.address
-        actual = extract.actual_address or legal
+        if merge_keep is None:
+            if row:
+                org_id = int(row["id"])
+                conn.execute(
+                    """
+                    UPDATE organizations SET
+                        name = ?,
+                        address = COALESCE(?, address),
+                        legal_address = COALESCE(?, legal_address),
+                        actual_address = COALESCE(?, actual_address),
+                        postal_code = COALESCE(?, postal_code),
+                        phone = COALESCE(?, phone),
+                        email = COALESCE(?, email),
+                        inn = COALESCE(?, inn),
+                        kpp = COALESCE(?, kpp),
+                        is_accredited = MAX(is_accredited, ?),
+                        fsa_registry_number = COALESCE(?, fsa_registry_number),
+                        org_type = CASE WHEN ? = 'unknown' THEN org_type ELSE ? END,
+                        source = COALESCE(?, source),
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        extract.name,
+                        extract.address,
+                        legal,
+                        actual,
+                        extract.postal_code,
+                        extract.phone,
+                        extract.email,
+                        extract.inn,
+                        extract.kpp,
+                        int(extract.is_accredited),
+                        extract.fsa_registry_number,
+                        extract.org_type,
+                        extract.org_type,
+                        source,
+                        now,
+                        org_id,
+                    ),
+                )
+                return org_id
 
-        if row:
-            org_id = int(row["id"])
-            conn.execute(
+            cursor = conn.execute(
                 """
-                UPDATE organizations SET
-                    name = ?,
-                    address = COALESCE(?, address),
-                    legal_address = COALESCE(?, legal_address),
-                    actual_address = COALESCE(?, actual_address),
-                    postal_code = COALESCE(?, postal_code),
-                    phone = COALESCE(?, phone),
-                    email = COALESCE(?, email),
-                    inn = COALESCE(?, inn),
-                    kpp = COALESCE(?, kpp),
-                    is_accredited = MAX(is_accredited, ?),
-                    fsa_registry_number = COALESCE(?, fsa_registry_number),
-                    org_type = CASE WHEN ? = 'unknown' THEN org_type ELSE ? END,
-                    source = COALESCE(?, source),
-                    updated_at = ?
-                WHERE id = ?
+                INSERT INTO organizations (
+                    name, name_normalized, address, legal_address, actual_address,
+                    postal_code, phone, email,
+                    inn, kpp, is_accredited, fsa_registry_number, org_type,
+                    source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     extract.name,
+                    name_normalized,
                     extract.address,
                     legal,
                     actual,
@@ -2764,43 +2908,16 @@ def upsert_organization(
                     int(extract.is_accredited),
                     extract.fsa_registry_number,
                     extract.org_type,
-                    extract.org_type,
                     source,
                     now,
-                    org_id,
+                    now,
                 ),
             )
-            return org_id
+            return int(cursor.lastrowid or 0)
 
-        cursor = conn.execute(
-            """
-            INSERT INTO organizations (
-                name, name_normalized, address, legal_address, actual_address,
-                postal_code, phone, email,
-                inn, kpp, is_accredited, fsa_registry_number, org_type,
-                source, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                extract.name,
-                name_normalized,
-                extract.address,
-                legal,
-                actual,
-                extract.postal_code,
-                extract.phone,
-                extract.email,
-                extract.inn,
-                extract.kpp,
-                int(extract.is_accredited),
-                extract.fsa_registry_number,
-                extract.org_type,
-                source,
-                now,
-                now,
-            ),
-        )
-        return int(cursor.lastrowid or 0)
+    assert merge_keep is not None and merge_drop is not None
+    merge_organizations(merge_keep, merge_drop, db_path=db_path)
+    return upsert_organization(extract, source=source, db_path=db_path)
 
 
 def find_similar_organizations(
@@ -2872,6 +2989,11 @@ def create_organization(
     db_path: str | Path = DB_PATH_DEFAULT,
 ) -> int:
     """Создаёт организацию (CRUD «+ Добавить»). Без fuzzy — вызывающий решает."""
+    if is_placeholder_org_name(name):
+        raise ValueError(
+            f"«{(name or '').strip()}» похоже на логин Windows или заглушку "
+            "и не сохраняется как организация."
+        )
     extract = OrganizationExtract(
         name=name.strip(),
         address=address,
@@ -2934,6 +3056,10 @@ def save_organizations_from_extraction(
     # 1) Явные строки GUI — надёжный источник ролей после human-in-the-loop
     cust = (customer_name or "").strip()
     mfg = (manufacturer_name or "").strip()
+    if is_placeholder_org_name(cust):
+        cust = ""
+    if is_placeholder_org_name(mfg):
+        mfg = ""
     if cust and not (skip_own_lab and is_own_lab_name(cust)):
         cust_org = OrganizationExtract(
             name=cust,
@@ -2991,6 +3117,8 @@ def save_organizations_from_extraction(
     # 2) Остальные из extract (не ИЛ; роли customer/manufacturer если ещё не заданы)
     for org in organizations:
         if _skip(org):
+            continue
+        if is_placeholder_org_name(org.name):
             continue
         if org.role not in ("customer", "manufacturer", "dealer") and org.org_type not in (
             "manufacturer",
@@ -3066,6 +3194,8 @@ def list_organizations(
     org_type: str | None = None,
     limit: int = 100,
     db_path: str | Path = DB_PATH_DEFAULT,
+    *,
+    exclude_placeholders: bool = False,
 ) -> list[dict[str, Any]]:
     """Список организаций.
 
@@ -3114,6 +3244,8 @@ def list_organizations(
             for r in rows
             if all(tok in _blob(r) for tok in tokens)
         ]
+    if exclude_placeholders:
+        rows = [r for r in rows if not is_placeholder_org_name(r.get("name"))]
     return rows[:limit]
 
 
@@ -3124,6 +3256,188 @@ def get_organization_by_id(
     with get_connection(db_path) as conn:
         row = conn.execute("SELECT * FROM organizations WHERE id = ?", (org_id,)).fetchone()
         return dict(row) if row else None
+
+
+def _retarget_organization_fks(conn: sqlite3.Connection, from_id: int, to_id: int) -> None:
+    """Переназначает ссылки с одной организации на другую."""
+    if from_id == to_id:
+        return
+    for sql in (
+        "UPDATE orders SET customer_org_id = ? WHERE customer_org_id = ?",
+        "UPDATE orders SET manufacturer_org_id = ? WHERE manufacturer_org_id = ?",
+        "UPDATE order_marks SET manufacturer_org_id = ? WHERE manufacturer_org_id = ?",
+        "UPDATE document_extractions SET customer_org_id = ? WHERE customer_org_id = ?",
+        "UPDATE document_extractions SET manufacturer_org_id = ? WHERE manufacturer_org_id = ?",
+    ):
+        conn.execute(sql, (to_id, from_id))
+
+
+def merge_organizations(
+    keep_id: int,
+    drop_id: int,
+    *,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Сливает drop в keep: копирует пустые реквизиты, переносит ссылки, удаляет drop.
+
+    Work 14.08: две карточки Спецкабеля (с ИНН и без) ломали confirm UNIQUE.
+    """
+    if keep_id == drop_id:
+        return keep_id
+    now = datetime.now().isoformat()
+    with get_connection(db_path) as conn:
+        keep = conn.execute(
+            "SELECT * FROM organizations WHERE id = ?", (keep_id,)
+        ).fetchone()
+        drop = conn.execute(
+            "SELECT * FROM organizations WHERE id = ?", (drop_id,)
+        ).fetchone()
+        if keep is None:
+            raise ValueError(f"Нет организации id={keep_id}")
+        if drop is None:
+            return keep_id
+        fill_cols = (
+            "inn",
+            "kpp",
+            "address",
+            "legal_address",
+            "actual_address",
+            "postal_code",
+            "phone",
+            "email",
+            "fsa_registry_number",
+        )
+        updates: dict[str, Any] = {}
+        for col in fill_cols:
+            if not keep[col] and drop[col]:
+                updates[col] = drop[col]
+        if updates:
+            sets = ", ".join(f"{col} = ?" for col in updates)
+            conn.execute(
+                f"UPDATE organizations SET {sets}, updated_at = ? WHERE id = ?",
+                [*updates.values(), now, keep_id],
+            )
+        _retarget_organization_fks(conn, drop_id, keep_id)
+        conn.execute("DELETE FROM organizations WHERE id = ?", (drop_id,))
+        _log.info(
+            "merge organizations keep=%s drop=%s filled=%s",
+            keep_id,
+            drop_id,
+            list(updates),
+            extra={"tag": "Организации"},
+        )
+    return keep_id
+
+
+def _find_org_dedup_conflict(
+    conn: sqlite3.Connection,
+    *,
+    org_id: int,
+    name_normalized: str,
+    inn_key: str,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM organizations
+        WHERE id != ?
+          AND name_normalized = ?
+          AND COALESCE(inn, '') = ?
+        LIMIT 1
+        """,
+        (org_id, name_normalized, inn_key),
+    ).fetchone()
+
+
+def attach_organization_details(
+    org_id: int,
+    *,
+    inn: str | None = None,
+    address: str | None = None,
+    kpp: str | None = None,
+    org_type: str | None = None,
+    db_path: str | Path = DB_PATH_DEFAULT,
+) -> int:
+    """Дописывает ИНН/адрес к карточке. При UNIQUE — сливает с существующей.
+
+    Возвращает id карточки, которой нужно пользоваться дальше (может быть не org_id).
+    """
+    inn_val = (inn or "").strip() or None
+    addr_val = (address or "").strip() or None
+    now = datetime.now().isoformat()
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM organizations WHERE id = ?", (org_id,)
+        ).fetchone()
+        if row is None:
+            return org_id
+        name_norm = row["name_normalized"] or normalize_org_name(row["name"] or "")
+        new_inn_key = inn_val or (row["inn"] or "")
+        conflict = _find_org_dedup_conflict(
+            conn,
+            org_id=org_id,
+            name_normalized=name_norm,
+            inn_key=new_inn_key,
+        )
+        if conflict is not None:
+            keep_id, drop_id = _pick_org_merge_ids(row, conflict)
+            # выходим из соединения и сливаем отдельной транзакцией
+        else:
+            conn.execute(
+                """
+                UPDATE organizations SET
+                    address = COALESCE(?, address),
+                    inn = COALESCE(?, inn),
+                    kpp = COALESCE(?, kpp),
+                    org_type = CASE WHEN ? IS NULL OR ? = 'unknown' THEN org_type ELSE ? END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    addr_val,
+                    inn_val,
+                    (kpp or "").strip() or None,
+                    org_type,
+                    org_type,
+                    org_type,
+                    now,
+                    org_id,
+                ),
+            )
+            return org_id
+
+    surviving = merge_organizations(keep_id, drop_id, db_path=db_path)
+    if addr_val or inn_val:
+        with get_connection(db_path) as conn:
+            conn.execute(
+                """
+                UPDATE organizations SET
+                    address = COALESCE(?, address),
+                    inn = COALESCE(?, inn),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (addr_val, inn_val, now, surviving),
+            )
+    return surviving
+
+
+def _pick_org_merge_ids(
+    current: sqlite3.Row | dict[str, Any],
+    conflict: sqlite3.Row | dict[str, Any],
+) -> tuple[int, int]:
+    """Оставляем карточку с ИНН, при равенстве — с меньшим id (старше)."""
+    cur_id = int(current["id"])
+    other_id = int(conflict["id"])
+    cur_inn = (current["inn"] or "").strip()
+    other_inn = (conflict["inn"] or "").strip()
+    if cur_inn and not other_inn:
+        return cur_id, other_id
+    if other_inn and not cur_inn:
+        return other_id, cur_id
+    keep = min(cur_id, other_id)
+    drop = max(cur_id, other_id)
+    return keep, drop
 
 
 def update_organization(
@@ -3144,41 +3458,80 @@ def update_organization(
     """Обновляет организацию по id (ручное редактирование в GUI)."""
     now = datetime.now().isoformat()
     name_normalized = normalize_org_name(name)
+    inn_key = (inn or "").strip()
     with get_connection(db_path) as conn:
-        cursor = conn.execute(
-            """
-            UPDATE organizations SET
-                name = ?,
-                name_normalized = ?,
-                address = ?,
-                postal_code = ?,
-                phone = ?,
-                email = ?,
-                inn = ?,
-                kpp = ?,
-                is_accredited = ?,
-                fsa_registry_number = ?,
-                org_type = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                name.strip(),
-                name_normalized,
-                address,
-                postal_code,
-                phone,
-                email,
-                inn,
-                kpp,
-                int(is_accredited),
-                fsa_registry_number,
-                org_type,
-                now,
-                org_id,
-            ),
+        conflict = _find_org_dedup_conflict(
+            conn,
+            org_id=org_id,
+            name_normalized=name_normalized,
+            inn_key=inn_key,
         )
-        return cursor.rowcount > 0
+        if conflict is not None:
+            current = conn.execute(
+                "SELECT * FROM organizations WHERE id = ?", (org_id,)
+            ).fetchone()
+            if current is None:
+                return False
+            keep_id, drop_id = _pick_org_merge_ids(current, conflict)
+        else:
+            try:
+                cursor = conn.execute(
+                    """
+                    UPDATE organizations SET
+                        name = ?,
+                        name_normalized = ?,
+                        address = ?,
+                        postal_code = ?,
+                        phone = ?,
+                        email = ?,
+                        inn = ?,
+                        kpp = ?,
+                        is_accredited = ?,
+                        fsa_registry_number = ?,
+                        org_type = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        name.strip(),
+                        name_normalized,
+                        address,
+                        postal_code,
+                        phone,
+                        email,
+                        inn,
+                        kpp,
+                        int(is_accredited),
+                        fsa_registry_number,
+                        org_type,
+                        now,
+                        org_id,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                _log.warning(
+                    "update_organization UNIQUE id=%s inn=%s — merge",
+                    org_id,
+                    inn,
+                    extra={"tag": "Организации"},
+                )
+                current = conn.execute(
+                    "SELECT * FROM organizations WHERE id = ?", (org_id,)
+                ).fetchone()
+                conflict = _find_org_dedup_conflict(
+                    conn,
+                    org_id=org_id,
+                    name_normalized=name_normalized,
+                    inn_key=inn_key,
+                )
+                if current is None or conflict is None:
+                    raise
+                keep_id, drop_id = _pick_org_merge_ids(current, conflict)
+            else:
+                return cursor.rowcount > 0
+
+    merge_organizations(keep_id, drop_id, db_path=db_path)
+    return True
 
 
 def get_last_document_extraction(

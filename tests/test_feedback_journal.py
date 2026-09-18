@@ -7,9 +7,12 @@ from pathlib import Path
 from request_processor.persistence.sqlite_repo import (
     add_feedback_entry,
     export_feedback_journal,
+    feedback_status_label,
     import_feedback_entries,
     init_db,
     list_feedback_entries,
+    normalize_feedback_status,
+    update_feedback_status,
 )
 from request_processor.training.prod_data import export_prod_data, import_prod_data
 
@@ -82,3 +85,41 @@ def test_export_feedback_delta(tmp_path: Path) -> None:
     )
     all_rows = export_feedback_journal(db)
     assert len(all_rows) == 1
+
+
+def test_feedback_status_roundtrip(tmp_path: Path) -> None:
+    db = tmp_path / "st.db"
+    init_db(db)
+    eid = add_feedback_entry(
+        category="ошибка",
+        title="Поля в окне Организации",
+        body="Combobox залипает",
+        db_path=db,
+    )
+    row = list_feedback_entries(db_path=db)[0]
+    assert normalize_feedback_status(row["status"]) == "new"
+    assert feedback_status_label(row["status"]) == "новое"
+    assert update_feedback_status(eid, "сделано", db_path=db)
+    done = list_feedback_entries(status="done", db_path=db)
+    assert len(done) == 1
+    assert feedback_status_label(done[0]["status"]) == "сделано"
+    assert list_feedback_entries(status="новое", db_path=db) == []
+
+
+def test_import_feedback_updates_status(tmp_path: Path) -> None:
+    db = tmp_path / "imp.db"
+    init_db(db)
+    add_feedback_entry(
+        category="ошибка",
+        title="Combobox",
+        body="залипание",
+        db_path=db,
+    )
+    row = list_feedback_entries(db_path=db)[0]
+    payload = dict(row)
+    payload["status"] = "done"
+    n = import_feedback_entries([payload], db_path=db)
+    assert n >= 1
+    again = list_feedback_entries(db_path=db)
+    assert len(again) == 1
+    assert normalize_feedback_status(again[0]["status"]) == "done"

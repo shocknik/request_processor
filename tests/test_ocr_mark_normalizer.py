@@ -39,6 +39,20 @@ def test_lan_mark_preserves_cat() -> None:
     assert "UTP" in result
 
 
+def test_lan_ocr_ne_and_cat_se() -> None:
+    hf = normalize_mark_after_ocr("СПЕЦЛАН F/UTP cat 5e ZH нг(А)-НЕ 2x2x0,52")
+    assert "HF" in hf.upper()
+    assert "НЕ" not in hf
+    se = normalize_mark_after_ocr("СПЕЦЛАН F/UTP Cat Se ZH нг(А)-HF 4x2x0,52")
+    assert "5e" in se.lower() or "5E" in se.upper()
+
+
+def test_optical_ekne_to_frhf() -> None:
+    result = normalize_mark_after_ocr("СП-ОКСнг(А)-ЕКНЕ-М8П-4А-1,5")
+    assert "FRHF" in result.upper()
+    assert "ЕКНЕ" not in result.upper()
+
+
 def test_strip_table_price_glue_preserves_size() -> None:
     assert normalize_mark_after_ocr("ПВСнг(А)-LS 3х2,50") == "ПВСнг(А)-LS 3х2,50"
     assert normalize_mark_after_ocr("ПВСнг(А)-LS 3х2,5064500,00400") == "ПВСнг(А)-LS 3х2,50"

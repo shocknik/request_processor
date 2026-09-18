@@ -30,6 +30,15 @@ from ..theme import (
 _log = get_logger("ui.widgets")
 
 
+def upload_panel_empty_copy(*, dnd_enabled: bool = False) -> tuple[str, str]:
+    """Подписи компактной строки файла. Зоны перетаскивания нет."""
+    _ = dnd_enabled
+    return (
+        "Файл не выбран",
+        "PDF, Word (.docx) или изображение — кнопка «Выбрать файл»",
+    )
+
+
 class CardFrame(ttk.Frame):
     """Белая карточка с тонкой обводкой (tk.Frame border + ttk content)."""
 
@@ -249,12 +258,7 @@ class StepIndicator(ttk.Frame):
 
 
 class UploadPanel(ttk.Frame):
-    """
-    Большая зона загрузки документа.
-
-    Состояния: empty (drag/drop hint) / file (метаданные файла).
-    Drag-and-drop опционален (tkinterdnd2); без него — только кнопка.
-    """
+    """Компактная строка выбора файла. Без зоны перетаскивания (work 19.08)."""
 
     def __init__(
         self,
@@ -263,63 +267,59 @@ class UploadPanel(ttk.Frame):
         on_browse: Callable[[], None] | None = None,
         on_ocr_params: Callable[[], None] | None = None,
         on_drop_path: Callable[[str], None] | None = None,
+        on_free_text: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent, style="App.TFrame")
         self._on_browse = on_browse
         self._on_ocr_params = on_ocr_params
         self._on_drop_path = on_drop_path
+        self._on_free_text = on_free_text
+        self._dnd_enabled = False
+        self._file_meta: dict | None = None
 
-        # Пунктирная «рамка» — Canvas + прямоугольник
-        self._outer = tk.Frame(self, bg=COLORS["border"], bd=0)
-        self._outer.pack(fill="x")
-        self._panel = tk.Frame(self._outer, bg=COLORS["info_bg"], padx=24, pady=28)
-        self._panel.pack(fill="x", padx=1, pady=1)
+        outer = tk.Frame(self, bg=COLORS["border"], bd=0)
+        outer.pack(fill="x")
+        row = tk.Frame(outer, bg=COLORS["card"], padx=10, pady=8)
+        row.pack(fill="x", padx=1, pady=1)
+        self._panel = row
 
-        self._icon = tk.Label(
-            self._panel,
-            text="⬆",
-            bg=COLORS["info_bg"],
-            fg=COLORS["accent"],
-            font=("Segoe UI", 22),
+        self.browse_btn = make_primary_button(
+            row, "Выбрать файл", self._handle_browse, padx=12, pady=5
         )
-        self._icon.pack()
+        self.browse_btn.pack(side="left")
 
+        text_host = tk.Frame(row, bg=COLORS["card"])
+        text_host.pack(side="left", fill="x", expand=True, padx=(12, 8))
+        title, hint = upload_panel_empty_copy()
         self._title = tk.Label(
-            self._panel,
-            text="Перетащите документ сюда",
-            bg=COLORS["info_bg"],
+            text_host,
+            text=title,
+            bg=COLORS["card"],
             fg=COLORS["text"],
-            font=("Segoe UI Semibold", 12),
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
         )
-        self._title.pack(pady=(8, 2))
-
+        self._title.pack(fill="x")
         self._hint = tk.Label(
-            self._panel,
-            text="PDF, DOCX, XLSX или изображение",
-            bg=COLORS["info_bg"],
+            text_host,
+            text=hint,
+            bg=COLORS["card"],
             fg=COLORS["muted"],
             font=FONT_UI_HINT,
+            anchor="w",
         )
-        self._hint.pack()
+        self._hint.pack(fill="x")
 
-        btns = tk.Frame(self._panel, bg=COLORS["info_bg"])
-        btns.pack(pady=(14, 0))
-        self.browse_btn = make_primary_button(
-            btns, "Выбрать файл", self._handle_browse, padx=16, pady=8
-        )
-        self.browse_btn.pack(side="left", padx=(0, 10))
+        right = tk.Frame(row, bg=COLORS["card"])
+        right.pack(side="right")
+        if on_free_text is not None:
+            ttk.Button(right, text="Текст…", command=on_free_text).pack(
+                side="left", padx=(0, 8)
+            )
         self.ocr_link = make_link_button(
-            btns, "Параметры OCR", self._handle_ocr, bg=COLORS["info_bg"]
+            right, "Параметры OCR", self._handle_ocr, bg=COLORS["card"]
         )
         self.ocr_link.pack(side="left")
-
-        # Hover feedback
-        for w in (self._panel, self._title, self._hint, self._icon):
-            w.bind("<Enter>", self._on_enter)
-            w.bind("<Leave>", self._on_leave)
-
-        self._try_enable_dnd()
-        self._file_meta: dict | None = None
 
     def _handle_browse(self) -> None:
         if self._on_browse:
@@ -329,71 +329,23 @@ class UploadPanel(ttk.Frame):
         if self._on_ocr_params:
             self._on_ocr_params()
 
-    def _on_enter(self, _event=None) -> None:
-        if self._file_meta:
-            return
-        self._panel.configure(bg=COLORS["accent_subtle"])
-        for w in (self._title, self._hint, self._icon):
-            w.configure(bg=COLORS["accent_subtle"])
-        self.ocr_link.configure(bg=COLORS["accent_subtle"])
-
-    def _on_leave(self, _event=None) -> None:
-        if self._file_meta:
-            return
-        self._panel.configure(bg=COLORS["info_bg"])
-        for w in (self._title, self._hint, self._icon):
-            w.configure(bg=COLORS["info_bg"])
-        self.ocr_link.configure(bg=COLORS["info_bg"])
-
     def set_empty(self) -> None:
         """Сброс к состоянию «файл не выбран»."""
         self._file_meta = None
-        self._icon.configure(text="⬆", fg=COLORS["accent"])
-        self._title.configure(text="Перетащите документ сюда")
-        self._hint.configure(text="PDF, DOCX, XLSX или изображение")
+        title, hint = upload_panel_empty_copy()
+        self._title.configure(text=title)
+        self._hint.configure(text=hint)
         self.browse_btn.configure(text="Выбрать файл")
-        self._on_leave()
-        _log.debug("UploadPanel empty", extra={"tag": "UI"})
+        _log.debug("UploadPanel empty (compact, no dnd)", extra={"tag": "UI"})
 
     def set_file(self, name: str, *, size_label: str = "", kind: str = "") -> None:
         """Показать выбранный файл."""
         self._file_meta = {"name": name, "size": size_label, "kind": kind}
-        self._icon.configure(text="📄", fg=COLORS["accent"])
         self._title.configure(text=name)
-        parts = [p for p in (kind, size_label, "готов к распознаванию") if p]
-        self._hint.configure(text=" · ".join(parts) if parts else "готов к распознаванию")
+        parts = [p for p in (kind, size_label) if p]
+        self._hint.configure(text=" · ".join(parts) if parts else "файл выбран")
         self.browse_btn.configure(text="Заменить файл")
-        self._panel.configure(bg=COLORS["info_bg"])
-        for w in (self._title, self._hint, self._icon):
-            w.configure(bg=COLORS["info_bg"])
-        self.ocr_link.configure(bg=COLORS["info_bg"])
         _log.info("UploadPanel file=%s size=%s", name, size_label, extra={"tag": "UI"})
-
-    def _try_enable_dnd(self) -> None:
-        """Опциональный drag-and-drop через tkinterdnd2."""
-        try:
-            from tkinterdnd2 import DND_FILES  # type: ignore
-
-            # Нужен TkinterDnD.Tk — если root обычный Tk, drop не сработает
-            target = self._panel
-            target.drop_target_register(DND_FILES)  # type: ignore[attr-defined]
-            target.dnd_bind("<<Drop>>", self._on_drop)  # type: ignore[attr-defined]
-            _log.info("UploadPanel DnD enabled", extra={"tag": "UI"})
-        except Exception:
-            _log.debug("UploadPanel DnD unavailable (ok)", extra={"tag": "UI"})
-
-    def _on_drop(self, event) -> None:  # noqa: ANN001
-        raw = (event.data or "").strip()
-        if not raw:
-            return
-        # Windows: {C:\path with spaces\file.pdf}
-        if raw.startswith("{") and raw.endswith("}"):
-            path = raw[1:-1]
-        else:
-            path = raw.split()[0]
-        _log.info("UploadPanel drop path=%s", path, extra={"tag": "UI"})
-        if self._on_drop_path:
-            self._on_drop_path(path)
 
 
 class EmptyState(ttk.Frame):

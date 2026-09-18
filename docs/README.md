@@ -24,8 +24,8 @@
 | `TEST_PROGRAMS.md` | Программы испытаний (S4) |
 | `REQUIREMENTS_BASE.md` | Нормы / aliases (S5) |
 | `PROTOCOL_GENERATOR_BRIDGE.md` | JSON → protocol_generator |
-| `UPDATE.md` | Обновление in-place · zip `0.9.1_20260806` |
-| `CHECKLIST_TZ70_OPERATOR.md` | Чеклист после ТЗ 70 + feedback work 06.08 |
+| `UPDATE.md` | Обновление in-place · zip `0.9.1_20260918` |
+| `CHECKLIST_TZ70_OPERATOR.md` | Чеклист после ТЗ 70 + feedback work 06.08 / 11.08 / 28.08 |
 | `client_profiles.example.yaml` | Пример локальных профилей клиентов |
 | `lab_profile.example.yaml` | Реквизиты лаборатории |
 | `План_Итерации_2.md` | Исторический план (если есть в полной копии) |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import threading
 import time
 import tkinter as tk
@@ -102,6 +103,7 @@ from ...persistence.sqlite_repo import (
     find_organization_id_by_name,
     create_organization,
     update_organization,
+    attach_organization_details,
     create_order_from_kp,
     list_orders,
     get_order_details,
@@ -123,14 +125,49 @@ from ...persistence.sqlite_repo import (
 
 _log = get_logger("ui.gui")
 
+
+def request_primary_error_text(state: object, exc: BaseException) -> str:
+    """Текст ошибки главной кнопки «Заявка»: confirm ≠ «запуск извлечения»."""
+    value = getattr(state, "value", state)
+    if value in (
+        RequestPageState.REVIEW_REQUIRED.value,
+        RequestPageState.READY_TO_CONFIRM.value,
+    ):
+        return (
+            "Не удалось сохранить организацию.\n\n"
+            f"{exc}\n\n"
+            "Марки на экране уже разобраны — не запускайте разбор письма заново.\n"
+            "Выберите заказчика из справочника (карточку с ИНН, если она уже есть) "
+            "и нажмите «Подтвердить заявку» ещё раз."
+        )
+    return f"Не удалось запустить извлечение:\n{exc}"
+
+
+def clamp_paned_sash(
+    total: int, pos: int, *, min_first: int, min_second: int
+) -> int:
+    """Не дать одной панели полностью закрыть другую (разделитель мышкой)."""
+    if total <= 0:
+        return 0
+    lo = min_first
+    hi = total - min_second
+    if hi < lo:
+        return max(0, total // 2)
+    if pos < lo:
+        return lo
+    if pos > hi:
+        return hi
+    return pos
+
+
 class PdfTabMixin:
     def _build_pdf_tab(self) -> None:
         """
         Страница «Заявки» (редизайн v0.10).
 
-        Макет (сверху вниз):
-          PageHeader → StepIndicator → UploadPanel → [OCR opts] → [warnings]
-          → Paned(Марки | Организации+контекст) → BottomActionBar
+        Макет (сверху вниз, без вертикального paned):
+          PageHeader → StepIndicator → строка файла → [OCR opts] → [warnings]
+          → Paned(Марки | Организации) с мин. шириной → BottomActionBar
 
         Бизнес-логика (extract/confirm/assistant) не дублируется — только UI.
         Состояние обновляется централизованно через ``render_request_state``.
@@ -158,15 +195,15 @@ class PdfTabMixin:
         self.validation_status_bar = tk.Frame(root, bg=COLORS["muted"], width=0, height=0)
         self.validation_status_var = tk.StringVar(master=self, value="Документ не обработан")
 
-        # Вертикальный разделитель: сверху загрузка (меньше), снизу марки/орг (больше)
-        vpaned = ttk.PanedWindow(root, orient="vertical")
-        vpaned.pack(fill="both", expand=True)
-        self._pdf_vpaned = vpaned
+        # Верх — компактный (не paned): нельзя натянуть шапку на таблицу марок
+        top_zone = ttk.Frame(root)
+        top_zone.pack(side="top", fill="x")
+        self._pdf_top_zone = top_zone
+        self._pdf_vpaned = None
 
-        top_zone = ttk.Frame(vpaned)
-        work_zone = ttk.Frame(vpaned)
-        vpaned.add(top_zone, weight=1)
-        vpaned.add(work_zone, weight=4)
+        work_zone = ttk.Frame(root)
+        work_zone.pack(fill="both", expand=True)
+        self._pdf_work_zone = work_zone
 
         # --- Page header (верх) ---
         req_no = (getattr(self, "_last_document_extraction_id", None) or 0) + 1
@@ -188,7 +225,7 @@ class PdfTabMixin:
             top_zone,
             on_browse=self._browse_pdf,
             on_ocr_params=self._toggle_pdf_opts,
-            on_drop_path=self._on_upload_drop_path,
+            on_free_text=self._run_extract_free_text,
         )
         self.upload_panel.pack(fill="x", pady=(0, 4))
 
@@ -233,7 +270,6 @@ class PdfTabMixin:
         ttk.Checkbutton(
             opts, text="Орг. в БД сразу", variable=self.save_orgs_var, style="Card.TCheckbutton"
         ).pack(side="left", padx=(8, 0))
-        ttk.Button(opts, text="Текст…", command=self._run_extract_free_text).pack(side="right")
 
         # Предупреждения валидации (компактная полоса) — в верхней зоне
         self._warn_expanded = False
@@ -280,16 +316,31 @@ class PdfTabMixin:
         )
         self.validation_warn_var = self.validation_warn_summary_var
 
-        # --- Рабочая зона: Марки | Организации (основное место на экране) ---
-        mid = ttk.PanedWindow(work_zone, orient="horizontal")
+        # --- Рабочая зона: Марки | Организации ---
+        # tk.PanedWindow: minsize, чтобы одну панель нельзя было закрыть другой
+        mid = tk.PanedWindow(
+            work_zone,
+            orient="horizontal",
+            sashwidth=6,
+            sashrelief="flat",
+            bd=0,
+            bg=COLORS["border"],
+            opaqueresize=True,
+        )
         mid.pack(fill="both", expand=True)
         self._pdf_mid_pane = mid
+        self._pdf_sash_min_left = 360
+        self._pdf_sash_min_right = 280
 
         # ---- Marks card ----
         left_border = tk.Frame(mid, bg=COLORS["border"], bd=0)
         left = tk.Frame(left_border, bg=COLORS["card"], padx=12, pady=12)
         left.pack(fill="both", expand=True, padx=1, pady=1)
-        mid.add(left_border, weight=3)
+        mid.add(
+            left_border,
+            minsize=self._pdf_sash_min_left,
+            stretch="always",
+        )
 
         marks_header = tk.Frame(left, bg=COLORS["card"])
         marks_header.pack(fill="x", pady=(0, 8))
@@ -311,6 +362,10 @@ class PdfTabMixin:
         self._btn_mark_edit.pack(side="left", padx=(0, 4))
         self._btn_mark_del = ttk.Button(mark_actions, text="Удалить", command=self._remove_draft_mark)
         self._btn_mark_del.pack(side="left", padx=(0, 4))
+        self._btn_mark_copy = ttk.Button(
+            mark_actions, text="Копировать", command=self._copy_selected_draft_mark
+        )
+        self._btn_mark_copy.pack(side="left", padx=(0, 4))
         self._btn_mark_assistant = ttk.Button(
             mark_actions,
             text="Проверить ассистентом",
@@ -347,6 +402,7 @@ class PdfTabMixin:
         tree_wrap.columnconfigure(0, weight=1)
 
         cols = (
+            "num",
             "status",
             "designation",
             "found_mark",
@@ -359,6 +415,7 @@ class PdfTabMixin:
             tree_wrap, columns=cols, show="headings", height=16, selectmode="browse"
         )
         for col, title, width, stretch in (
+            ("num", "№", 36, False),
             ("status", "Статус", 110, False),
             ("designation", "Обозначение в документе", 220, True),
             ("found_mark", "Найденная марка", 120, True),
@@ -395,6 +452,10 @@ class PdfTabMixin:
         self.marks_tree.bind("<<TreeviewSelect>>", self._on_draft_mark_select)
         self.marks_tree.bind("<Double-Button-1>", self._on_draft_mark_double_click)
         self.marks_tree.bind("<Return>", lambda _e: self._use_mark_in_calc())
+        self.marks_tree.bind("<Control-c>", self._copy_selected_draft_mark, add="+")
+        self.marks_tree.bind("<Control-C>", self._copy_selected_draft_mark, add="+")
+        self.marks_tree.bind("<Control-KeyPress>", self._on_marks_tree_ctrl_key, add="+")
+        self.marks_tree.bind("<Button-3>", self._on_marks_tree_context, add="+")
         self._marks_tree_wrap = tree_wrap
 
         self.marks_empty = EmptyState(
@@ -410,7 +471,11 @@ class PdfTabMixin:
         right_border = tk.Frame(mid, bg=COLORS["border"], bd=0)
         right_shell = tk.Frame(right_border, bg=COLORS["card"])
         right_shell.pack(fill="both", expand=True, padx=1, pady=1)
-        mid.add(right_border, weight=2)
+        mid.add(
+            right_border,
+            minsize=self._pdf_sash_min_right,
+            stretch="always",
+        )
 
         # Заголовок карточки — всегда виден
         tk.Label(
@@ -611,21 +676,12 @@ class PdfTabMixin:
         self._set_mark_action_buttons_enabled(False)
         self.render_request_state(RequestPageState.EMPTY)
 
-        # По умолчанию рабочая зона (марки/орг) ~70% высоты; верх можно тянуть мышкой
-        def _place_v_sash() -> None:
-            try:
-                pane = self._pdf_vpaned
-                h = int(pane.winfo_height() or 0)
-                if h < 200:
-                    self.after(120, _place_v_sash)
-                    return
-                pane.sashpos(0, max(120, int(h * 0.28)))
-            except tk.TclError:
-                pass
-
-        self.after(80, _place_v_sash)
+        mid.bind("<ButtonRelease-1>", self._clamp_pdf_mid_sash, add="+")
+        mid.bind("<Configure>", self._clamp_pdf_mid_sash, add="+")
         _log.info(
-            "pdf_tab: vpaned top/work + marks/orgs, default work ~70%%",
+            "pdf_tab: compact file row + marks/orgs paned minsize=%s/%s",
+            self._pdf_sash_min_left,
+            self._pdf_sash_min_right,
             extra={"tag": "UI"},
         )
 
@@ -780,8 +836,13 @@ class PdfTabMixin:
             self._run_extract_pdf()
         except Exception as exc:
             _log.exception("primary action failed: %s", exc, extra={"tag": "Заявка"})
-            messagebox.showerror("Заявка", f"Не удалось запустить извлечение:\n{exc}")
-            self.status.set("Ошибка запуска извлечения")
+            msg = request_primary_error_text(state, exc)
+            title = "Заявка"
+            messagebox.showerror(title, msg)
+            if "организац" in msg.lower():
+                self.status.set("Не удалось сохранить организацию")
+            else:
+                self.status.set("Ошибка запуска извлечения")
 
     def _on_pdf_path_changed(self) -> None:
         """Реакция на смену пути файла (browse / drop / programmatic)."""
@@ -857,9 +918,16 @@ class PdfTabMixin:
             _log.debug("INN visual invalid len=%s", len(raw), extra={"tag": "UI"})
 
     def _wire_org_suggest_combo(self, combo: ttk.Combobox, *, role: str) -> None:
-        """Подсказки из справочника organizations при вводе (Combobox)."""
+        """Подсказки из справочника organizations при вводе (Combobox).
 
-        def _refresh_values(*_a: object) -> None:
+        Важно (work 11.08 / ТЗ 73): **не** вызывать ``event_generate("<Down>")``
+        на FocusIn/KeyRelease — на Windows/ttk это открывает list из 1 пункта
+        и входит в петлю select→set→FocusIn (GUI «залипает» на поле).
+        Список открывается только стрелкой ▼ / Alt+Down оператором.
+        """
+        last_pick_key = f"_org_suggest_last_pick_{role}"
+
+        def _refresh_values(*, open_list: bool = False) -> None:
             if getattr(self, "_org_suggest_syncing", False):
                 return
             q = (combo.get() or "").strip()
@@ -868,6 +936,7 @@ class PdfTabMixin:
                     search=q or None,
                     limit=25,
                     db_path=self.db_path,
+                    exclude_placeholders=True,
                 )
             except Exception:  # noqa: BLE001
                 rows = []
@@ -891,13 +960,21 @@ class PdfTabMixin:
                 cached = self._org_suggest_cache.get(q)
                 if not cached or cached.get("name") != q:
                     self._draft_manufacturer_org_id = None
-            # показать список, если фокус в комбо и есть совпадения (иначе «поиск не работает»)
-            if names and q and len(q) >= 2:
+            # open_list только по явной просьбе (не на FocusIn) — antifreeze
+            if open_list and names and q and len(q) >= 2:
                 try:
                     if combo.focus_get() == combo:
                         combo.event_generate("<Down>")
                 except tk.TclError:
                     pass
+
+        def _on_key_release(_event: object | None = None) -> None:
+            # только обновить values, **не** открывать выпадающий список
+            _refresh_values(open_list=False)
+
+        def _on_focus_in(_event: object | None = None) -> None:
+            # тихо обновить подсказки; list не трогаем (work freeze 10.08)
+            _refresh_values(open_list=False)
 
         def _on_select(_event: object | None = None) -> None:
             name = (combo.get() or "").strip()
@@ -907,7 +984,10 @@ class PdfTabMixin:
             if row is None:
                 try:
                     found = list_organizations(
-                        search=name, limit=5, db_path=self.db_path
+                        search=name,
+                        limit=5,
+                        db_path=self.db_path,
+                        exclude_placeholders=True,
                     )
                 except Exception:  # noqa: BLE001
                     found = []
@@ -917,10 +997,33 @@ class PdfTabMixin:
                 )
             if not row:
                 return
+            from ...extraction.organization_extractor import is_placeholder_org_name
+
+            if is_placeholder_org_name(name) or is_placeholder_org_name(row.get("name")):
+                _log.info(
+                    "org suggest skip placeholder role=%s name=%r",
+                    role,
+                    name,
+                    extra={"tag": "Заявка"},
+                )
+                return
+            org_id = int(row["id"])
+            # guard: повторный select того же id (петля ttk) — без set/log
+            prev = getattr(self, last_pick_key, None)
+            if prev == (org_id, name):
+                if role == "customer" and self._draft_customer_org_id == org_id:
+                    return
+                if role == "manufacturer" and self._draft_manufacturer_org_id == org_id:
+                    return
             self._org_suggest_syncing = True
             try:
                 if role == "customer":
-                    self._draft_customer_org_id = int(row["id"])
+                    if self._draft_customer_org_id == org_id and (
+                        self.draft_customer_var.get() or ""
+                    ).strip() == (row.get("name") or name):
+                        setattr(self, last_pick_key, (org_id, name))
+                        return
+                    self._draft_customer_org_id = org_id
                     self.draft_customer_var.set(row["name"] or name)
                     inn = (row.get("inn") or "").strip()
                     if inn:
@@ -934,8 +1037,14 @@ class PdfTabMixin:
                         self.draft_customer_addr_var.set(addr)
                     self._sync_mfg_if_same_as_customer()
                 else:
-                    self._draft_manufacturer_org_id = int(row["id"])
+                    if self._draft_manufacturer_org_id == org_id and (
+                        self.draft_manufacturer_var.get() or ""
+                    ).strip() == (row.get("name") or name):
+                        setattr(self, last_pick_key, (org_id, name))
+                        return
+                    self._draft_manufacturer_org_id = org_id
                     self.draft_manufacturer_var.set(row["name"] or name)
+                setattr(self, last_pick_key, (org_id, name))
             finally:
                 self._org_suggest_syncing = False
             _log.info(
@@ -946,12 +1055,12 @@ class PdfTabMixin:
                 extra={"tag": "Заявка"},
             )
 
-        combo.bind("<KeyRelease>", lambda _e: _refresh_values())
-        combo.bind("<FocusIn>", lambda _e: _refresh_values())
+        combo.bind("<KeyRelease>", _on_key_release)
+        combo.bind("<FocusIn>", _on_focus_in)
         combo.bind("<<ComboboxSelected>>", _on_select)
-        # начальный список (недавние)
+        # начальный список (недавние) — без открытия list
         try:
-            _refresh_values()
+            _refresh_values(open_list=False)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1007,6 +1116,7 @@ class PdfTabMixin:
         for name in (
             "_btn_mark_edit",
             "_btn_mark_del",
+            "_btn_mark_copy",
         ):
             btn = getattr(self, name, None)
             if btn is not None:
@@ -1354,6 +1464,7 @@ class PdfTabMixin:
                 iid=str(idx),
                 tags=(self._mark_tree_tag(mark, has_hint=has_hint),),
                 values=(
+                    str(idx + 1),
                     self._mark_status_label(mark, idx=idx),
                     mark.mark,
                     found,
@@ -2495,6 +2606,49 @@ class PdfTabMixin:
             return accepted[0]
         return None
 
+    def _copy_selected_draft_mark(self, _event: object | None = None) -> str:
+        """Копирует обозначение выделенной марки (work 14.08, журнал #2)."""
+        entry = self._selected_draft_mark()
+        text = (entry.mark if entry else "") or ""
+        text = text.strip()
+        if not text:
+            if hasattr(self, "status"):
+                self.status.set("Выделите марку, чтобы скопировать")
+            return "break"
+        if hasattr(self, "_clipboard_set"):
+            self._clipboard_set(text)
+        else:
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+            except tk.TclError:
+                return "break"
+        if hasattr(self, "status"):
+            shown = text if len(text) <= 60 else text[:57] + "…"
+            self.status.set(f"Скопирована марка: {shown}")
+        return "break"
+
+    def _on_marks_tree_ctrl_key(self, event: tk.Event) -> str | None:
+        if int(getattr(event, "keycode", 0) or 0) == 67:  # C, в т.ч. русская раскладка
+            return self._copy_selected_draft_mark(event)
+        return None
+
+    def _on_marks_tree_context(self, event: tk.Event) -> str:
+        try:
+            row = self.marks_tree.identify_row(event.y)
+            if row:
+                self.marks_tree.selection_set(row)
+                self.marks_tree.focus(row)
+        except tk.TclError:
+            pass
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Копировать марку", command=self._copy_selected_draft_mark)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
     def _revalidate_draft(self, *, select_idx: int | None = None) -> None:
         if not self._extraction_draft:
             return
@@ -2794,8 +2948,11 @@ class PdfTabMixin:
         self, result: PdfExtractionResult
     ) -> dict[str, int | None]:
         """Confirm: customer/manufacturer → БД с fuzzy-дедупом; ИЛ пропускаем."""
+        from ...extraction.organization_extractor import (
+            is_placeholder_org_name,
+            normalize_org_name,
+        )
         from ...generation.lab_profile import is_own_lab_name
-        from ...extraction.organization_extractor import normalize_org_name
         from ...models import OrganizationExtract
 
         customer_name = (result.customer_name or "").strip()
@@ -2836,23 +2993,25 @@ class PdfTabMixin:
             address: str | None = None,
             preferred_id: int | None = None,
         ) -> int | None:
-            if not name or is_own_lab_name(name):
+            if not name or is_own_lab_name(name) or is_placeholder_org_name(name):
+                if name and is_placeholder_org_name(name):
+                    _log.info(
+                        "skip placeholder org role=%s name=%r",
+                        role,
+                        name,
+                        extra={"tag": "Заявка"},
+                    )
                 return None
             if preferred_id is not None:
                 row = get_organization_by_id(preferred_id, self.db_path)
                 if row:
+                    if is_placeholder_org_name(row.get("name")):
+                        return None
                     if inn or address:
-                        update_organization(
+                        preferred_id = attach_organization_details(
                             preferred_id,
-                            name=row["name"],
-                            address=address or row.get("address"),
-                            postal_code=row.get("postal_code"),
-                            phone=row.get("phone"),
-                            email=row.get("email"),
-                            inn=inn or row.get("inn"),
-                            kpp=row.get("kpp"),
-                            is_accredited=bool(row.get("is_accredited")),
-                            fsa_registry_number=row.get("fsa_registry_number"),
+                            inn=inn,
+                            address=address,
                             org_type=row.get("org_type") or org_type,
                             db_path=self.db_path,
                         )
@@ -2862,24 +3021,18 @@ class PdfTabMixin:
                 return None
             if decision.startswith("use:"):
                 org_id = int(decision.split(":", 1)[1])
+                row = get_organization_by_id(org_id, self.db_path)
+                if row and is_placeholder_org_name(row.get("name")):
+                    return None
                 # подтянуть реквизиты, если оператор ввёл ИНН/адрес
                 if inn or address:
-                    row = get_organization_by_id(org_id, self.db_path)
-                    if row:
-                        update_organization(
-                            org_id,
-                            name=row["name"],
-                            address=address or row.get("address"),
-                            postal_code=row.get("postal_code"),
-                            phone=row.get("phone"),
-                            email=row.get("email"),
-                            inn=inn or row.get("inn"),
-                            kpp=row.get("kpp"),
-                            is_accredited=bool(row.get("is_accredited")),
-                            fsa_registry_number=row.get("fsa_registry_number"),
-                            org_type=row.get("org_type") or org_type,
-                            db_path=self.db_path,
-                        )
+                    org_id = attach_organization_details(
+                        org_id,
+                        inn=inn,
+                        address=address,
+                        org_type=(row or {}).get("org_type") or org_type,
+                        db_path=self.db_path,
+                    )
                 return org_id
             # create
             extract = OrganizationExtract(
@@ -2934,7 +3087,7 @@ class PdfTabMixin:
 
         # Остальные org из extract (не ИЛ, не уже сохранённые роли) — без лишних вопросов
         for org in result.organizations or []:
-            if is_own_lab_name(org.name):
+            if is_own_lab_name(org.name) or is_placeholder_org_name(org.name):
                 continue
             if org.org_type == "testing_center":
                 continue
@@ -3031,6 +3184,17 @@ class PdfTabMixin:
                 extra={"tag": "Заявка"},
             )
             return extraction_id
+        except sqlite3.IntegrityError as exc:
+            _log.exception(
+                "persist extraction failed source=%s",
+                getattr(result, "source_path", None),
+                extra={"tag": "Заявка"},
+            )
+            raise ValueError(
+                "Не удалось сохранить организацию: в справочнике уже есть "
+                "карточка с тем же ИНН и названием. Выберите её из списка "
+                "и подтвердите заявку снова."
+            ) from exc
         except Exception:
             _log.exception(
                 "persist extraction failed source=%s",
@@ -3805,6 +3969,27 @@ class PdfTabMixin:
             pass
         self._extract_progress_ui = None
 
+    def _clamp_pdf_mid_sash(self, _event: object | None = None) -> None:
+        """Граница марок/организаций не уезжает в ноль."""
+        pane = getattr(self, "_pdf_mid_pane", None)
+        if pane is None:
+            return
+        try:
+            width = int(pane.winfo_width() or 0)
+            if width < 80:
+                return
+            x, y = pane.sash_coord(0)
+            new_x = clamp_paned_sash(
+                width,
+                int(x),
+                min_first=int(getattr(self, "_pdf_sash_min_left", 360)),
+                min_second=int(getattr(self, "_pdf_sash_min_right", 280)),
+            )
+            if new_x != x:
+                pane.sash_place(0, new_x, y)
+        except tk.TclError:
+            pass
+
     def _toggle_pdf_opts(self) -> None:
         """Показать/скрыть блок OCR и флагов сохранения (ссылка «Параметры OCR»)."""
         if not hasattr(self, "pdf_opts_frame"):
@@ -3815,8 +4000,9 @@ class PdfTabMixin:
             _log.debug("OCR opts collapsed", extra={"tag": "UI"})
             return
         try:
-            # Под upload_panel, над mid
-            self.pdf_opts_frame.pack(fill="x", pady=(0, 8), before=self._pdf_mid_pane)
+            self.pdf_opts_frame.pack(
+                fill="x", pady=(0, 8), after=self.upload_panel, in_=self._pdf_top_zone
+            )
         except (tk.TclError, AttributeError):
             self.pdf_opts_frame.pack(fill="x", pady=8)
         self._pdf_opts_expanded = True

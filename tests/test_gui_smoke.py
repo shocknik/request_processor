@@ -22,6 +22,19 @@ def gui_app(tmp_path):
     app.destroy()
 
 
+def test_upload_panel_copy_without_dnd() -> None:
+    from request_processor.ui.widgets.components import upload_panel_empty_copy
+    from request_processor.ui.tabs.pdf_tab import clamp_paned_sash
+
+    title, hint = upload_panel_empty_copy()
+    assert "Перетащите" not in title
+    assert "Файл не выбран" in title
+    assert "Выбрать файл" in hint
+    assert clamp_paned_sash(1000, 10, min_first=360, min_second=280) == 360
+    assert clamp_paned_sash(1000, 990, min_first=360, min_second=280) == 720
+    assert clamp_paned_sash(1000, 500, min_first=360, min_second=280) == 500
+
+
 def test_gui_starts_and_has_notebook(gui_app: RequestProcessorApp) -> None:
     assert gui_app.notebook is not None
     tabs = gui_app.notebook.tabs()
@@ -31,6 +44,10 @@ def test_gui_starts_and_has_notebook(gui_app: RequestProcessorApp) -> None:
     assert hasattr(gui_app, "page_header")
     assert hasattr(gui_app, "step_indicator")
     assert hasattr(gui_app, "upload_panel")
+    # без tkinterdnd2 не обещаем перетаскивание (work 19.08)
+    empty_title = str(gui_app.upload_panel._title.cget("text"))
+    assert "Перетащите" not in empty_title
+    assert getattr(gui_app, "_pdf_vpaned", None) is None
     assert hasattr(gui_app, "bottom_bar")
     assert hasattr(gui_app, "render_request_state")
 
