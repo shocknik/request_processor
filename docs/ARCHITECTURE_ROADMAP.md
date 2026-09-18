@@ -2,7 +2,7 @@
 
 Краткая карта для оператора и разработчика. Детали — в отдельных docs/ и Obsidian.
 
-**Статус на 2026-08-06:** S1–S5 ✅ · S6 w1+w2 ✅ · extract Queue ✅ · ТЗ 70 HITL ✅ · **work feedback 06.08** ✅ · zip `0.9.1_20260806`
+**Статус на 2026-09-18:** S1–S5 ✅ · S6 w1+w2 ✅ · extract Queue ✅ · ТЗ 70 HITL ✅ · **work feedback 06.08 / 11.08 / 28.08** ✅ · zip `0.9.1_20260918`
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -35,6 +35,8 @@
 | **2026-07-27** | Extract Queue + DOCX perf + calc filter + prod-hot marks | ✅ | UI_ARCHITECTURE, Obsidian 66 |
 | **2026-07-31** | ТЗ 70: free-text, org HITL, marks editor, lexicon, dual logs | ✅ | CHECKLIST_TZ70, Obsidian 70–71 |
 | **2026-08-06** | Work feedback: org filter, clipboard, OCR/LAN marks, splash | ✅ | UPDATE, Obsidian 72 |
+| **2026-08-14** | Combobox antifreeze, КУНРС/СП-ОК, path-hint, empty KP | ✅ | UPDATE, Obsidian 73–74 |
+| **2026-09-18** | UNIQUE org merge, СПЕЦЛАН/оптика OCR, заявка UI, журнал статусов | ✅ | UPDATE, Obsidian 76 |
 | Ops | Обновление без сноса, seed прайса, ярлык, роли БД | ✅ | UPDATE.md |
 
 ## UI-пакет

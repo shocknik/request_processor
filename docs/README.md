@@ -35,13 +35,13 @@
 ## Obsidian (только на машине разработчика)
 
 Полный журнал: `Python/Проект request-processor/`  
-Ключевые: **72** (feedback work 06.08), **70–71** (HITL + lexicon 300), **69** (версии), 41/43/44, 65–68 (июль).
+Ключевые: **76–77** (feedback 28.08), **72–73** (06/11.08), **70–71** (HITL + lexicon 300), **69** (версии).
 
 ---
 
 ## Краткая история версий
 
-### v0.9.1 (2026-07…08)
+### v0.9.1 (2026-07…09)
 
 - Развёртывание на рабочий ПК: `install.ps1`, `prepare-prod-db`, zip + `app.db`
 - LLM Ollama opt-in (`llama3.2`), GUI settings scroll
@@ -52,6 +52,8 @@
 - **2026-07-28 (debt + org + ops):** `ui/bg_job`, `ui/modal`; org-адреса без подмены чужим заводом; `db-info`/`db-role`; `VERSIONING.md`; zip `request_processor_0.9.1_20260728`; ~283 tests
 - **2026-07-31 (ТЗ 70):** free-text через bg_job; org HITL на Заявке; редактор марок; mark lexicon; dual logs; feedback journal; zip `0.9.1_20260731`
 - **2026-08-06 (work feedback):** org search casefold; clipboard Ctrl+C; document≠«стоимостью»; OCR lookalike/FRHF/LAN Cat 6 + КСВПП/КССПП; table+text marks; early splash metrics; zip `0.9.1_20260806`; **~322 tests**
+- **2026-08-14:** Combobox без залипания; КУНРС/СП-ОК; path-hint не login; КП без пустого «заказчик»; zip `0.9.1_20260814`
+- **2026-09-18:** UNIQUE org merge; дедуп СПЕЦЛАН; склейка оптики `СП-|ОКС`; компактная заявка без зоны DnD; статусы журнала; zip `0.9.1_20260918`; **349 tests**
 
 ### v0.8.x
 

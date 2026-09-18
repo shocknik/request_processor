@@ -506,9 +506,10 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | **Debt + org (28.07)** | ✅ | `bg_job`/`modal`, org-адреса без cross-factory, роли БД, VERSIONING |
 | **ТЗ 70 (31.07)** | ✅ | free-text bg_job, org HITL, редактор марок, lexicon, dual logs, feedback journal |
 | **Work feedback (06.08)** | ✅ | org search casefold, Ctrl+C, OCR/LAN/FRHF/КСВПП, splash metrics |
+| **Work 11.08 / 28.08** | ✅ | Combobox, UNIQUE org merge, СПЕЦЛАН/оптика, заявка без зоны DnD, журнал статусов |
 
 Карта S1–S5: [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md).  
-Журнал: Obsidian `Python/Проект request-processor/` (**66–72**, июль–август 2026).
+Журнал: Obsidian `Python/Проект request-processor/` (**72–77**, август–сентябрь 2026).
 
 ---
 
@@ -517,8 +518,8 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | Документ | Назначение |
 |----------|------------|
 | [INSTALL.md](INSTALL.md) | Установка на рабочий ПК |
-| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса · zip `0.9.1_20260806` |
-| [docs/CHECKLIST_TZ70_OPERATOR.md](docs/CHECKLIST_TZ70_OPERATOR.md) | Чеклист оператора (ТЗ 70 + feedback 06.08) |
+| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса · zip `0.9.1_20260918` |
+| [docs/CHECKLIST_TZ70_OPERATOR.md](docs/CHECKLIST_TZ70_OPERATOR.md) | Чеклист оператора (ТЗ 70 + feedback 06.08 / 11.08 / 28.08) |
 | [docs/VERSIONING.md](docs/VERSIONING.md) | Версии по осям (package / схема / protocol_meta / роль БД) |
 | [docs/db_profile.example.yaml](docs/db_profile.example.yaml) | Роли dev / work_copy / work |
 | [docs/UPDATE_WORK_PC_2026-07-21.md](docs/UPDATE_WORK_PC_2026-07-21.md) | Заметки конкретного релиза |
@@ -527,7 +528,7 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | [docs/TEST_PROGRAMS.md](docs/TEST_PROGRAMS.md) | Программы испытаний (S4) |
 | [docs/REQUIREMENTS_BASE.md](docs/REQUIREMENTS_BASE.md) | Нормы / aliases (S5) |
 | [docs/PROTOCOL_GENERATOR_BRIDGE.md](docs/PROTOCOL_GENERATOR_BRIDGE.md) | JSON → protocol_generator |
-| [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md) | Карта S1–S6 + 06.08 |
+| [docs/ARCHITECTURE_ROADMAP.md](docs/ARCHITECTURE_ROADMAP.md) | Карта S1–S6 + feedback 18.09 |
 | [docs/README.md](docs/README.md) | Индекс docs/ |
 | [docs/DEV_AGENT_SETUP.md](docs/DEV_AGENT_SETUP.md) | VS Code + Grok: продуктивная работа агента |
 | [AGENTS.md](AGENTS.md) | Правила для AI-агента (автозагрузка Grok) |

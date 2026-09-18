@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 ```powershell
 cd W:\request_processor_0.9.1
 powershell -ExecutionPolicy Bypass -File scripts\update.ps1 `
-  -ZipPath "$env:TEMP\request_processor_0.9.1_20260806.zip"
+  -ZipPath "W:\inbox\request_processor_0.9.1_20260918.zip"
 ```
 
 Или если уже распаковали рядом (надёжнее при проблемах с сетью):

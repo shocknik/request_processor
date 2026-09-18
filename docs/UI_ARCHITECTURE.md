@@ -18,7 +18,7 @@ ui/
     app_shell.py      # __init__(progress=…), _build_ui (sidebar + notebook)
     menubar.py        # Файл / Вид / Данные / Сервис / Справка
   tabs/
-    pdf_tab.py        # «Заявки»: extract_job + free-text bg_job; org HITL; clipboard fields
+    pdf_tab.py        # «Заявки»: compact file row (18.09, без DnD-зоны); extract Queue; org HITL
     calc_tab.py       # picker: Canvas + Checkbutton, _picker_active_category
     orgs_tab.py       # поиск org Unicode casefold (06.08)
     kp_tab.py, orders_tab.py, ...
@@ -26,7 +26,7 @@ ui/
     splash.py         # splash + progress; без ico с UNC (NAS cold start)
     clipboard.py      # Ctrl+C/V/X keycode-first (RU/EN), anti double-paste (06.08)
     sidebar.py        # Sidebar, NAV_ITEMS, SECTION_TO_TAB
-    components.py     # PageHeader, StepIndicator, UploadPanel,
+    components.py     # PageHeader, StepIndicator, UploadPanel (строка файла, не drop-зона),
                       # EmptyState, BottomActionBar, StatusBadge, CardFrame
 ```
 
