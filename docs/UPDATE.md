@@ -25,8 +25,8 @@
 
 ```powershell
 cd D:\My_projects\request_processor
-powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
-# → dist\request_processor_0.9.1_YYYYMMDD.zip
+powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -Slim
+# → dist\request_processor_0.9.1_YYYYMMDD.zip (без tests и скриптов ТУ/Ollama)
 # НЕ включайте -IncludeAppDb для обновления боя (иначе соблазн перезаписать БД)
 ```
 
@@ -34,11 +34,11 @@ powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
 
 `dist\request_processor_0.9.1_20260918.zip` (**без** `app.db`)
 
-Собрать на dev:
+Собрать на dev (для рабочего ПК — `-Slim`, без pytest и скриптов ТУ/Ollama):
 
 ```powershell
 cd D:\My_projects\request_processor
-powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
+powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -Slim
 ```
 
 **В составе 18.09 (feedback work 11.08 + 28.08, поверх 14.08):**

@@ -64,8 +64,67 @@ def test_gui_tab_titles(gui_app: RequestProcessorApp) -> None:
     assert "Журнал" not in titles
 
 
+def test_thin_tabs_do_not_import_ocr_dpi() -> None:
+    """После вычистки импортов тонкие вкладки не тянут DPI OCR."""
+    from pathlib import Path
+
+    import request_processor.ui.tabs.compare_tab as compare_tab
+    import request_processor.ui.tabs.history_tab as history_tab
+    import request_processor.ui.tabs.tests_tab as tests_tab
+
+    history_src = Path(history_tab.__file__).read_text(encoding="utf-8")
+    assert "EASYOCR_OCR_DPI" not in history_src
+    assert "get_recent_calculations" in history_src
+    for mod in (compare_tab, tests_tab):
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "EASYOCR_OCR_DPI" not in src
+        assert "SCAN_OCR_DPI" not in src
+
+
+def _menu_labels(menu) -> list[str]:
+    end = menu.index("end")
+    if end is None:
+        return []
+    labels: list[str] = []
+    for i in range(int(end) + 1):
+        try:
+            labels.append(str(menu.entrycget(i, "label")))
+        except Exception:
+            continue
+    return labels
+
+
+def test_compare_lives_in_service_menu(gui_app: RequestProcessorApp) -> None:
+    """Сравнение снимков — инструмент разработки в меню Сервис, не в сайдбаре."""
+    from request_processor.ui.widgets.sidebar import NAV_ITEMS
+
+    assert "compare" not in {item.section_id for item in NAV_ITEMS}
+    menubar = gui_app.nametowidget(gui_app.cget("menu"))
+    top_labels = _menu_labels(menubar)
+    assert "Сервис" in top_labels
+    service = None
+    end = menubar.index("end")
+    for i in range(int(end) + 1):
+        try:
+            if str(menubar.entrycget(i, "label")) == "Сервис":
+                service = gui_app.nametowidget(menubar.entrycget(i, "menu"))
+                break
+        except Exception:
+            continue
+    assert service is not None
+    assert "Сравнение снимков парсера" in _menu_labels(service)
+    # скрытый notebook по-прежнему держит вкладку (menubar её открывает)
+    titles = [gui_app.notebook.tab(tab_id, "text").strip() for tab_id in gui_app.notebook.tabs()]
+    assert "Сравнение" in titles
+
+
 def test_gui_sidebar_navigation(gui_app: RequestProcessorApp) -> None:
     """Сайдбар переключает notebook; menubar API (select) тоже работает."""
+    from request_processor.ui.widgets.sidebar import NAV_ITEMS
+
+    sidebar_ids = {item.section_id for item in NAV_ITEMS}
+    assert "compare" not in sidebar_ids
+    assert "tests" not in sidebar_ids
     gui_app.go_section("orders")
     assert gui_app.notebook.index(gui_app.notebook.select()) == gui_app.notebook.index(
         gui_app.tab_orders

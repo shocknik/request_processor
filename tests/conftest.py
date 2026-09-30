@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import pytest
 
-from request_processor.models import PdfExtractionResult
 from request_processor.logging_setup import get_logger, setup_test_logging
-
-from tests.fixture_loader import load_extraction_fixture
-
-_log = logging.getLogger("request_processor.tests")
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -77,23 +71,3 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     path = getattr(session.config, "_rp_tests_log", None)
     if path:
         log.info("tests log file: %s", path, extra={"tag": "Тесты"})
-
-
-@pytest.fixture
-def letter_periodic() -> PdfExtractionResult:
-    return load_extraction_fixture("letter_periodic_sample.json")
-
-
-@pytest.fixture
-def letter_145() -> PdfExtractionResult:
-    return load_extraction_fixture("letter_lan_sample.json")
-
-
-@pytest.fixture
-def direction_il() -> PdfExtractionResult:
-    return load_extraction_fixture("direction_sample.json")
-
-
-@pytest.fixture
-def act_sampling() -> PdfExtractionResult:
-    return load_extraction_fixture("act_sample.json")

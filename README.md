@@ -70,7 +70,7 @@
 - training_documents / labels / eval-extraction / corrections / RAG registry
 - **export/import-prod-data**, **prepare-prod-db** для переноса на рабочий ПК
 - **MarkCorrector** + fuzzy + BrandKnowledgeBase; LLM **opt-in** (Ollama, `assistant-llm-*`)
-- Снимки парсинга и вкладка **«Сравнение»**
+- Снимки парсинга: меню **Сервис → Сравнение снимков парсера** (инструмент разработки)
 - **Роли БД** (`db-info` / `db-role`): dev · work_copy · work — не путать тестовую БД с рабочей
 
 ### Тестирование
@@ -117,6 +117,8 @@ pip install -e ".[dev,ocr,cv]"
 | `ocr` | `pip install -e ".[ocr]"` | EasyOCR (fallback) |
 | `cv` | `pip install -e ".[cv]"` | opencv — препроцессинг сканов |
 | `nlp` | `pip install -e ".[nlp]"` | torch, transformers — NER (опционально) |
+
+Источник зависимостей — `pyproject.toml` (`pip install -e ".[dev,cv]"`). Отдельный `requirements.txt` не ведём.
 
 **Tesseract** (рекомендуется для PDF-сканов): [UB-Mannheim build](https://github.com/UB-Mannheim/tesseract/wiki), языки `rus` + `eng`.  
 Для **Word .docx** OCR обычно не нужен. **PyMuPDF** рендерит страницы PDF (без poppler).
@@ -350,9 +352,9 @@ request-processor export-protocol-meta --order-id 1
 | **Организации** | Справочник, дедуп/подтверждение |
 | **Программы** | Импорт ПМИ, позиции, match с прайсом |
 | **История** | Последние расчёты |
-| **Сравнение** | Снимки парсинга |
 | **Настройки** | Климат, mappings, LLM (opt-in), прочее |
 | **Справочник** | Испытания (меню **Данные**, не в sidebar) |
+| **Сравнение** | Снимки парсера (меню **Сервис**, не в sidebar) |
 
 Меню: **Файл / Вид / Данные / Сервис / Справка**. Логи: Сервис → просмотр / `data/logs/`.  
 UI-архитектура: [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md).
@@ -425,7 +427,16 @@ request-processor list-norm-documents
 request-processor list-requirements
 ```
 
-### Training, OCR, ассистент, GUI
+### GUI
+
+```powershell
+request-processor gui
+```
+
+### Команды разработки (не рабочий день оператора)
+
+Training, RAG, OCR-benchmark, снимки парсера, демо MarkCorrector, проверка Ollama.
+На рабочем ПК их можно не запускать.
 
 ```powershell
 request-processor seed-training
@@ -434,7 +445,6 @@ request-processor ocr-benchmark --pdf scan.pdf --page 1
 request-processor demo-ocr-marks --pdf scan.pdf
 request-processor assistant-llm-status
 request-processor assistant-llm-test --mark "КСнг(А)"
-request-processor gui
 ```
 
 ---

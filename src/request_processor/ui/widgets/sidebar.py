@@ -38,7 +38,6 @@ NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("orgs", "Организации", "◎", 1),
     NavItem("programs", "Программы", "⬡", 1),
     NavItem("history", "История", "↺", 2),
-    NavItem("compare", "Сравнение", "⇅", 2),
     NavItem("settings", "Настройки", "⚙", 2),
 )
 

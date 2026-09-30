@@ -109,7 +109,6 @@ $codeItems = @(
     "assets",
     "tools",
     "pyproject.toml",
-    "requirements.txt",
     "README.md",
     "INSTALL.md",
     "start_gui.bat",

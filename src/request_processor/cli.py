@@ -1,18 +1,12 @@
 """
 cli.py — точка входа командной строки (Click).
 
-Все команды проекта:
-- init-db
-- load-data
-- calculate
-- process (минимальная версия)
-- history
-
 Запуск после `pip install -e .`:
     request-processor init-db
+    request-processor --help
 
-Или без установки:
-    PYTHONPATH=src python -m cli init-db
+Команды training / RAG / ocr-benchmark / снимки парсера — для разработки,
+не для рабочего дня оператора.
 """
 
 from __future__ import annotations
@@ -72,7 +66,12 @@ def _slugify(text: str) -> str:
     text = re.sub(r"[\s_-]+", "_", text)
     return text[:60]
 
-@click.group()
+@click.group(
+    epilog=(
+        "Команды training, RAG, ocr-benchmark и снимков парсера — для разработки. "
+        "Рабочий день оператора: migrate-db, extract-pdf, calculate, generate-kp, gui."
+    ),
+)
 @click.version_option(version=__version__)
 @click.option(
     "--log-level",
@@ -83,7 +82,7 @@ def _slugify(text: str) -> str:
 )
 @click.pass_context
 def cli(ctx: click.Context, log_level: str) -> None:
-    """request_processor — расчёт заявок на испытания кабельной продукции."""
+    """Lab_request — расчёт заявок на испытания кабельной продукции."""
     setup_logging(level=log_level)
     ctx.ensure_object(dict)
     ctx.obj["log"] = get_logger("cli")
@@ -1101,7 +1100,7 @@ def ingest_training_doc_cmd(
     skip_extract: bool,
     db: str,
 ) -> None:
-    """Регистрирует документ в training_documents (Фаза 1)."""
+    """[разработка] Регистрирует документ в training_documents."""
     from .persistence.training_repo import ingest_training_document
 
     migrate_db(db)
@@ -1123,7 +1122,7 @@ def ingest_training_doc_cmd(
 @click.option("--keep-in-place", is_flag=True)
 @click.option("--db", default="data/app.db", show_default=True)
 def ingest_training_inbox_cmd(keep_in_place: bool, db: str) -> None:
-    """Пакетный ingest всех PDF/DOCX из data/training/documents/inbox/."""
+    """[разработка] Пакетный ingest PDF/DOCX из data/training/documents/inbox/."""
     from .persistence.training_repo import ingest_inbox_batch, seed_document_families
 
     migrate_db(db)
@@ -1153,7 +1152,7 @@ def import_label_cmd(
     label_type: Optional[str],
     db: str,
 ) -> None:
-    """Импортирует JSON-разметку в training_labels."""
+    """[разработка] Импортирует JSON-разметку в training_labels."""
     from .persistence.training_repo import import_label_file, resolve_document_id_for_label
 
     migrate_db(db)
@@ -1198,7 +1197,7 @@ def eval_extraction_cmd(
     ocr_engine: str,
     db: str,
 ) -> None:
-    """Сравнивает извлечённые марки с эталонами в labels/marks/."""
+    """[разработка] Сравнивает извлечённые марки с эталонами в labels/marks/."""
     from datetime import date
 
     from .config import TRAINING_EXPORTS_REPORTS_DIR
@@ -1252,7 +1251,7 @@ def ocr_benchmark_cmd(
     output_path: Optional[str],
     batch_paths: tuple[str, ...],
 ) -> None:
-    """Сравнивает OCR raw vs preprocess v1 на странице скана."""
+    """[разработка] Сравнивает OCR raw vs preprocess на странице скана."""
     from datetime import date
 
     from .config import TRAINING_EXPORTS_REPORTS_DIR
@@ -1300,7 +1299,7 @@ def ocr_benchmark_cmd(
 @click.option("--dir", "corrections_dir", default=None, type=click.Path())
 @click.option("--db", default="data/app.db", show_default=True)
 def sync_corrections_cmd(corrections_dir: Optional[str], db: str) -> None:
-    """Синхронизирует data/training/corrections/*.jsonl → training_corrections."""
+    """[разработка] Синхронизирует data/training/corrections/*.jsonl в БД."""
     from .persistence.training_repo import sync_corrections_from_dir
 
     migrate_db(db)
@@ -1326,7 +1325,7 @@ def sync_corrections_cmd(corrections_dir: Optional[str], db: str) -> None:
 )
 @click.option("--db", default="data/app.db", show_default=True)
 def index_rag_cmd(folder: str, doc_kind: Optional[str], db: str) -> None:
-    """Регистрирует файлы корпуса в rag_documents (без embeddings — Фаза 4)."""
+    """[разработка] Регистрирует файлы корпуса в rag_documents (без embeddings)."""
     from .persistence.training_repo import index_rag_folder
 
     migrate_db(db)
@@ -1341,7 +1340,7 @@ def index_rag_cmd(folder: str, doc_kind: Optional[str], db: str) -> None:
 @cli.command("seed-training")
 @click.option("--db", default="data/app.db", show_default=True)
 def seed_training_cmd(db: str) -> None:
-    """Семейства YAML → document_families; эталоны data/extracted → training."""
+    """[разработка] Семейства YAML → document_families; эталоны extracted → training."""
     from .persistence.training_repo import import_extracted_fixtures, seed_document_families
 
     migrate_db(db)
@@ -1355,7 +1354,7 @@ def seed_training_cmd(db: str) -> None:
 @click.option("--limit", default=30, show_default=True)
 @click.option("--db", default="data/app.db", show_default=True)
 def list_training_docs_cmd(label_status: Optional[str], limit: int, db: str) -> None:
-    """Список training_documents."""
+    """[разработка] Список training_documents."""
     from .persistence.training_repo import list_training_documents
 
     migrate_db(db)
@@ -1380,7 +1379,7 @@ def list_training_docs_cmd(label_status: Optional[str], limit: int, db: str) -> 
 @click.option("--limit", default=40, show_default=True)
 @click.option("--db", default="data/app.db", show_default=True)
 def list_rag_cmd(doc_kind: Optional[str], limit: int, db: str) -> None:
-    """Список rag_documents (корпус ТУ/ГОСТ/ПМИ/протоколы)."""
+    """[разработка] Список rag_documents (корпус ТУ/ГОСТ/ПМИ/протоколы)."""
     from .persistence.training_repo import list_rag_documents
 
     migrate_db(db)
@@ -1398,12 +1397,15 @@ def list_rag_cmd(doc_kind: Optional[str], limit: int, db: str) -> None:
 @cli.command("list-parse-snapshots")
 @click.option("--limit", default=50, show_default=True, type=int)
 def list_parse_snapshots_cmd(limit: int) -> None:
-    """Список сохранённых снимков парсинга (data/parse_snapshots/)."""
+    """[разработка] Список снимков парсинга (data/parse_snapshots/)."""
     from .parse_compare import list_snapshots
 
     rows = list_snapshots(limit=limit)
     if not rows:
-        click.echo("Снимков нет. Сохраните из GUI (вкладка «Сравнение») или save-parse-snapshot.")
+        click.echo(
+            "Снимков нет. Сохраните из GUI (Сервис → Сравнение снимков парсера) "
+            "или save-parse-snapshot."
+        )
         return
     for row in rows:
         click.echo(
@@ -1417,7 +1419,7 @@ def list_parse_snapshots_cmd(limit: int) -> None:
 @click.argument("snapshot_b")
 @click.option("--output", "output_path", default=None, type=click.Path(), help="JSON отчёт сравнения")
 def compare_parse_snapshots_cmd(snapshot_a: str, snapshot_b: str, output_path: Optional[str]) -> None:
-    """Сравнивает два снимка парсинга по id или пути к JSON."""
+    """[разработка] Сравнивает два снимка парсинга по id или пути к JSON."""
     from .parse_compare import compare_snapshots, load_snapshot
 
     a = load_snapshot(snapshot_a)
@@ -1444,7 +1446,7 @@ def compare_parse_snapshots_cmd(snapshot_a: str, snapshot_b: str, output_path: O
 @click.option("--notes", default="", help="Заметка")
 @click.option("--dpi", default=None, type=int)
 def save_parse_snapshot_cmd(json_path: str, label: str, notes: str, dpi: Optional[int]) -> None:
-    """Сохраняет снимок парсинга из JSON извлечения."""
+    """[разработка] Сохраняет снимок парсинга из JSON извлечения."""
     from .models import PdfExtractionResult
     from .parse_compare import save_snapshot_from_extraction
 
@@ -2162,7 +2164,7 @@ def import_prod_data_cmd(archive: str, db: str, no_sync: bool) -> None:
     help="JSON-отчёт в data/training/exports/reports/",
 )
 def demo_ocr_marks_cmd(db: str, record: bool, save_report: bool) -> None:
-    """S2.5: демо MarkCorrector (+ LLM если включён) на 3 OCR-марках.
+    """[разработка] Демо MarkCorrector (+ LLM если включён) на 3 OCR-марках.
 
     Печатает таблицу raw → suggested → source → helped (yes/partial/no).
     LLM opt-in: Настройки GUI или ASSISTANT_LLM_ENABLED=1.
@@ -2195,7 +2197,7 @@ def demo_ocr_marks_cmd(db: str, record: bool, save_report: bool) -> None:
 @cli.command("assistant-llm-status")
 @click.option("--db", default="data/app.db", show_default=True)
 def assistant_llm_status_cmd(db: str) -> None:
-    """Проверка настроек LLM и доступности Ollama."""
+    """[разработка] Проверка настроек LLM и доступности Ollama."""
     from .assistant.llm_provider import check_ollama_health
     from .persistence.sqlite_repo import get_assistant_llm_settings, migrate_db
 
@@ -2219,7 +2221,7 @@ def assistant_llm_status_cmd(db: str) -> None:
 @click.option("--db", default="data/app.db", show_default=True)
 @click.option("--enable/--no-enable", default=None, help="Принудительно вкл/выкл LLM для теста")
 def assistant_llm_test_cmd(mark: str, db: str, enable: bool | None) -> None:
-    """Тест подсказки ассистента для одной марки (детерминированный + LLM)."""
+    """[разработка] Тест подсказки ассистента для одной марки."""
     from .assistant.mark_corrector import suggest_mark_correction
     from .persistence.sqlite_repo import get_assistant_llm_settings, migrate_db, save_assistant_llm_settings
 

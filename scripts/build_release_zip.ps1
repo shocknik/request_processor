@@ -14,13 +14,19 @@
   Включить data/app.db как есть. Для prod: сначала
   request-processor prepare-prod-db --yes (прайс остаётся, марки/орг. пустые).
 
+.PARAMETER Slim
+  Боевой zip: без tests/ и без исследовательских скриптов (ТУ, Ollama, training inbox).
+  Для рабочего ПК предпочтителен -Slim.
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -Slim
   powershell -ExecutionPolicy Bypass -File scripts\build_release_zip.ps1 -IncludeAppDb
 #>
 param(
     [switch]$IncludeTrainingCorpus,
-    [switch]$IncludeAppDb
+    [switch]$IncludeAppDb,
+    [switch]$Slim
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,19 +53,32 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 $include = @(
     "src",
     "scripts",
-    "tests",
     "docs",
     "assets",
     "tools",
     "pyproject.toml",
-    "requirements.txt",
     "README.md",
     "INSTALL.md",
     "start_gui.bat",
     "start_gui_debug.bat",
     ".gitignore"
 )
+if (-not $Slim) {
+    $include += "tests"
+}
 # update.ps1 входит в scripts/ — на целевом ПК: scripts\update.ps1
+$researchScripts = @(
+    "extract_tu_text.py",
+    "inventory_tu_corpus.py",
+    "mine_tu_candidates.py",
+    "promote_tu_candidates.py",
+    "install_ollama.ps1",
+    "init_training_folders.ps1",
+    "batch_extract_inbox.ps1",
+    "batch_extract_inbox.py",
+    "_eval_s4_match.py",
+    "reorganize_packages.py"
+)
 
 foreach ($item in $include) {
     $src = Join-Path $ProjectRoot $item
@@ -71,6 +90,17 @@ foreach ($item in $include) {
         $parent = Split-Path $dst -Parent
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         Copy-Item $src $dst -Force
+    }
+}
+
+if ($Slim) {
+    $scriptsStage = Join-Path $stage "scripts"
+    foreach ($name in $researchScripts) {
+        $p = Join-Path $scriptsStage $name
+        if (Test-Path $p) {
+            Remove-Item $p -Force
+            Write-Host "  Slim: без scripts/$name"
+        }
     }
 }
 
@@ -151,7 +181,7 @@ $startLines = @(
     "",
     "## Archive contents",
     "",
-    "- src/, scripts/, tests/ - application",
+    $(if ($Slim) { "- src/, scripts/ - application (slim: без tests и скриптов ТУ/Ollama)" } else { "- src/, scripts/, tests/ - application" }),
     "- data/app.db - price + mappings; marks/orgs empty (if IncludeAppDb)",
     "- data/templates, families - Word templates, YAML families",
     "- data/*.xlsx - price Excel backup",

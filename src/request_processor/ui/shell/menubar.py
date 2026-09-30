@@ -91,7 +91,10 @@ def install_menubar(app: Any) -> tk.Menu:
     # --- Tools ---
     m_tools = tk.Menu(root_menu, tearoff=0)
     root_menu.add_cascade(label="Сервис", menu=m_tools)
-    m_tools.add_command(label="Сравнение OCR", command=lambda: go_tab("tab_compare"))
+    m_tools.add_command(
+        label="Сравнение снимков парсера",
+        command=lambda: go_tab("tab_compare"),
+    )
     m_tools.add_separator()
     m_tools.add_command(label="Настройки", command=lambda: go_tab("tab_settings"))
     m_tools.add_separator()
