@@ -137,7 +137,9 @@ _OPTICAL_SP_OK_PATTERN = re.compile(
 
 # Нумерованный список марок в письме (кириллица + латинский OCR)
 _LETTER_MARKS_BLOCK = re.compile(
-    r"(?:марк[аи]|mapkax?)\s+(?:кабел[ья]|kabena?)[:\s]+"
+    r"(?:марка[хx]|марки|марка|mapkax?)\s+"
+    r"(?:кабеля|кабели|кабель|кабел[ья]|kabena?)"
+    r"[:\s]+"
     r"(.+?)(?=Последующ|Nocnegy|С\s+уважением|Суважением|$)",
     re.IGNORECASE | re.DOTALL,
 )
@@ -633,11 +635,29 @@ def _clean_mark(raw: str) -> str:
         return mark.strip()
     # Локальные OCR-фиксы без БД (латиница→кириллица, fire-class, spacing)
     mark = normalize_mark_after_ocr(mark.strip(), known_brands=None)
+    mark = _canonicalize_ksb_ocr(mark)
     if re.match(r"^ОК[СБВКA-Za-z]", mark, re.IGNORECASE) and re.search(
         r"-[А-ЯЁA-Za-z0-9.,]{2,}", mark
     ):
         mark = "СП-" + mark
     return mark
+
+
+def _canonicalize_ksb_ocr(mark: str) -> str:
+    """Три OCR-написания одного КСБнг(А)-FRHF → одна строка. КСБК не трогаем."""
+    if re.match(r"^КСБК", mark, re.IGNORECASE):
+        return mark
+    m = re.match(
+        r"^(?:КСБннг|КСбнги|КСБнг|KCBuHr|KCburi)"
+        r"\s*\(\s*[АAаa]\s*\)\s*-\s*FRHF\s*"
+        r"(\d)\s*[xх×]\s*(\d)\s*[xх×]\s*([\d.,]+)\s*$",
+        mark.strip(),
+        re.IGNORECASE,
+    )
+    if not m:
+        return mark
+    size = m.group(3).replace(".", ",")
+    return f"КСБнг(А)-FRHF {m.group(1)}x{m.group(2)}x{size}"
 
 
 def _context_snippet(text: str, start: int, end: int, radius: int = 120) -> str:
@@ -671,6 +691,106 @@ def _add_match(
             document=doc,
         )
     )
+
+
+# После _normalize_text переводы строк уже схлопнуты в пробел, поэтому
+# пункт — это «1. …» до следующего « 2. », а не строка файла.
+_LETTER_LINE_ITEM = re.compile(
+    r"(?:^|(?<=[;\n])|(?<=\s))"
+    r"(\d{1,2})\s*[\.\)]\s+"
+    r"(.+?)"
+    r"(?=(?:\s+\d{1,2}\s*[\.\)])\s+|$)",
+    re.DOTALL,
+)
+_LETTER_QTY = re.compile(r"в\s+количестве\s+(.+)", re.IGNORECASE | re.DOTALL)
+
+
+def _format_length_note(raw: str) -> str:
+    """«272m, 100m (проверочная бухта)» → «272 м, 100 м (проверочная бухта)»."""
+    text = re.sub(r"\s+", " ", raw).strip(" ;.")
+    text = re.split(r"\s+Последующ", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    text = re.sub(
+        r"(\d+(?:[.,]\d+)?)\s*([mмMМ])\b",
+        r"\1 м",
+        text,
+    )
+    # Нормализация марок меняет кириллическую «х» на латинскую «x» во всём тексте.
+    # В примечании это не размер, а слово «бухта».
+    text = re.sub(r"бу[xх]та", "бухта", text, flags=re.IGNORECASE)
+    return text.strip(" ;.")
+
+
+def _canonicalize_letter_size_decimal(mark: str) -> str:
+    """В пункте письма размер 4x2x0.52 и 4x2x0,52 — одна марка (запятая).
+
+    Только список «марках кабеля». Обычный разбор LAN оставляет точку как в тексте:
+    тесты generic U/UTP и VicabFLEX 24x0.5 на это завязаны.
+    """
+
+    def _comma(match: re.Match[str]) -> str:
+        return match.group(0).replace(".", ",")
+
+    return re.sub(
+        r"\d+\s*[xх×]\s*\d+(?:\s*[xх×]\s*\d+[.,]\d+)?",
+        _comma,
+        mark,
+    )
+
+
+def _letter_item_parts(body: str) -> tuple[str, str | None, str | None]:
+    """Марка, ТУ и метраж одного пункта нумерованного списка."""
+    flat = re.sub(r"\s+", " ", body).strip(" ;.")
+    qty: str | None = None
+    qm = _LETTER_QTY.search(flat)
+    if qm:
+        qty = _format_length_note(qm.group(1)) or None
+        flat = flat[: qm.start()].strip(" ;,.")
+    doc: str | None = None
+    tm = _TU_TAIL_PATTERN.search(flat)
+    if tm:
+        doc = extract_document_from_text(tm.group(0)) or tm.group(0)
+        flat = flat[: tm.start()].strip(" ;,.")
+    mark = _canonicalize_letter_size_decimal(_clean_mark(flat))
+    return mark, doc, qty
+
+
+def _parse_letter_block(block: str, *, full_text: str) -> list[CableMarkMatch]:
+    items: list[CableMarkMatch] = []
+    for m in _LETTER_LINE_ITEM.finditer(block.strip()):
+        mark, doc, qty = _letter_item_parts(m.group(2))
+        if len(mark) < 5 or not is_plausible_mark(mark):
+            continue
+        body = re.sub(r"\s+", " ", m.group(2)).strip()
+        pos = full_text.find(body[:40]) if body else -1
+        context = (
+            _context_snippet(full_text, pos, pos + len(body))
+            if pos >= 0
+            else body
+        )
+        items.append(
+            CableMarkMatch(
+                mark=mark,
+                context=context,
+                document=doc,
+                line_note=qty,
+                preserve_line=True,
+            )
+        )
+    return items
+
+
+def _extract_letter_line_items(text: str) -> list[CableMarkMatch]:
+    """Пункты «1. марка … в количестве …» как есть: порядок и повторы.
+
+    Несколько OCR-проходов одного письма — берём блок с большим числом пунктов
+    (при равенстве — первый). В справочник дубли не пишет вызывающий код.
+    """
+    best: list[CableMarkMatch] = []
+    for block in _LETTER_MARKS_BLOCK.finditer(text):
+        items = _parse_letter_block(block.group(1), full_text=text)
+        if len(items) > len(best):
+            best = items
+    return best
 
 
 def _find_letter_list_marks(text: str) -> list[tuple[str, int, int, str | None]]:
@@ -734,7 +854,9 @@ def _dedupe_cable_matches(
         else:
             fixed = _clean_mark(m.mark)
         key = _mark_dedupe_key(fixed)
-        if fixed and key not in seen:
+        if not fixed:
+            continue
+        if m.preserve_line:
             seen.add(key)
             out.append(
                 CableMarkMatch(
@@ -742,6 +864,20 @@ def _dedupe_cable_matches(
                     context=m.context,
                     document=m.document,
                     requirements_raw=m.requirements_raw,
+                    line_note=m.line_note,
+                    preserve_line=True,
+                )
+            )
+            continue
+        if key not in seen:
+            seen.add(key)
+            out.append(
+                CableMarkMatch(
+                    mark=fixed,
+                    context=m.context,
+                    document=m.document,
+                    requirements_raw=m.requirements_raw,
+                    line_note=m.line_note,
                 )
             )
     return _drop_subset_marks(out)
@@ -769,7 +905,7 @@ def _drop_subset_marks(items: list[CableMarkMatch]) -> list[CableMarkMatch]:
     for i, ki in enumerate(keys):
         if not ki or i in drop:
             continue
-        if _is_catalog_line_family(items[i].mark):
+        if items[i].preserve_line or _is_catalog_line_family(items[i].mark):
             continue
         for j, kj in enumerate(keys):
             if i == j or not kj or ki == kj:
@@ -909,6 +1045,9 @@ def find_cable_marks(text: str) -> list[CableMarkMatch]:
             _add_match(matches, seen, raw, latin_safe, m.start(), m.end())
 
     normalized = _fix_ocr_confusables(base)
+    letter_lines = _extract_letter_line_items(normalized)
+    if letter_lines:
+        return letter_lines
 
     from .families.registry import get_family_registry
 
@@ -1914,6 +2053,11 @@ def extract_from_text(
         text=cleaned,
         page_count=1,
     )
+    # Нумерованное письмо уже разобрано по пунктам. Слияние с «речью»
+    # схлопывает одинаковые марки и теряет метраж — этого делать нельзя.
+    if any(m.preserve_line for m in result.cable_marks):
+        logger.info("free-text letter lines kept=%s", len(result.cable_marks))
+        return result.model_copy(update={"source_path": f"text://{label}"})
     # Доп. проход: письма/речь без «марка + размер» (КАГЭ, МГЛФ, Энергия-…FRLS)
     from .speech_text_extractor import find_speech_marks, merge_marks_prefer_richer
 

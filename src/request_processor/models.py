@@ -140,6 +140,14 @@ class CableMarkMatch(BaseModel):
         None,
         description="Сырой текст контролируемых показателей / требований из таблицы направления",
     )
+    line_note: str | None = Field(
+        None,
+        description="Метраж пункта письма («в количестве …»), не часть марки",
+    )
+    preserve_line: bool = Field(
+        False,
+        description="Пункт нумерованного списка: не схлопывать с такой же маркой",
+    )
 
 
 class CableMarkRecord(BaseModel):
@@ -383,6 +391,11 @@ class MarkValidation(BaseModel):
         None,
         description="Контролируемые показатели из таблицы направления",
     )
+    line_note: str | None = Field(
+        None,
+        description="Метраж пункта письма, если марка пришла из нумерованного списка",
+    )
+    preserve_line: bool = False
     suggested_tests: list[str] = Field(
         default_factory=list,
         description="Коды test_items, предложенные requirement_mapper",

@@ -78,6 +78,12 @@ def compute_metrics(result: PdfExtractionResult) -> SnapshotMetrics:
         score += min(0.1, 0.03 * len(result.organizations))
     if result.tables:
         score += 0.05
+    blob = " ".join(marks)
+    # Не выдавать «идеально», пока в списке живой OCR-мусор пожарного класса или КСБ.
+    if re.search(r"нг\([аa]\)\s*-\s*н[еe]\b", blob, re.IGNORECASE) or re.search(
+        r"КСБннг|КСбнги|KCBuHr|KCburi", blob
+    ):
+        score = min(score, 0.85)
     score = round(min(1.0, score), 3)
 
     return SnapshotMetrics(

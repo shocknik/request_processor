@@ -24,7 +24,7 @@
 | `TEST_PROGRAMS.md` | Программы испытаний (S4) |
 | `REQUIREMENTS_BASE.md` | Нормы / aliases (S5) |
 | `PROTOCOL_GENERATOR_BRIDGE.md` | JSON → protocol_generator |
-| `UPDATE.md` | Обновление in-place · zip `0.9.1_20260918` |
+| `UPDATE.md` | Обновление in-place · zip `0.9.1_20260930` |
 | `CHECKLIST_TZ70_OPERATOR.md` | Чеклист после ТЗ 70 + feedback work 06.08 / 11.08 / 28.08 |
 | `client_profiles.example.yaml` | Пример локальных профилей клиентов |
 | `lab_profile.example.yaml` | Реквизиты лаборатории |
@@ -53,7 +53,8 @@
 - **2026-07-31 (ТЗ 70):** free-text через bg_job; org HITL на Заявке; редактор марок; mark lexicon; dual logs; feedback journal; zip `0.9.1_20260731`
 - **2026-08-06 (work feedback):** org search casefold; clipboard Ctrl+C; document≠«стоимостью»; OCR lookalike/FRHF/LAN Cat 6 + КСВПП/КССПП; table+text marks; early splash metrics; zip `0.9.1_20260806`; **~322 tests**
 - **2026-08-14:** Combobox без залипания; КУНРС/СП-ОК; path-hint не login; КП без пустого «заказчик»; zip `0.9.1_20260814`
-- **2026-09-18:** UNIQUE org merge; дедуп СПЕЦЛАН; склейка оптики `СП-|ОКС`; компактная заявка без зоны DnD; статусы журнала; zip `0.9.1_20260918`; **349 tests**
+- **2026-09-18:** UNIQUE org merge; дедуп СПЕЦЛАН; склейка оптики `СП-|ОКС`; компактная заявка без зоны DnD; статусы журнала; zip `0.9.1_20260918`; **349 tests**. Этот zip на work **не ставить**
+- **2026-09-30:** строки заявки = пункты письма (повторы и метраж живы, OCR-двойники нет); справочник марок без дублей; `start_gui.bat` на сетевом пути; zip `0.9.1_20260930`; **367 passed, 1 skipped**
 
 ### v0.8.x
 

@@ -528,7 +528,7 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | Документ | Назначение |
 |----------|------------|
 | [INSTALL.md](INSTALL.md) | Установка на рабочий ПК |
-| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса · zip `0.9.1_20260918` |
+| [docs/UPDATE.md](docs/UPDATE.md) | Обновление без сноса · zip `0.9.1_20260930` |
 | [docs/CHECKLIST_TZ70_OPERATOR.md](docs/CHECKLIST_TZ70_OPERATOR.md) | Чеклист оператора (ТЗ 70 + feedback 06.08 / 11.08 / 28.08) |
 | [docs/VERSIONING.md](docs/VERSIONING.md) | Версии по осям (package / схема / protocol_meta / роль БД) |
 | [docs/db_profile.example.yaml](docs/db_profile.example.yaml) | Роли dev / work_copy / work |

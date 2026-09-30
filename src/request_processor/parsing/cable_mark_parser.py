@@ -251,6 +251,8 @@ def mark_validation_from_match(
         document=record.document,
         context=match.context,
         requirements_raw=match.requirements_raw,
+        line_note=match.line_note,
+        preserve_line=match.preserve_line,
         brand=record.brand,
         fire_class=record.fire_class,
         cores_count=record.cores_count,

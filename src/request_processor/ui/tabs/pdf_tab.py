@@ -342,6 +342,7 @@ class PdfTabMixin:
             "num",
             "status",
             "designation",
+            "length",
             "found_mark",
             "cores",
             "size",
@@ -355,6 +356,7 @@ class PdfTabMixin:
             ("num", "№", 36, False),
             ("status", "Статус", 110, False),
             ("designation", "Обозначение в документе", 220, True),
+            ("length", "Метраж", 150, False),
             ("found_mark", "Найденная марка", 120, True),
             ("cores", "ТПЖ", 48, False),
             ("size", "Размер", 72, False),
@@ -1404,6 +1406,7 @@ class PdfTabMixin:
                     str(idx + 1),
                     self._mark_status_label(mark, idx=idx),
                     mark.mark,
+                    mark.line_note or "",
                     found,
                     str(mark.cores_count or ""),
                     size_text,
@@ -2416,6 +2419,8 @@ class PdfTabMixin:
                 document=fields["document"].get().strip() or None,
                 context=seed.context,
                 requirements_raw=seed.requirements_raw,
+                line_note=seed.line_note,
+                preserve_line=seed.preserve_line,
                 suggested_tests=list(seed.suggested_tests or []),
                 brand=brand or None,
                 fire_class=fire or None,
@@ -2595,6 +2600,8 @@ class PdfTabMixin:
                 context=m.context,
                 document=m.document,
                 requirements_raw=m.requirements_raw,
+                line_note=m.line_note,
+                preserve_line=m.preserve_line,
             )
             for m in self._extraction_draft.marks
             if m.accepted
@@ -2660,7 +2667,14 @@ class PdfTabMixin:
         from ...models import OrganizationExtract
 
         accepted = [
-            CableMarkMatch(mark=m.mark, context=m.context, document=m.document)
+            CableMarkMatch(
+                mark=m.mark,
+                context=m.context,
+                document=m.document,
+                requirements_raw=m.requirements_raw,
+                line_note=m.line_note,
+                preserve_line=m.preserve_line,
+            )
             for m in self._extraction_draft.marks
             if m.accepted
         ]

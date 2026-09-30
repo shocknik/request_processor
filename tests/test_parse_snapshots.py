@@ -71,3 +71,45 @@ def test_compute_metrics_quality() -> None:
     )
     rich = _sample_result(["A 1x1", "B 2x2", "C 3x3"])
     assert compute_metrics(empty).quality_score < compute_metrics(rich).quality_score
+
+
+def test_ocr_twins_cannot_score_perfect() -> None:
+    """Снимок 23.09 получил 1.0 при НЕ и тройном КСБ. Так больше нельзя."""
+    clean_marks = [
+        CableMarkMatch(
+            mark=f"СПЕЦЛАН F/UTP нг(А)-HF 4x2x0,{50 + i}",
+            context="x",
+            document="ТУ 16.К99-058-2014",
+        )
+        for i in range(7)
+    ]
+    base = PdfExtractionResult(
+        source_path="data/sample.pdf",
+        source_type="pdf",
+        page_count=2,
+        text="периодические испытания " * 80,
+        cable_marks=clean_marks,
+        organizations=[
+            OrganizationExtract(name=f"ООО {i}", role="customer") for i in range(4)
+        ],
+        customer_name="ООО 0",
+        manufacturer_name="ООО НПП «Спецкабель»",
+        tables=[[["a"]]],
+        is_scanned=True,
+        ocr_used=True,
+        ocr_engine="tesseract",
+    )
+    dirty = base.model_copy(
+        update={
+            "cable_marks": [
+                *clean_marks,
+                CableMarkMatch(
+                    mark="СПЕЦЛАН F/UTP нг(А)-НЕ 4x2x0,52",
+                    context="x",
+                    document="ТУ 16.К99-058-2014",
+                ),
+            ]
+        }
+    )
+    assert compute_metrics(base).quality_score == 1.0
+    assert compute_metrics(dirty).quality_score <= 0.85

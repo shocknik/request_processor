@@ -1,7 +1,9 @@
-"""Регрессии волн A–B — обратная связь work 28.08.2026.
+"""Регрессии обратной связи work 28.08 и 28.09.2026.
 
-A: UNIQUE confirm, логин Windows, честный текст ошибки.
-B: дедуп СПЕЦЛАН, склейка оптики СП-|ОКС, копирование/нумерация марок.
+Волна C (18.09): UNIQUE confirm, логин Windows, честный текст ошибки,
+склейка оптики СП-|ОКС, копирование и нумерация марок.
+Волна A (30.09): пункты письма остаются строками заявки, метраж на строке,
+в справочнике марок дублей нет.
 """
 
 from __future__ import annotations
@@ -15,20 +17,21 @@ from request_processor.extraction.organization_extractor import (
     is_placeholder_org_name,
     normalize_org_name,
 )
+from request_processor.extraction.pdf_extractor import extract_from_text, find_cable_marks
 from request_processor.models import OrganizationExtract
 from request_processor.persistence.sqlite_repo import (
     attach_organization_details,
     create_organization,
     get_organization_by_id,
     init_db,
+    list_cable_marks,
     list_organizations,
     merge_organizations,
+    save_cable_marks_from_matches,
     save_document_extraction,
     update_organization,
     upsert_organization,
 )
-from request_processor.extraction.ocr_mark_normalizer import normalize_mark_after_ocr
-from request_processor.extraction.pdf_extractor import find_cable_marks
 from request_processor.ui.state import RequestPageState
 from request_processor.ui.tabs.pdf_tab import request_primary_error_text
 
@@ -238,22 +241,101 @@ _SPECLAN_LETTER_1610 = """
 """
 
 
-def test_speclan_letter_dedupes_to_two_sizes() -> None:
-    """B3: семь пунктов письма №1610 → две конструкции (2x2 и 4x2)."""
+def _compact_mark(mark: str) -> str:
+    return (
+        re.sub(r"\s+", "", mark.lower())
+        .replace("x", "х")
+        .replace(",", ".")
+    )
+
+
+def test_speclan_letter_keeps_seven_lines() -> None:
+    """Письмо №1610: 7 пунктов. OCR схлопнут, повторы по метражу живы."""
     marks = find_cable_marks(_SPECLAN_LETTER_1610)
     joined = " | ".join(m.mark for m in marks)
-    assert len(marks) == 2, joined
-    keys = [
-        re.sub(r"\s+", "", m.mark.lower()).replace("x", "х").replace(",", ".")
-        for m in marks
-    ]
-    assert any("2х2" in k for k in keys), joined
-    assert any("4х2" in k for k in keys), joined
+    assert len(marks) == 7, joined
+    keys = [_compact_mark(m.mark) for m in marks]
+    assert sum("2х2" in k for k in keys) == 3, joined
+    assert sum("4х2" in k for k in keys) == 4, joined
     for m in marks:
         assert "HF" in m.mark.upper(), m.mark
         compact = m.mark.upper().replace(" ", "")
         assert "5E" in compact, m.mark
-        assert "-НЕ" not in compact, m.mark
+        assert "-НЕ" not in compact and "-НF" not in m.mark, m.mark
+        assert m.line_note, m.mark
+        assert m.preserve_line
+        assert "буx" not in (m.line_note or "")
+    # Пункты 3 и 7 оба «100 м» — это две строки заявки, не семь разных метражей.
+    assert sum((m.line_note or "") == "100 м" for m in marks) == 2
+    assert any("272" in (m.line_note or "") for m in marks)
+    assert any("4100" in (m.line_note or "") for m in marks)
+    assert all("0,52" in m.mark for m in marks), joined
+
+
+_SPECLAN_LETTER_2309 = """
+Гарантийное письмо
+Просим Вас провести приемо-сдаточные испытания на следующих
+марках кабеля:
+1. СПЕЦЛАН F/UTP Cat 6 ZH нг(А)-HF 4х2х0,57 ТУ 16.К99-058-2014 в
+количестве 663m, 100m (проверочная бухта);
+2. СПЕЦЛАН F/UTP Cat 6 ZH нг(А)-HF 4х2х0,57 ТУ 16.К99-058-2014 в
+количестве 729m, 100m (проверочная бухта);
+3. СПЕЦЛАН F/UTP Cat 6 ZH нг(А)-НЕ 4х2х0,57 ТУ 16.К99-058-2014 в
+количестве 100m;
+4. СПЕЦЛАН SF/UTP cat 5e ZH нг(А)-HF 4x2x0,52 ТУ 16.К99-058-2014 в
+количестве 1190m, 100m (проверочная бухта);
+5. КСБннг(А)-FRHF1х2x0,98 ТУ 16.К99-037-2009 в количестве 150м;
+6. СПЕЦЛАН SF/UTP cat 5e ZH нг(А)-HF 4x2x0,52 ТУ 16.К99-058-2014 в
+количестве 2374m, 100m (проверочная бухта);
+7. СПЕЦЛАН F/UTP cat 5e ZH нг(А)-НЕ 4х2х0,52 ТУ 16.К99-058-2014 в
+количестве 3421 м, 100м (проверочная бухта).
+Последующую оплату гарантируем.
+"""
+
+
+def test_scan_2309_keeps_document_order_and_lengths() -> None:
+    """Скан 23.09: 7 позиций, КСБ на своём месте, НЕ не отдельная марка."""
+    marks = find_cable_marks(_SPECLAN_LETTER_2309)
+    joined = " | ".join(f"{m.mark} [{m.line_note}]" for m in marks)
+    assert len(marks) == 7, joined
+    assert _compact_mark(marks[0].mark) == _compact_mark(marks[1].mark)
+    assert "663" in (marks[0].line_note or "")
+    assert "729" in (marks[1].line_note or "")
+    assert "НЕ" not in marks[2].mark
+    assert "HF" in marks[2].mark.upper()
+    assert "1190" in (marks[3].line_note or "")
+    assert marks[4].mark == "КСБнг(А)-FRHF 1x2x0,98", marks[4].mark
+    assert "150" in (marks[4].line_note or "")
+    assert "2374" in (marks[5].line_note or "")
+    assert "3421" in (marks[6].line_note or "")
+    assert not any("КСБннг" in m.mark or "КСбнги" in m.mark for m in marks)
+
+
+def test_repeated_ocr_pass_does_not_triple_the_letter() -> None:
+    doubled = _SPECLAN_LETTER_2309 + "\n" + _SPECLAN_LETTER_2309
+    marks = find_cable_marks(doubled)
+    assert len(marks) == 7
+
+
+def test_free_text_letter_keeps_rows_and_lengths() -> None:
+    """Кнопка «Текст…» идёт через extract_from_text и не должна схлопывать пункты."""
+    result = extract_from_text(_SPECLAN_LETTER_2309)
+    marks = result.cable_marks
+    assert len(marks) == 7
+    assert marks[4].mark == "КСБнг(А)-FRHF 1x2x0,98"
+    assert all(m.line_note and m.preserve_line for m in marks)
+    assert "663" in (marks[0].line_note or "")
+    assert "150" in (marks[4].line_note or "")
+
+
+def test_letter_lines_do_not_duplicate_catalog(mem_db: Path) -> None:
+    marks = find_cable_marks(_SPECLAN_LETTER_1610)
+    stats = save_cable_marks_from_matches(marks, db_path=mem_db)
+    assert stats["errors"] == 0, stats
+    rows = list_cable_marks(limit=50, db_path=mem_db)
+    assert len(rows) == len({m.mark for m in marks})
+    assert len(rows) == 2
+    assert len(marks) == 7
 
 
 def test_optical_wrap_sp_ok_ekne() -> None:
@@ -284,6 +366,16 @@ def test_optical_wrap_frnf_m8ii() -> None:
     assert any("М8П" in m.mark.upper() or "M8P" in m.mark.upper() for m in marks), joined
 
 
+def test_start_gui_bat_survives_unc_cwd() -> None:
+    """Запуск с \\\\server\\share не должен делать cd /d в эту папку."""
+    root = Path(__file__).resolve().parents[1]
+    for name in ("start_gui.bat", "start_gui_debug.bat"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "pushd \"%~dp0\"" in text, name
+        assert "chcp 65001" in text, name
+        assert not re.search(r"(?m)^cd /d ", text), name
+
+
 def test_marks_tree_has_number_and_copy() -> None:
     """B1/B2: колонка № и копирование в исходнике вкладки Заявка."""
     src = (
@@ -296,6 +388,7 @@ def test_marks_tree_has_number_and_copy() -> None:
     )
     text = src.read_text(encoding="utf-8")
     assert '("num", "№"' in text or '("num", "№",' in text
+    assert '("length", "Метраж"' in text
     assert "_copy_selected_draft_mark" in text
     assert 'text="Копировать"' in text
 

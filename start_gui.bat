@@ -1,5 +1,9 @@
 @echo off
-cd /d "%~dp0"
+chcp 65001 >nul
+REM pushd умеет UNC (\\nas01\...\request_processor): cmd даёт временную букву.
+REM cd /d на такой путь падает в C:\Windows и пугает оператора.
+pushd "%~dp0"
+if errorlevel 1 goto :unc_fail
 
 REM Ранний визуальный сигнал: до pythonw на NAS может пройти 10+ с
 title Lab_request — запуск…
@@ -22,18 +26,17 @@ if not exist "%PY%" (
     echo ERROR: Python not found in .venv
     echo [%date% %time%] ERROR: no venv python >> "%LAUNCHLOG%"
     echo Run in PowerShell:
-    echo   cd /d "%~dp0"
+    echo   pushd "%~dp0"
     echo   py -3.11 -m venv .venv
     echo   .venv\Scripts\pip install -e ".[cv]"
-    pause
-    exit /b 1
+    goto :fail
 )
 
 if exist "%PYW%" (
     "%PYW%" -m request_processor.ui.gui 2>>"%LAUNCHLOG%"
 ) else (
     start "" "%PY%" -m request_processor.ui.gui
-    exit /b 0
+    goto :done
 )
 
 if errorlevel 1 (
@@ -45,8 +48,24 @@ if errorlevel 1 (
     echo.
     type "%LAUNCHLOG%" 2>nul
     echo.
-    pause
-    exit /b 1
+    goto :fail
 )
 
 echo [%date% %time%] start_gui.bat end ok >> "%LAUNCHLOG%"
+goto :done
+
+:unc_fail
+echo Не удалось открыть папку программы:
+echo   %~dp0
+echo Если это сетевой путь \\server\..., запустите Lab_request с буквы диска W:\
+pause
+exit /b 1
+
+:fail
+popd
+pause
+exit /b 1
+
+:done
+popd
+exit /b 0
