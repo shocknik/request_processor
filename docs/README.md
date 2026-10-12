@@ -16,6 +16,7 @@
 
 | Файл | Назначение |
 |------|------------|
+| **[AGENT_NEXT.md](./AGENT_NEXT.md)** | Где проект остановился и что делать агенту дальше |
 | **[DEV_AGENT_SETUP.md](./DEV_AGENT_SETUP.md)** | VS Code + Grok: как настроить IDE/агента |
 | **[VERSIONING.md](./VERSIONING.md)** | Версии по осям: package / схема БД / protocol_meta / роль данных |
 | **[db_profile.example.yaml](./db_profile.example.yaml)** | Метка роли БД (dev / work_copy / work) |

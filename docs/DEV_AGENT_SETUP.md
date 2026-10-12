@@ -389,6 +389,7 @@ git diff --stat
 | Документ | Содержание |
 |----------|------------|
 | [`AGENTS.md`](../AGENTS.md) | Правила для агента |
+| [`AGENT_NEXT.md`](./AGENT_NEXT.md) | Где остановились и какой шаг следующий |
 | [`README.md`](../README.md) | Продукт, CLI, архитектура |
 | [`UI_ARCHITECTURE.md`](./UI_ARCHITECTURE.md) | GUI shell |
 | [`ARCHITECTURE_ROADMAP.md`](./ARCHITECTURE_ROADMAP.md) | S1–S5 |

@@ -542,6 +542,7 @@ powershell -ExecutionPolicy Bypass -File scripts\update.ps1 -ZipPath ".\dist\req
 | [docs/README.md](docs/README.md) | Индекс docs/ |
 | [docs/DEV_AGENT_SETUP.md](docs/DEV_AGENT_SETUP.md) | VS Code + Grok: продуктивная работа агента |
 | [AGENTS.md](AGENTS.md) | Правила для AI-агента (автозагрузка Grok) |
+| [docs/AGENT_NEXT.md](docs/AGENT_NEXT.md) | Где остановились: установка на IDM23060 в `C:\Lab_request`, волну развития не начинать |
 | **GitHub** | https://github.com/shocknik/request_processor |
 | **Obsidian** | `Python/Проект request-processor/` (разработка) |
 

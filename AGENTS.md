@@ -2,6 +2,8 @@
 
 Краткие **действенные** правила. Полная картина: `README.md`, `docs/ARCHITECTURE_ROADMAP.md`, `docs/DEV_AGENT_SETUP.md`.
 
+**Сейчас (срез 2026-10-12):** до любой правки прочитать [`docs/AGENT_NEXT.md`](docs/AGENT_NEXT.md). Код 0.9.1 уже в git (письмо целиком, запуск с сетевого пути, разнесение базы по модулям). Дальше — чистая установка на рабочий ПК IDM23060 в `C:\Lab_request`, не обновление поверх `W:\` и не новая волна возможностей. Установщик на этом компьютере не запускать. Номер версии не поднимать.
+
 ## Продукт
 
 - **Имя продукта:** Lab_request  
@@ -96,6 +98,7 @@ request-processor gui
 | Протокол JSON | `docs/PROTOCOL_GENERATOR_BRIDGE.md` |
 | S1–S5 карта | `docs/ARCHITECTURE_ROADMAP.md` |
 | Как помочь агенту | `docs/DEV_AGENT_SETUP.md` |
+| Что делать дальше | `docs/AGENT_NEXT.md` |
 
 При смене публичного API/CLI/GUI — обновить README или профильный doc в том же PR.
 
