@@ -6,17 +6,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal
 
-from ..models import OrganizationExtract, OrganizationRole
+from ..models import OrganizationExtract, OrganizationRole, OrganizationType
 
-OrgType = Literal[
-    "manufacturer",
-    "certification_body",
-    "testing_center",
-    "dealer",
-    "unknown",
-]
+OrgType = OrganizationType
 
 _ROLE_LABELS: dict[str, OrganizationRole] = {
     "заказчик": "customer",
@@ -26,6 +19,8 @@ _ROLE_LABELS: dict[str, OrganizationRole] = {
     "завод": "manufacturer",
     "дилер": "dealer",
     "поставщик": "dealer",
+    "проектировщик": "customer",
+    "генпроектировщик": "customer",
     # тип (OS/ИЛ) задаётся org_type; role — customer/manufacturer/unknown
     "орган по сертификации": "customer",
     "испытательный центр": "unknown",
@@ -35,6 +30,10 @@ _ROLE_LABELS: dict[str, OrganizationRole] = {
 _ORG_TYPE_KEYWORDS: list[tuple[OrgType, re.Pattern[str]]] = [
     ("testing_center", re.compile(r"испытательн\w+\s+(?:центр|лаборатор)", re.I)),
     ("certification_body", re.compile(r"орган\w*\s+по\s+сертификац", re.I)),
+    ("designer", re.compile(
+        r"проектировщик|генпроектировщик|проектн\w+\s+(?:институт|организац|бюро|офис)",
+        re.I,
+    )),
     ("dealer", re.compile(r"\bдилер\w*\b", re.I)),
     ("manufacturer", re.compile(r"(?:кабельн\w+\s+завод|завод\w*|производител\w*|изготовител\w*)", re.I)),
 ]

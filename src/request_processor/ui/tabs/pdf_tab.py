@@ -3051,6 +3051,7 @@ class PdfTabMixin:
                 "manufacturer",
                 "certification_body",
                 "dealer",
+                "designer",
             ):
                 try:
                     from ...persistence.sqlite_repo import upsert_organization

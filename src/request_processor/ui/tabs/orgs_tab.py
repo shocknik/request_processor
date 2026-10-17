@@ -7,16 +7,23 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from ...logging_setup import get_logger
-from ..state import ORG_TYPE_LABELS, ORG_TYPE_VALUES, ExtractionDraft
 from ...persistence.sqlite_repo import (
+    create_organization,
+    delete_organization,
+    find_organization_id_by_name,
+    find_similar_organizations,
     get_organization_by_id,
     list_organizations,
-    find_similar_organizations,
-    find_organization_id_by_name,
-    create_organization,
     update_organization,
-    delete_organization,
 )
+from ..state import (
+    ORG_TYPE_LABELS,
+    ORG_TYPE_ROW_COLORS,
+    ExtractionDraft,
+    org_type_from_label,
+    org_type_tree_tag,
+)
+from ..theme import COLORS
 
 _log = get_logger("ui.gui")
 
@@ -56,6 +63,31 @@ class OrgsTabMixin:
             style="Muted.TLabel",
         ).pack(side="right")
 
+        legend = ttk.Frame(self.tab_orgs)
+        legend.pack(fill="x", pady=(0, 6))
+        ttk.Label(legend, text="Цвет по типу:", style="Muted.TLabel").pack(
+            side="left", padx=(0, 8)
+        )
+        for type_key, type_label in ORG_TYPE_LABELS.items():
+            bg = ORG_TYPE_ROW_COLORS[type_key]
+            chip = tk.Frame(
+                legend,
+                bg=bg,
+                highlightthickness=1,
+                highlightbackground=COLORS["border"],
+            )
+            chip.pack(side="left", padx=(0, 6))
+            tk.Label(
+                chip,
+                text=type_label,
+                bg=bg,
+                fg=COLORS["text"],
+                font=("Segoe UI", 8),
+                padx=8,
+                pady=1,
+            ).pack()
+        self.orgs_legend = legend
+
         cols = ("name", "inn", "org_type", "accredited", "address", "phone", "fsa")
         self.orgs_tree = ttk.Treeview(
             self.tab_orgs,
@@ -75,6 +107,8 @@ class OrgsTabMixin:
         ):
             self.orgs_tree.heading(col, text=title, anchor=anchor)
             self.orgs_tree.column(col, width=width, anchor=anchor, stretch=stretch, minwidth=width)
+        for type_key, color in ORG_TYPE_ROW_COLORS.items():
+            self.orgs_tree.tag_configure(org_type_tree_tag(type_key), background=color)
         self.orgs_tree.pack(fill="both", expand=True)
         self.orgs_tree.bind("<Double-Button-1>", lambda _e: self._edit_selected_organization())
         self.orgs_tree.bind("<Button-3>", self._on_orgs_context_menu)
@@ -153,39 +187,36 @@ class OrgsTabMixin:
             search = self.orgs_search_var.get().strip() or None
         rows = list_organizations(search=search, limit=500, db_path=self.db_path)
         for row in rows:
-            org_type = ORG_TYPE_LABELS.get(row.get("org_type") or "unknown", row.get("org_type"))
+            type_code = row.get("org_type") or "unknown"
+            org_type = ORG_TYPE_LABELS.get(type_code, type_code)
+            type_tag = org_type_tree_tag(type_code)
             addr = row.get("address") or ""
             if row.get("postal_code"):
                 addr = f"{row['postal_code']}, {addr}".strip(", ")
+            values = (
+                row["name"],
+                row.get("inn") or "",
+                org_type,
+                "да" if row.get("is_accredited") else "нет",
+                addr[:80],
+                row.get("phone") or "",
+                row.get("fsa_registry_number") or "",
+            )
             try:
                 self.orgs_tree.insert(
                     "",
                     "end",
                     iid=str(row["id"]),
-                    values=(
-                        row["name"],
-                        row.get("inn") or "",
-                        org_type,
-                        "да" if row.get("is_accredited") else "нет",
-                        addr[:80],
-                        row.get("phone") or "",
-                        row.get("fsa_registry_number") or "",
-                    ),
+                    values=values,
+                    tags=(type_tag,),
                 )
             except tk.TclError:
                 # iid уже есть — вставить без iid
                 self.orgs_tree.insert(
                     "",
                     "end",
-                    values=(
-                        row["name"],
-                        row.get("inn") or "",
-                        org_type,
-                        "да" if row.get("is_accredited") else "нет",
-                        addr[:80],
-                        row.get("phone") or "",
-                        row.get("fsa_registry_number") or "",
-                    ),
+                    values=values,
+                    tags=(type_tag,),
                 )
         n = len(rows)
         if hasattr(self, "orgs_search_count_var"):
@@ -249,7 +280,11 @@ class OrgsTabMixin:
                 master=dialog, value=row.get("fsa_registry_number") or ""
             ),
             "org_type": tk.StringVar(
-                master=dialog, value=row.get("org_type") or "unknown"
+                master=dialog,
+                value=ORG_TYPE_LABELS.get(
+                    row.get("org_type") or "unknown",
+                    ORG_TYPE_LABELS["unknown"],
+                ),
             ),
             "is_accredited": tk.BooleanVar(
                 master=dialog, value=bool(row.get("is_accredited"))
@@ -279,7 +314,7 @@ class OrgsTabMixin:
         ttk.Combobox(
             form,
             textvariable=fields["org_type"],
-            values=ORG_TYPE_VALUES,
+            values=list(ORG_TYPE_LABELS.values()),
             state="readonly",
             width=28,
         ).grid(row=r, column=1, sticky="w", pady=5)
@@ -321,7 +356,7 @@ class OrgsTabMixin:
                 kpp=fields["kpp"].get().strip() or None,
                 is_accredited=bool(fields["is_accredited"].get()),
                 fsa_registry_number=fields["fsa_registry_number"].get().strip() or None,
-                org_type=fields["org_type"].get(),
+                org_type=org_type_from_label(fields["org_type"].get()),
             )
 
             if is_new:

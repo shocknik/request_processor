@@ -60,11 +60,14 @@ def test_document_pack_folder(db_with_order: tuple[Path, int], tmp_path: Path) -
     assert pack_dir.is_dir()
     names = {Path(f).name for f in pack["files"]}
     assert any(n.startswith("Заявка") for n in names)
-    assert any("Протокол" in n for n in names)
+    assert not any("Протокол" in n for n in names)
     assert "summary.json" in names
     assert "README.txt" in names
     readme = (pack_dir / "README.txt").read_text(encoding="utf-8")
     assert "КП: приложен" in readme or "КП_" in "\n".join(names)
+    assert "Макет протокола в пакет не входит" in readme
+    summary = (pack_dir / "summary.json").read_text(encoding="utf-8")
+    assert '"protocol_path": null' in summary
 
 
 def test_document_pack_without_kp(tmp_path: Path) -> None:

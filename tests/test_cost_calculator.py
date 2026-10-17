@@ -18,6 +18,7 @@ from request_processor.persistence.sqlite_repo import (
     init_db,
     insert_test_item,
     migrate_db,
+    sync_test_rule_types,
 )
 from request_processor.models import TestItem as PriceTestItem
 
@@ -110,6 +111,57 @@ def test_normalize_test_quantities_merges_duplicates() -> None:
 def test_optical_infer_per_core() -> None:
     rule, _ = infer_rule_type("Измерение затухания оптического волокна (одного)", "Оптические параметры")
     assert rule == "per_core"
+
+
+def test_coupling_and_shielding_are_fixed_not_per_pair() -> None:
+    """Журнал #13: СС, ЗЭ, ЗИ — только базовая ставка, без × пар."""
+    for name, code in (
+        ("Измерение сопротивления связи", "измерение_сопротивления_связи"),
+        ("Измерение затухания экранирования", "измерение_затухания_экранирования"),
+        ("Измерение затухания излучения", "измерение_затухания_излучения"),
+    ):
+        rule, _ = infer_rule_type(name, "Электрические параметры ВЧ", code)
+        assert rule == "fixed", name
+        rule_by_name, _ = infer_rule_type(name, "Электрические параметры ВЧ")
+        assert rule_by_name == "fixed", name
+    cap, _ = infer_rule_type("Измерение емкости/индуктивности", "Электрические параметры ВЧ")
+    assert cap == "per_group"
+    wave, _ = infer_rule_type(
+        "Измерение затухания и/или волнового методом ХХ и КЗ на одной частоте",
+        "Электрические параметры ВЧ",
+    )
+    assert wave == "per_group"
+
+
+def test_coupling_shielding_cost_ignores_pair_count(price_db: Path) -> None:
+    """4 пары и 2 пары дают одну и ту же цену СС/ЗЭ/ЗИ (журнал #13)."""
+    items = (
+        ("измерение_сопротивления_связи", "Измерение сопротивления связи", 18000),
+        ("измерение_затухания_экранирования", "Измерение затухания экранирования", 18000),
+        ("измерение_затухания_излучения", "Измерение затухания излучения", 21000),
+    )
+    for code, name, cost in items:
+        insert_test_item(
+            PriceTestItem(
+                code=code,
+                name=name,
+                base_cost=cost,
+                category="Электрические параметры ВЧ",
+                rule_type="per_group",
+            ),
+            price_db,
+        )
+    sync_test_rule_types(price_db)
+    codes = [code for code, _, _ in items]
+    four = calculate_cost("КВПЭнг(А)-HF 4х2х0,52", codes, db_path=price_db, apply_minimum=False)
+    two = calculate_cost("КВПЭнг(А)-HF 2х2х0,52", codes, db_path=price_db, apply_minimum=False)
+    by_name_four = {line.test_name: line for line in four.lines}
+    by_name_two = {line.test_name: line for line in two.lines}
+    for _, name, cost in items:
+        assert by_name_four[name].multiplier == 1.0
+        assert by_name_two[name].final_cost == float(cost)
+        assert by_name_four[name].final_cost == by_name_two[name].final_cost
+    assert four.total_cost_without_vat == two.total_cost_without_vat
 
 
 def test_sample_complexity_armor_and_cores() -> None:

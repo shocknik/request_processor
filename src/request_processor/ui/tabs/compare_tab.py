@@ -9,6 +9,7 @@ from ...logging_setup import get_logger
 from ..theme import (
     COLORS,
 )
+from ..widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.gui")
 
@@ -52,6 +53,7 @@ class CompareTabMixin:
         for key, (title, width) in headings.items():
             self.compare_tree.heading(key, text=title)
             self.compare_tree.column(key, width=width, stretch=key in ("label", "id"))
+        configure_zebra(self.compare_tree)
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.compare_tree.yview)
         self.compare_tree.configure(yscrollcommand=scroll.set)
         self.compare_tree.pack(side="left", fill="both", expand=True)
@@ -77,7 +79,7 @@ class CompareTabMixin:
         self._compare_snapshots_cache = list_snapshots(limit=100)
         for item in self.compare_tree.get_children():
             self.compare_tree.delete(item)
-        for row in self._compare_snapshots_cache:
+        for i, row in enumerate(self._compare_snapshots_cache):
             self.compare_tree.insert(
                 "",
                 "end",
@@ -91,6 +93,7 @@ class CompareTabMixin:
                     row.get("marks_count", 0),
                     f"{float(row.get('quality_score') or 0):.2f}",
                 ),
+                tags=zebra_tags(i),
             )
 
     def _save_parse_snapshot(self) -> None:

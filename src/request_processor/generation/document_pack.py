@@ -4,8 +4,9 @@
 Собирает в одну папку:
   - КП (копия, если есть)
   - заявка по форме (генерирует при отсутствии)
-  - макет протокола
   - summary.json (снимок для обучения/аудита)
+
+Макет протокола Word в пакет не входит (журнал #16), пока нет нормального макета.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from ..config import GENERATED_DIR
 from ..logging_setup import get_logger
 from ..persistence.sqlite_repo import DB_PATH_DEFAULT, get_order_details
 from .application_generator import generate_application_from_order
-from .protocol_generator import generate_protocol_draft_from_order
 
 _log = get_logger("generation.document_pack")
 
@@ -195,29 +195,6 @@ def build_document_pack(
         raise
     files.append(str(app_path))
 
-    # Макет протокола
-    try:
-        protocol_path = generate_protocol_draft_from_order(
-            order_id,
-            output_path=pack_dir / f"Протокол_макет_заказ{order_id}_{stamp}.docx",
-            db_path=db_path,
-        )
-        _log.info(
-            "pack step protocol → %s size=%s",
-            protocol_path.name,
-            protocol_path.stat().st_size if protocol_path.exists() else 0,
-            extra={"tag": "Пакет"},
-        )
-    except Exception as exc:
-        _log.exception(
-            "pack step protocol failed order_id=%s: %s",
-            order_id,
-            exc,
-            extra={"tag": "Пакет"},
-        )
-        raise
-    files.append(str(protocol_path))
-
     # Технический снимок (JSON) — для аудита и обучения
     summary = {
         "order_id": order_id,
@@ -231,12 +208,12 @@ def build_document_pack(
         "source_document": details.get("source_document"),
         "kp_output_path": details.get("kp_output_path"),
         "application_path": str(app_path),
-        "protocol_path": str(protocol_path),
+        "protocol_path": None,
         "files": [Path(f).name for f in files],
         "kp_attached": kp_attached,
         "note": (
-            "Пакет v1: заявка + КП (если был) + макет протокола + JSON. "
-            "Набор выдержек из ТУ/ПМИ — в следующих итерациях (rag_corpus)."
+            "Пакет: заявка + КП (если был) + JSON. "
+            "Макет протокола Word пока не формируется."
             + (f" {kp_note}" if kp_note else "")
         ),
     }
@@ -265,8 +242,9 @@ def build_document_pack(
         readme_lines.extend(["КП: приложен (копия из заказа).", ""])
     readme_lines.extend(
         [
-            "Макет протокола — черновик для доработки оператором.",
-            "Проверьте реквизиты, НД, объём испытаний и результаты.",
+            "Макет протокола в пакет не входит — до появления нормального макета.",
+            "JSON для protocol_generator: кнопка «JSON → protocol_generator» в заказах.",
+            "Проверьте реквизиты, НД и объём испытаний.",
         ]
     )
     readme.write_text("\n".join(readme_lines), encoding="utf-8")

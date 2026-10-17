@@ -60,12 +60,32 @@ _PER_CORE_KEYWORDS = (
     "сопротивлен",
 )
 
-# Сопротивления ВЧ на пару/связь — per_group
+# Сопротивления ВЧ на пару/связь — per_group, кроме СС / ЗЭ / ЗИ.
 _PER_GROUP_RESISTANCE_HINTS = (
     "связи",
     "экранирован",
     "излучен",
 )
+
+# СС, ЗЭ, ЗИ — только базовая ставка, не × пары (журнал #13).
+_FIXED_RATE_CODES = frozenset(
+    {
+        "измерение_сопротивления_связи",
+        "измерение_затухания_экранирования",
+        "измерение_затухания_излучения",
+    }
+)
+
+
+def _is_fixed_rate_rf_name(name_l: str) -> bool:
+    """Сопротивление связи / затухание экранирования / излучения — не × пары."""
+    if "сопротивлен" in name_l and "связ" in name_l:
+        return True
+    if "затухан" in name_l and "экранир" in name_l:
+        return True
+    if "затухан" in name_l and "излучен" in name_l:
+        return True
+    return False
 
 
 def _climatic_spec_by_code(code: str) -> dict[str, Any] | None:
@@ -113,8 +133,11 @@ def infer_rule_type(
     - per_core: электрические сопротивления × количество жил
     - per_group: ёмкость, индуктивность, затухание, волновое × количество пар
     - time_based: климатические испытания
-    - fixed: остальное
+    - fixed: остальное; также СС, ЗЭ, ЗИ (связь, экранирование, излучение)
     """
+    if code and code in _FIXED_RATE_CODES:
+        return "fixed", {}
+
     if code and code in CLIMATIC_CODES:
         spec = _climatic_spec_by_code(code)
         if spec:
@@ -137,6 +160,9 @@ def infer_rule_type(
 
     if "оптическ" in name_l and "волокн" in name_l:
         return "per_core", {}
+
+    if _is_fixed_rate_rf_name(name_l):
+        return "fixed", {}
 
     if any(k in name_l for k in _PER_GROUP_KEYWORDS):
         return "per_group", {}

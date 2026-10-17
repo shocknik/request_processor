@@ -12,7 +12,7 @@ from ..extraction.organization_extractor import (
     is_placeholder_org_name,
     normalize_org_name,
 )
-from ..models import OrganizationExtract
+from ..models import ORGANIZATION_TYPES, OrganizationExtract
 from .db import DB_PATH_DEFAULT, _log, get_connection
 
 def upsert_organization(
@@ -249,13 +249,7 @@ def create_organization(
         kpp=kpp,
         is_accredited=is_accredited,
         fsa_registry_number=fsa_registry_number,
-        org_type=org_type if org_type in (
-            "manufacturer",
-            "certification_body",
-            "testing_center",
-            "dealer",
-            "unknown",
-        ) else "unknown",
+        org_type=org_type if org_type in ORGANIZATION_TYPES else "unknown",
         role="unknown",
         confidence=1.0,
     )
@@ -367,6 +361,7 @@ def save_organizations_from_extraction(
             "manufacturer",
             "certification_body",
             "dealer",
+            "designer",
         ):
             # testing_center чужой — можно сохранить справочно, без ролей заказа
             if org.org_type == "testing_center":
@@ -380,7 +375,7 @@ def save_organizations_from_extraction(
             manufacturer_id = org_id
         if (
             customer_id is None
-            and org.org_type == "certification_body"
+            and org.org_type in ("certification_body", "designer")
             and not is_own_lab_name(org.name)
         ):
             customer_id = org_id

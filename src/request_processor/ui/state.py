@@ -20,9 +20,39 @@ ORG_TYPE_LABELS: dict[str, str] = {
     "certification_body": "Орган по сертификации",
     "testing_center": "Испытательный центр",
     "dealer": "Дилер",
+    "designer": "Проектировщик",
     "unknown": "Не указан",
 }
 ORG_TYPE_VALUES = list(ORG_TYPE_LABELS.keys())
+
+# Фон строки журнала организаций (журнал #14). Пастель, читаемый чёрный текст.
+ORG_TYPE_ROW_COLORS: dict[str, str] = {
+    "manufacturer": "#DBEAFE",
+    "certification_body": "#EDE9FE",
+    "testing_center": "#D1FAE5",
+    "dealer": "#FFEDD5",
+    "designer": "#FCE7F3",
+    "unknown": "#F3F4F6",
+}
+
+
+def org_type_from_label(label: str | None) -> str:
+    """Код типа из подписи комбобокса или уже сохранённого ключа."""
+    raw = (label or "").strip()
+    if raw in ORG_TYPE_LABELS:
+        return raw
+    for key, text in ORG_TYPE_LABELS.items():
+        if text == raw:
+            return key
+    return "unknown"
+
+
+def org_type_tree_tag(org_type: str | None) -> str:
+    """Тег ttk.Treeview для строки журнала по коду типа организации."""
+    key = (org_type or "unknown").strip() or "unknown"
+    if key not in ORG_TYPE_LABELS:
+        key = "unknown"
+    return f"orgtype_{key}"
 
 
 class RequestPageState(str, Enum):

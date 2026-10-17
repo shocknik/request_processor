@@ -28,6 +28,7 @@ from ...persistence.sqlite_repo import (
     update_test_mapping,
     delete_test_mapping,
 )
+from ..widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.gui")
 
@@ -346,6 +347,7 @@ class SettingsTabMixin:
         ):
             self.mappings_tree.heading(col, text=title, anchor=anchor)
             self.mappings_tree.column(col, width=width, anchor=anchor)
+        configure_zebra(self.mappings_tree)
         map_scroll = ttk.Scrollbar(map_tree_row, orient="vertical", command=self.mappings_tree.yview)
         self.mappings_tree.configure(yscrollcommand=map_scroll.set)
         self.mappings_tree.pack(side="left", fill="x", expand=True)
@@ -581,6 +583,7 @@ class SettingsTabMixin:
             self.mappings_tree.delete(item)
         search = self.mappings_search_var.get().strip().lower() if hasattr(self, "mappings_search_var") else ""
         rows = list_test_mappings(limit=500, db_path=self.db_path)
+        shown = 0
         for row in rows:
             pattern = row.get("requirement_pattern") or ""
             code = row.get("test_code") or ""
@@ -592,7 +595,9 @@ class SettingsTabMixin:
                 "end",
                 iid=str(row["id"]),
                 values=(pattern, code, row.get("usage_count", 0), note),
+                tags=zebra_tags(shown),
             )
+            shown += 1
 
     def _selected_mapping_id(self) -> int | None:
         sel = self.mappings_tree.selection()

@@ -194,7 +194,7 @@
     "base_cost": 18000.0,
     "category": "Электрические параметры ВЧ",
     "method": "ГОСТ Р 54429-2011\nГОСТ Р 58416-2019",
-    "rule_type": "per_group",
+    "rule_type": "fixed",
     "rule_params": {}
   },
   {
@@ -203,7 +203,7 @@
     "base_cost": 18000.0,
     "category": "Электрические параметры ВЧ",
     "method": "ГОСТ Р 54429-2011\nГОСТ Р 58416-2019",
-    "rule_type": "per_group",
+    "rule_type": "fixed",
     "rule_params": {}
   },
   {
@@ -212,7 +212,7 @@
     "base_cost": 21000.0,
     "category": "Электрические параметры ВЧ",
     "method": "ГОСТ Р 54429-2011\nГОСТ Р 58416-2019",
-    "rule_type": "per_group",
+    "rule_type": "fixed",
     "rule_params": {}
   },
   {

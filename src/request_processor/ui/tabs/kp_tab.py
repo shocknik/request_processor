@@ -7,20 +7,21 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
-from ...logging_setup import get_logger
 from ...extraction.test_type_extractor import (
     TEST_TYPE_OPTIONS,
     build_kp_subject,
 )
-from ..theme import (
-    COLORS,
-)
 from ...generation.kp_generator import format_money, generate_kp_from_db, proposal_from_calculations
+from ...logging_setup import get_logger
 from ...persistence.sqlite_repo import (
     get_calculations_for_kp,
     get_document_pack_settings,
     create_order_from_kp,
 )
+from ..theme import (
+    COLORS,
+)
+from ..widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.gui")
 
@@ -135,6 +136,7 @@ class KpTabMixin:
         ):
             self.kp_calc_tree.heading(col, text=title)
             self.kp_calc_tree.column(col, width=width, anchor=anchor)
+        configure_zebra(self.kp_calc_tree)
         self.kp_calc_tree.pack(fill="both", expand=True)
         self.kp_calc_tree.bind("<<TreeviewSelect>>", lambda _e: self._update_kp_preview())
         self.kp_calc_tree.bind("<Double-Button-1>", lambda _e: self._run_generate_kp())
@@ -165,7 +167,7 @@ class KpTabMixin:
     def _load_kp_calculations(self) -> None:
         for item in self.kp_calc_tree.get_children():
             self.kp_calc_tree.delete(item)
-        for row in get_calculations_for_kp(limit=100, db_path=self.db_path):
+        for i, row in enumerate(get_calculations_for_kp(limit=100, db_path=self.db_path)):
             self.kp_calc_tree.insert(
                 "",
                 "end",
@@ -177,6 +179,7 @@ class KpTabMixin:
                     f"{row['total_cost_with_vat']:.2f}",
                     row["created_at"][:16],
                 ),
+                tags=zebra_tags(i),
             )
         self._update_kp_preview()
 

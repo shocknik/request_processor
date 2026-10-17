@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from ...logging_setup import get_logger
+from ..widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.gui")
 
@@ -53,6 +54,7 @@ class ProgramsTabMixin:
         ):
             self.programs_tree.heading(col, text=title)
             self.programs_tree.column(col, width=w, anchor="w")
+        configure_zebra(self.programs_tree)
         self.programs_tree.pack(fill="both", expand=True)
         self.programs_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_program_details())
 
@@ -71,6 +73,7 @@ class ProgramsTabMixin:
         ):
             self.program_items_tree.heading(col, text=title)
             self.program_items_tree.column(col, width=w, anchor="w")
+        configure_zebra(self.program_items_tree)
         self.program_items_tree.pack(fill="both", expand=True)
         self.program_info_var = tk.StringVar(value="Выберите программу")
         ttk.Label(right, textvariable=self.program_info_var, style="Muted.TLabel").pack(
@@ -112,7 +115,9 @@ class ProgramsTabMixin:
             if hasattr(self, "programs_search_var")
             else None
         )
-        for row in list_test_programs(search=search, limit=200, db_path=self.db_path):
+        for i, row in enumerate(
+            list_test_programs(search=search, limit=200, db_path=self.db_path)
+        ):
             self.programs_tree.insert(
                 "",
                 "end",
@@ -124,6 +129,7 @@ class ProgramsTabMixin:
                     (row.get("cable_mark_text") or "—")[:40],
                     (row.get("name") or "")[:80],
                 ),
+                tags=zebra_tags(i),
             )
 
     def _show_program_details(self) -> None:
@@ -155,7 +161,7 @@ class ProgramsTabMixin:
             f"ТУ: {prog.get('tu_ref') or '—'}  |  "
             f"{(prog.get('source_path') or '')[-40:]}"
         )
-        for it in items:
+        for i, it in enumerate(items):
             self.program_items_tree.insert(
                 "",
                 "end",
@@ -166,6 +172,7 @@ class ProgramsTabMixin:
                     (it.get("method_clause") or "")[:20],
                     it.get("price_test_code") or "—",
                 ),
+                tags=zebra_tags(i),
             )
 
     def _import_program_docx(self) -> None:

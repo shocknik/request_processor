@@ -23,6 +23,7 @@ from ..persistence.sqlite_repo import (
 )
 from .modal import create_modal, present_modal
 from .theme import COLORS
+from .widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.feedback")
 
@@ -112,6 +113,7 @@ def open_feedback_journal(
     ):
         tree.heading(col, text=title)
         tree.column(col, width=w, stretch=stretch, anchor="w")
+    configure_zebra(tree)
     ysb = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=ysb.set)
     tree.grid(row=0, column=0, sticky="nsew")
@@ -128,7 +130,7 @@ def open_feedback_journal(
             _log.exception("list feedback: %s", exc)
             messagebox.showerror("Журнал", f"Не удалось загрузить: {exc}", parent=dlg)
             return
-        for r in rows:
+        for i, r in enumerate(rows):
             created = (r.get("created_at") or "")[:19].replace("T", " ")
             tree.insert(
                 "",
@@ -143,6 +145,7 @@ def open_feedback_journal(
                     r.get("priority") or "",
                     (r.get("title") or "")[:80],
                 ),
+                tags=zebra_tags(i),
             )
 
     def on_add() -> None:

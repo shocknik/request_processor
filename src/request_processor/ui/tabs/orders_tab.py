@@ -16,6 +16,7 @@ from ...persistence.sqlite_repo import (
     list_test_applications,
     delete_order,
 )
+from ..widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.gui")
 
@@ -40,7 +41,6 @@ class OrdersTabMixin:
         )
         orders_more = ttk.Menubutton(toolbar, text="Ещё ▾")
         om = tk.Menu(orders_more, tearoff=0)
-        om.add_command(label="Макет протокола (простой)", command=self._generate_order_protocol)
         om.add_command(label="Открыть КП", command=self._open_selected_order_kp)
         om.add_command(label="Открыть заявку", command=self._open_selected_order_application)
         om.add_separator()
@@ -75,6 +75,7 @@ class OrdersTabMixin:
         ):
             self.orders_tree.heading(col, text=title, anchor=anchor)
             self.orders_tree.column(col, width=width, anchor=anchor)
+        configure_zebra(self.orders_tree)
         self.orders_tree.pack(fill="both", expand=True)
         self.orders_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_order_details())
         self.orders_tree.bind("<Double-Button-1>", lambda _e: self._open_selected_order_kp())
@@ -108,7 +109,7 @@ class OrdersTabMixin:
             "completed": "Завершён",
         }
         rows = list_orders(limit=200, db_path=self.db_path)
-        for row in rows:
+        for i, row in enumerate(rows):
             status = status_labels.get(row.get("status") or "", row.get("status") or "")
             if row.get("application_path"):
                 status = f"{status} · заявка" if status else "Заявка готова"
@@ -124,6 +125,7 @@ class OrdersTabMixin:
                     f"{float(row.get('total_with_vat') or 0):,.2f}".replace(",", " "),
                     status,
                 ),
+                tags=zebra_tags(i),
             )
         _log.info(
             "orders table loaded n=%s first_ids=%s",
@@ -417,64 +419,11 @@ class OrdersTabMixin:
             tag="Заявка",
         )
 
-    def _generate_order_protocol(self) -> None:
-        order_id = self._get_selected_order_id()
-        if order_id is None:
-            return
-        self.status.set("Формирование макета протокола…")
-        self.update_idletasks()
-        db_path = self.db_path
-        _log.info("protocol draft start order_id=%s", order_id, extra={"tag": "Протокол"})
-
-        from ..bg_job import run_bg_job
-
-        def work() -> Path:
-            from ...generation.protocol_generator import generate_protocol_draft_from_order
-
-            return generate_protocol_draft_from_order(order_id, db_path=db_path)
-
-        def on_ok(saved_path: Path) -> None:
-            _log.info(
-                "protocol draft ok order_id=%s path=%s",
-                order_id,
-                saved_path,
-                extra={"tag": "Протокол"},
-            )
-            self.status.set(f"Заказ №{order_id} · протокол: {saved_path.name}")
-            try:
-                import os
-
-                os.startfile(str(saved_path))
-            except OSError as exc:
-                _log.warning(
-                    "protocol startfile failed: %s",
-                    exc,
-                    extra={"tag": "Протокол"},
-                )
-            messagebox.showinfo(
-                "Макет протокола",
-                f"Черновик протокола сохранён:\n{saved_path}\n\n"
-                "Доработайте результаты испытаний вручную.",
-            )
-
-        def on_err(exc: BaseException) -> None:
-            self.status.set("Ошибка макета протокола")
-            messagebox.showerror("Макет протокола", str(exc))
-
-        run_bg_job(
-            self,
-            work,
-            on_success=on_ok,
-            on_error=on_err,
-            name="protocol_draft",
-            tag="Протокол",
-        )
-
     def _build_order_document_pack(self) -> None:
-        """North Star: заявка + КП + макет протокола + summary в одну папку.
+        """Заявка + КП (если есть) + summary в одну папку. Макет протокола не кладём.
 
-        Сборка на **main thread**: python-docx ~1–3 с, без thread/after гонок
-        (раньше worker + after() ломал UI; диалог 1×1 — «пакет не работает»).
+        Сборка на main thread: python-docx ~1-3 с, без thread/after гонок
+        (раньше worker + after() ломал UI; диалог 1x1 — «пакет не работает»).
         """
         order_id = self._get_selected_order_id()
         if order_id is None:
@@ -561,7 +510,7 @@ class OrdersTabMixin:
         messagebox.showinfo(
             "Пакет документов",
             f"Папка:\n{pack_dir}\n\n{names}\n\n"
-            "Макет протокола — черновик; ТУ/ПМИ-выдержки — в следующих итерациях.",
+            "Макет протокола в пакет не входит.",
         )
 
     def _open_selected_order_application(self) -> None:
@@ -621,7 +570,6 @@ class OrdersTabMixin:
         menu.add_command(label="Открыть заявку", command=self._open_selected_order_application)
         menu.add_command(label="Сформировать заявку", command=self._generate_order_application)
         menu.add_command(label="Пакет документов…", command=self._build_order_document_pack)
-        menu.add_command(label="Макет протокола", command=self._generate_order_protocol)
         menu.add_separator()
         if order_id is not None:
             menu.add_command(

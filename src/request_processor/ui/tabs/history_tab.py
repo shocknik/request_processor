@@ -8,6 +8,7 @@ from ...logging_setup import get_logger
 from ...persistence.sqlite_repo import (
     get_recent_calculations,
 )
+from ..widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.gui")
 
@@ -31,12 +32,13 @@ class HistoryTabMixin:
         ):
             self.history_tree.heading(col, text=title)
             self.history_tree.column(col, width=width, anchor="w")
+        configure_zebra(self.history_tree)
         self.history_tree.pack(fill="both", expand=True, pady=(8, 0))
 
     def _load_history(self) -> None:
         for item in self.history_tree.get_children():
             self.history_tree.delete(item)
-        for row in get_recent_calculations(50, self.db_path):
+        for i, row in enumerate(get_recent_calculations(50, self.db_path)):
             self.history_tree.insert(
                 "",
                 "end",
@@ -47,5 +49,6 @@ class HistoryTabMixin:
                     f"{row['total_cost_with_vat']:.2f}",
                     row["source"],
                 ),
+                tags=zebra_tags(i),
             )
 

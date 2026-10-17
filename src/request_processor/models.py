@@ -262,8 +262,17 @@ OrganizationType = Literal[
     "certification_body",
     "testing_center",
     "dealer",
+    "designer",
     "unknown",
 ]
+ORGANIZATION_TYPES: tuple[str, ...] = (
+    "manufacturer",
+    "certification_body",
+    "testing_center",
+    "dealer",
+    "designer",
+    "unknown",
+)
 
 
 class OrganizationExtract(BaseModel):

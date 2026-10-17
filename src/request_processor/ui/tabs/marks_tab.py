@@ -10,6 +10,7 @@ from ...persistence.sqlite_repo import (
     list_cable_marks,
     delete_cable_mark,
 )
+from ..widgets.tree_rows import configure_zebra, zebra_tags
 
 _log = get_logger("ui.gui")
 
@@ -53,6 +54,7 @@ class MarksTabMixin:
         ):
             self.cable_marks_tree.heading(col, text=title)
             self.cable_marks_tree.column(col, width=width, anchor="w", stretch=stretch, minwidth=width)
+        configure_zebra(self.cable_marks_tree)
         self.cable_marks_tree.pack(fill="both", expand=True, pady=(8, 0))
         self.cable_marks_tree.bind("<Double-Button-1>", lambda _e: self._edit_selected_cable_mark())
         self.cable_marks_tree.bind("<Button-3>", self._on_marks_context_menu)
@@ -236,7 +238,7 @@ class MarksTabMixin:
         for item in self.cable_marks_tree.get_children():
             self.cable_marks_tree.delete(item)
         search = self.marks_search_var.get().strip() or None
-        for row in list_cable_marks(search=search, limit=500, db_path=self.db_path):
+        for i, row in enumerate(list_cable_marks(search=search, limit=500, db_path=self.db_path)):
             unit = "мм²" if row.get("size_unit") == "mm2" else "мм"
             self.cable_marks_tree.insert(
                 "",
@@ -251,6 +253,7 @@ class MarksTabMixin:
                     f"{row['characteristic_size']} {unit}",
                     (row.get("document") or "")[:50],
                 ),
+                tags=zebra_tags(i),
             )
 
     def _delete_selected_cable_mark(self) -> None:
